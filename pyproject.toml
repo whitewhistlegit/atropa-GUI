@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atropa"
+version = "0.1.0"
+description = "A YaST-inspired system control center for Arch Linux"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = [
+    "PyGObject>=3.46",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+atropa = "atropa.main:main"
+
+[tool.setuptools.packages.find]
+include = ["atropa*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# Deliberately narrow: this is meant to catch real bugs (syntax errors,
+# duplicate function definitions, unused imports/variables - the exact class
+# of bug the "Practical notes" section of DOCUMENTATION.md calls out as
+# having slipped through before), not to force a full style rewrite of
+# existing code. E741 (ambiguous 1-letter names like `l`), import-sort (I),
+# and bugbear (B) nitpicks are intentionally left out for now - worth
+# revisiting as a separate, deliberate pass rather than mixed into CI setup.
+select = ["E9", "F", "W"]

@@ -1,0 +1,55 @@
+# Example Atropa plugin manifest.
+#
+# This is a REFERENCE COPY for documentation - it does nothing on its own.
+# To actually install it: as root, copy this whole folder to
+# /etc/atropa/plugins/example-plugin/ (the folder name must match `id`
+# below exactly), then enable it from the Add-ons page in Atropa
+# (requires administrator authentication) and restart Atropa.
+#
+# A manifest is pure data - TOML, parsed with Python's stdlib tomllib.
+# There is no code in this file, and none is ever executed from it. Every
+# `action` value below must already exist in
+# atropa/backend/plugin_registry.py's REGISTRY - a manifest can only
+# reference actions Atropa has deliberately exposed to plugins, never
+# an arbitrary command.
+
+id = "example-plugin"
+title = "My Shortcuts"
+description = "A personal dashboard combining a few things I check often."
+author = "you"
+version = "1.0"
+
+[[groups]]
+title = "Quick Checks"
+description = "Read-only - runs immediately when clicked, no confirmation needed."
+
+  [[groups.rows]]
+  title = "Pending Updates"
+  action = "pacman.check_updates"
+
+  [[groups.rows]]
+  title = "Security Audit"
+  action = "hardening.run_audit"
+
+  [[groups.rows]]
+  title = "Compliance Report"
+  action = "compliance.generate_report"
+
+[[groups]]
+title = "Maintenance"
+description = "These change system state - Atropa always shows the real underlying call in a confirm dialog before running one, regardless of the button label below."
+
+  [[groups.rows]]
+  title = "Clean Package Cache"
+  action = "pacman.clean_cache"
+  button_label = "Clean"
+
+  [[groups.rows]]
+  # A row that takes a parameter - `unit` here is passed positionally to
+  # services.restart(unit). Only parameter names the registry entry
+  # actually declares (see RegistryAction.param_names) are used; anything
+  # else in this table is ignored.
+  title = "Restart SSH"
+  action = "services.restart"
+  unit = "sshd"
+  button_label = "Restart"

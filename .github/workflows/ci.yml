@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dev dependencies
+        # Deliberately NOT installing the atropa package/PyGObject itself:
+        # backend/ has zero GTK dependencies by design (see DOCUMENTATION.md
+        # section 3), and pulling in PyGObject would need system GTK4/libadwaita
+        # dev packages just to lint and test pure-Python subprocess wrappers.
+        run: pip install pytest ruff
+
+      - name: Compile check (every file, catches syntax errors immediately)
+        run: python3 -m py_compile atropa/*.py atropa/ui/*.py atropa/ui/pages/*.py atropa/backend/*.py tests/*.py
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Run backend test suite
+        run: python3 -m pytest -v

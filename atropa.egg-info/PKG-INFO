@@ -1,0 +1,206 @@
+Metadata-Version: 2.4
+Name: atropa
+Version: 0.1.0
+Summary: A YaST-inspired system control center for Arch Linux
+License: GPL-3.0-or-later
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: PyGObject>=3.46
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# Atropa
+
+A YaST-inspired system control center for Arch Linux — a single desktop app
+that gives you a friendly, module-based UI over the tools you'd otherwise
+run by hand: `pacman`, `nmcli`, `useradd`/`usermod`, `systemctl`,
+`grub-mkconfig`/`bootctl`, and firewall/SSH hardening.
+
+It doesn't try to hide Arch or replace the CLI — it's a convenience layer.
+Every action it takes is a normal system command, logged to
+`~/.local/share/atropa/actions.log` so you can see exactly what ran.
+
+## Modules
+
+| Module | What it does |
+|---|---|
+| **Package Management** | Search/install/remove packages (official repos + AUR via `paru`/`yay` if installed), full pending-update list with old→new versions (not just a count), full system upgrade with a live-streaming progress dialog (not just a toast at the end), single-package update (explicitly discouraged as a partial upgrade, gated behind a warning), cache cleanup |
+| **System** | Hostname, timezone with NTP sync toggle, locale (including enabling new locales in `/etc/locale.gen` and regenerating them - the step people forget on a fresh Arch install), and keyboard layout (console keymap + X11/Wayland), all via systemd's own `hostnamectl`/`timedatectl`/`localectl` rather than editing config files directly |
+| **Network** | View devices, connect to Wi-Fi, set static IP or DHCP per connection (NetworkManager) |
+| **Users & Groups** | Create/lock/delete users, view group membership |
+| **Services** | Start/stop/enable/disable systemd services, filter by name |
+| **Bootloader** | Detects GRUB or systemd-boot, edit boot timeout, view boot entries, regenerate config |
+| **Security Quick Setup** | A recommended security baseline across firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, and SELinux at once - installs anything missing from scratch, then applies conservative defaults. Apply everything selected in one batch (live-streaming progress), or walk through it step by step with a per-item skip. Never auto-enables USBGuard (opt-in, since it can surprise-block new USB devices) or SELinux enforcing (permissive only) - and is upfront about the two things it deliberately doesn't automate (AppArmor/SELinux kernel parameters, wiring pam_faillock into PAM) because they need a reboot and carry real risk if done wrong |
+| **Security Profiles** | Export the current machine's security posture (which quick-setup modules are configured, AppArmor profile modes, SELinux booleans, SSH hardening) as a portable JSON file; import one to clone that posture onto another machine, with a section checklist so you choose exactly what gets applied. Anything a profile refers to that doesn't exist on the target is skipped and reported, never guessed at. SSH settings default unchecked on import (real remote-lockout risk if a valid-but-wrong-for-this-machine config gets applied) |
+| **Security** | Firewall on/off + port rules (ufw or firewalld), SSH hardening depth (root login, password auth, port, log level, X11 forwarding, max auth tries, rhosts trust, host-based auth, empty passwords, user environment overrides - CIS DIL 5.2), sudoers syntax check |
+| **Hardening** | Security audit score, kernel sysctl hardening (20 curated settings), fail2ban, AppArmor, USBGuard, auditd, known-CVE scanning (arch-audit), login lockout policy (pam_faillock), password complexity policy (pam_pwquality, CIS DIL 5.3.1), and actual auditd rule *content* - not just whether the service is running - covering time-change, identity, network-environment, login/session, and sudoers-scope monitoring (CIS DIL 4.1), with per-path existence checks so a rule set degrades gracefully instead of failing outright on paths a stock Arch install doesn't have |
+| **Compliance Report** | A categorized, scored security-posture report built on top of the Hardening audit plus Service Inventory and Account & File Hygiene, organized into CIS-style categories (Network & Firewall, Authentication & Access Control, Mandatory Access Control, Logging & Auditing, Kernel & Network Hardening, Patch Management, Device Control, Service Inventory, Account & File Hygiene) and exportable as Markdown. Explicitly labeled as CIS-*inspired*, not an official CIS Benchmark assessment or compliance certification - that disclaimer is on the report itself, not just in this README |
+| **Inventory & Hygiene** | Read-only, no auto-fix: a 16-entry special-purpose service inventory (avahi, CUPS, DHCP, LDAP, NFS, DNS, FTP, HTTP, IMAP/POP3, Samba, HTTP proxy, SNMP, rsync daemon, xinetd, legacy telnet/rsh/talk - CIS DIL 2.2/2.3) reporting installed-vs-actually-active per entry rather than a not-quite-accurate server/client split, plus file/account hygiene scanning (passwd/group/shadow/gshadow permissions, duplicate UID/GID/usernames, stray UID-0 accounts, system accounts with a login shell, home directory ownership, empty shadow password fields, root `PATH` integrity - CIS DIL 6.1/6.2) |
+| **File Integrity (AIDE)** | Filesystem integrity baseline and checking (CIS DIL 1.3) via AIDE - AUR-only on Arch since it was dropped from the official repos, so Atropa never builds/installs it (same posture as `paru`/`yay`), only manages it once it's already present. Detects and uses the AUR package's own systemd timer for scheduled checks rather than shipping a duplicate. Baseline init/re-init and on-demand checks stream live progress (a full-tree walk can take minutes); "Update baseline" sits behind an explicit confirmation since it accepts everything currently reported as normal. Confirmed working over 72+ hours on a real bare-metal SELinux install - note the plain `aide` AUR package has had real build failures in the wild, and `aide-selinux` is a working alternative for SELinux users |
+| **AppArmor** | Profile list with enforce/complain/disable control, a "Manage rules" dialog with real network/capability toggles (edits actual profile rule lines), and denial review with `Why?`/`Suggest rule` (built from the denial's own fields - no `audit2allow` equivalent exists for AppArmor) |
+| **SELinux** | Status (sestatus), enforcing/permissive toggle, `restorecon` with a live-streaming progress dialog for recursive relabels, scheduled full relabel, boolean list with `setsebool -P` toggles, recent AVC denials with `audit2why` explanations and `audit2allow`-generated `.te` rules, per-application batch policy review (groups denials by program, drafts + compiles one `.pp` per app for review) |
+| **SELinux: Load Policy** | Paste, load from disk, or receive a generated `.te` from the SELinux page; compiles via `checkmodule` → `semodule_package` → `semodule -i`. Files move from a pending folder to an approved-history folder automatically on successful install, and back to "inactive" (with a one-click reinstall) if later removed. Also supports batch-importing a whole folder of pre-written `.te` files (e.g. a personal or third-party policy addon collection) in one go - these land in the same Pending queue for individual review rather than installing directly, and one bad file in the batch is skipped and reported instead of aborting the rest |
+| **SELinux: Build Policy** | Build, install, and activate a user-maintained SELinux Reference Policy source tree (e.g. an Arch-specific refpolicy fork) - never an AUR package build, which stays the existing "install it yourself first" posture. Three separate steps with separate confirmations: Build (`make conf all`, fully unprivileged, zero effect outside the source tree), Install (`make install`, privileged, writes policy files but doesn't touch the running system), and Activate (sets `SELINUXTYPE=` in `/etc/selinux/config`, maps the default login to `unconfined_u`, schedules a relabel). Never touches kernel boot parameters and never triggers a reboot - both stay your explicit, separate, manual step |
+| **SELinux: Denial Review** | For bootstrapping a policy from scratch: Setup Mode (permissive + a start-time marker) followed by an extensive review scoped to everything since then, not just a "recent N" window - fetches from the kernel log and/or `audit.log`, dedupes to one entry per unique (source type, target type, class, permission) combination, and cross-checks each against whatever Atropa has installed *and currently has loaded*. Splits results into New (needs a rule), Already Allowed But Still Denied (a rule already matches - usually a file-context/labeling problem, with a one-click `restorecon` on the affected path), Policy Doesn't Define This Permission (the kernel knows a permission/class the compiled policy predates, e.g. newer capability bits - not fixable with an allow rule, needs a policy rebuild), and Resolved Since Last Review. "All" always means all still retained by the log backend, not literal all-time history - stated as such rather than implied |
+| **Dependencies** | Every external tool Atropa's modules use, grouped by module, with install status and an Install button where a real pacman package exists - one place to see what's missing instead of discovering it module by module |
+| **Add-ons** | Browse plugins discovered under `/etc/atropa/plugins/`, with validation status, and the root-gated enable/disable toggle. See [Writing a plugin](#writing-a-plugin) below |
+| **Activity & Backups** | Every config file Atropa edits is backed up first; one-click restore, plus a tail of every privileged command that's been run |
+
+## Writing a plugin
+
+Plugins are **declarative TOML manifests, never code**. A manifest describes a
+page - groups and rows - and each row points at an action key that must
+already exist in `atropa/backend/plugin_registry.py`'s curated registry.
+There is no code in a manifest and none is ever executed from one; parsing
+uses Python's stdlib `tomllib` to read plain data, nothing more.
+
+**Two things make this safe enough to expose to less-trusted sources:**
+
+1. **A manifest can only reference pre-approved actions.** It cannot run an
+   arbitrary shell command, only what's already in the registry - and the
+   registry deliberately excludes anything touching users, firewall/SSH,
+   bootloader, SELinux/AppArmor policy, `restorecon`, or Quick
+   Setup/profile import-export. Those stay built-in-only.
+2. **Placing, editing, or enabling a plugin all require root.** Manifest
+   files live under `/etc/atropa/plugins/<plugin-id>/manifest.toml`,
+   which only root can write to - so a non-privileged process (including
+   Atropa's own GTK process, which runs as the desktop user) can't
+   introduce or activate a plugin on its own. Enabling one specifically
+   goes through the same `pkexec` authentication prompt as installing a
+   package or changing a firewall rule (Add-ons page → Enable → restart
+   Atropa to apply).
+
+**What this doesn't solve, worth being upfront about:** removing
+code-execution risk doesn't remove social-engineering risk - a plugin could
+still mislabel a button ("Speed up my computer!" wired to
+`services.stop('sshd')`). The mitigation: for any mutating action, the
+confirm dialog *always* shows the real underlying call
+(`services.stop('sshd')`) alongside the plugin's own label, and a manifest
+can't suppress that.
+
+A full reference example, including a parameterized action, lives at
+[`examples/plugins/example-plugin/manifest.toml`](examples/plugins/example-plugin/manifest.toml)
+(kept passing against the real parser in CI, so it can't silently drift out
+of sync with the code). To install it: as root, copy that folder to
+`/etc/atropa/plugins/example-plugin/`, enable it from the Add-ons page,
+and restart Atropa.
+
+## Safety: backups and validation before risky edits
+
+Every function that edits an existing config file (`sshd_config`, GRUB/systemd-boot
+defaults, `faillock.conf`, `pwquality.conf`, SELinux config, sysctl hardening, fail2ban jail config)
+calls `backup_file()` before touching it. Backups live in
+`~/.local/share/atropa/backups/` with a manifest, browsable and restorable
+from the **Activity & Backups** page.
+
+SSH config specifically goes further: after editing, `sshd -t` validates the
+result *before* `systemctl reload sshd` ever runs. If validation fails, the
+backup is restored automatically and sshd is never touched — verified with an
+end-to-end test that simulates a broken config and confirms both the rollback
+and the skipped reload.
+
+## Architecture
+```
+atropa/
+  main.py                 # GTK4 + libadwaita application entry point
+  ui/
+    main_window.py         # Sidebar (Adw.NavigationSplitView) + module stack
+    pages/                 # One file per module; each subclasses BasePage
+  backend/
+    privilege.py           # Runs commands via pkexec; central audit log
+    pacman.py, network.py, users.py, services.py, bootloader.py, security.py
+```
+
+**Why this split:** the `backend/` modules have zero GTK dependencies —
+they're plain Python wrapping subprocess calls, so they can be unit tested
+or reused (e.g. from a CLI) independently of the UI. The `ui/` layer never
+shells out directly; it only calls into `backend/`.
+
+**Privilege model:** the app runs as your normal user. Anything that needs
+root (installing packages, editing sshd_config, etc.) goes through
+`backend/privilege.py`, which shells out via `pkexec` — this pops a native
+polkit authentication dialog scoped to that one command, the same pattern
+GNOME's own settings tools use. There is no persistent root session and no
+setuid binary.
+
+**Threading:** backend calls block on subprocess I/O, so `BasePage.run_async`
+runs them on a worker thread and marshals the result back to the GTK main
+loop with `GLib.idle_add`, keeping the UI responsive during things like a
+full system upgrade.
+
+## Requirements
+
+- Arch Linux (or an Arch derivative)
+- Python 3.11+
+- GTK4, libadwaita, PyGObject, polkit
+- NetworkManager (for the Network module — systemd-networkd is detected
+  but read-only for now)
+
+## Install
+
+```bash
+git clone <this-repo> atropa && cd atropa
+./install.sh
+```
+
+This installs system packages via pacman, installs the app in an isolated
+pipx-managed venv (not a plain `pip install` into system Python - see
+`install.sh` for why that matters on Arch specifically), drops a
+`.desktop` launcher into your applications menu, and installs a polkit
+policy so authentication prompts read "Atropa wants to..." instead of a
+generic message.
+
+### Manual / dev setup
+
+```bash
+sudo pacman -S --needed python-gobject gtk4 libadwaita polkit
+python3 -m atropa.main
+```
+
+### Upgrading from ArchYaST
+
+This project was renamed from ArchYaST to Atropa. If you have an old
+ArchYaST install, its data lives under `~/.local/share/archyast` and
+(if you used plugins) `/etc/archyast` - Atropa won't find or use it
+automatically. Open the **Activity & Backups** page after installing;
+if any old data is detected, a "Migrate from ArchYaST" section appears
+there with a one-click migrate per data type. Migrating never deletes
+or overwrites anything - it only copies in what's missing at the new
+location - and removing the old data afterward is a separate, explicit
+step you trigger yourself once you're satisfied everything came across.
+
+## Known limitations / next steps
+
+- **systemd-networkd** is detected and read-only for now — write support
+  (editing `.network` files) isn't implemented yet.
+- **GRUB reinstall** (writing to a disk's MBR/EFI) is intentionally not
+  automated — picking the wrong target disk is destructive, so that stays
+  a terminal task (`grub-install`) with a pointer in the UI.
+- **AUR builds**: search/install shells out to `paru`/`yay` if present, but
+  the app doesn't sandbox or review PKGBUILDs — same trust model as using
+  those tools directly.
+- No i18n/l10n yet.
+
+## Testing
+
+`backend/` has zero GTK dependencies, so it's fully unit tested:
+`pytest` suite in `tests/`, one file per backend module, subprocess calls
+faked at the single boundary everything funnels through
+(`atropa.backend.privilege`). Run it with:
+
+```bash
+pip install pytest
+python3 -m pytest
+```
+
+Lint with `ruff check .` (`pip install ruff`). Both run in CI
+(`.github/workflows/ci.yml`) on every push/PR, across Python 3.11 and 3.12.
+
+## Security notes
+
+- All privileged subprocess calls use argument lists, never `shell=True`,
+  to avoid shell-injection from package names, hostnames, etc.
+- Password input (e.g. `chpasswd`) is passed via stdin, never as a
+  command-line argument (which would leak into `ps` output).
+- Destructive actions (remove package, delete user, upgrade system, clean
+  cache) require a confirmation dialog before running.

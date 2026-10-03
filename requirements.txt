@@ -1,0 +1,7 @@
+# PyGObject is best installed from your distro's package manager on Arch,
+# since it needs system GTK4/libadwaita dev headers to build:
+#
+#   sudo pacman -S python-gobject gtk4 libadwaita polkit
+#
+# This file is provided for reference / non-Arch dev environments only.
+PyGObject>=3.46
