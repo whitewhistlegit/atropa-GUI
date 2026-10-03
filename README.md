@@ -1,5 +1,5 @@
 # atropa-GUI
- Atropa-GUI
+ Atropa-GUI for ArchLinux
 
 
 # Atropa — Technical Documentation
