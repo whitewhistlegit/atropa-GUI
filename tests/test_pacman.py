@@ -7,13 +7,15 @@ from atropa.backend import pacman
 
 
 # --------------------------------------------------------------- check_updates --
+# fake_which leaves checkupdates "uninstalled" unless a test adds it, so
+# these don't depend on whether the machine running them has pacman-contrib.
 
-def test_check_updates_empty_when_up_to_date(fake_run):
+def test_check_updates_empty_when_up_to_date(fake_run, fake_which):
     fake_run.set_response(["pacman", "-Qu"], stdout="", returncode=1)
     assert pacman.check_updates() == []
 
 
-def test_check_updates_parses_normal_lines(fake_run):
+def test_check_updates_parses_normal_lines(fake_run, fake_which):
     fake_run.set_response(
         ["pacman", "-Qu"],
         stdout="firefox 120.0-1 -> 121.0-1\nlinux 6.6.1-1 -> 6.6.2-1\n",
@@ -25,7 +27,7 @@ def test_check_updates_parses_normal_lines(fake_run):
     assert updates[1] == pacman.PendingUpdate("linux", "6.6.1-1", "6.6.2-1")
 
 
-def test_check_updates_handles_ignored_suffix(fake_run):
+def test_check_updates_handles_ignored_suffix(fake_run, fake_which):
     fake_run.set_response(
         ["pacman", "-Qu"],
         stdout="glibc 2.38-1 -> 2.39-1 [ignored]\n",
@@ -35,22 +37,43 @@ def test_check_updates_handles_ignored_suffix(fake_run):
     assert updates == [pacman.PendingUpdate("glibc", "2.38-1", "2.39-1")]
 
 
-def test_check_updates_falls_back_to_name_only_on_unexpected_format(fake_run):
+def test_check_updates_falls_back_to_name_only_on_unexpected_format(fake_run, fake_which):
     fake_run.set_response(["pacman", "-Qu"], stdout="weirdformat\n", returncode=0)
     updates = pacman.check_updates()
     assert updates == [pacman.PendingUpdate("weirdformat", "", "")]
 
 
-# --------------------------------------------------------------- update_single_package --
+def test_check_updates_asks_the_mirrors_via_checkupdates_without_root(fake_run, fake_which):
+    fake_which.update({"checkupdates", "fakeroot"})
+    fake_run.set_response(["checkupdates"], stdout="firefox 120.0-1 -> 121.0-1\n", returncode=0)
+    assert pacman.check_updates() == [pacman.PendingUpdate("firefox", "120.0-1", "121.0-1")]
+    assert fake_run.calls == [["checkupdates"]]
 
-def test_update_single_package_requires_name():
-    with pytest.raises(ValueError):
-        pacman.update_single_package("")
+
+def test_check_updates_checkupdates_exit_2_means_up_to_date(fake_run, fake_which):
+    fake_which.update({"checkupdates", "fakeroot"})
+    fake_run.set_response(["checkupdates"], stdout="", returncode=2)
+    assert pacman.check_updates() == []
 
 
-def test_update_single_package_runs_pacman_s(fake_run, fake_which):
-    pacman.update_single_package("firefox")
-    assert fake_run.last_call() == ["pkexec", "pacman", "-S", "--noconfirm", "firefox"]
+def test_check_updates_checkupdates_failure_is_an_error_not_up_to_date(fake_run, fake_which):
+    fake_which.update({"checkupdates", "fakeroot"})
+    fake_run.set_response(["checkupdates"], stderr="==> ERROR: Cannot fetch updates", returncode=1)
+    with pytest.raises(RuntimeError, match="Cannot fetch updates"):
+        pacman.check_updates()
+
+
+def test_check_updates_falls_back_to_pacman_qu_without_fakeroot(fake_run, fake_which):
+    # checkupdates exits 1 ("Cannot find the fakeroot binary") without it.
+    fake_which.add("checkupdates")
+    fake_run.set_response(["pacman", "-Qu"], stdout="firefox 120.0-1 -> 121.0-1\n")
+    assert pacman.check_updates() == [pacman.PendingUpdate("firefox", "120.0-1", "121.0-1")]
+    assert fake_run.call_containing("checkupdates") is None
+
+
+def test_nothing_refreshes_the_real_database_without_upgrading():
+    # `pacman -Sy` on its own is what turned a later install into a partial upgrade.
+    assert not hasattr(pacman, "sync_database")
 
 
 # --------------------------------------------------------------- list_* --
@@ -89,15 +112,19 @@ extra/htop 3.3.0-1
 def test_parse_ss_output_basic():
     packages = pacman._parse_ss_output(SS_OUTPUT)
     assert packages == [
-        pacman.Package(name="bash", version="5.2.021-1", installed=True, description="The GNU Bourne Again shell"),
-        pacman.Package(name="htop", version="3.3.0-1", installed=False, description="Interactive process viewer"),
+        pacman.Package(
+            name="bash", version="5.2.021-1", installed=True, description="The GNU Bourne Again shell", repo="core"
+        ),
+        pacman.Package(
+            name="htop", version="3.3.0-1", installed=False, description="Interactive process viewer", repo="extra"
+        ),
     ]
 
 
 def test_parse_ss_output_handles_missing_description_line():
     text = "core/bash 5.2.021-1 [installed]\n"
     packages = pacman._parse_ss_output(text)
-    assert packages == [pacman.Package(name="bash", version="5.2.021-1", installed=True, description="")]
+    assert packages == [pacman.Package(name="bash", version="5.2.021-1", installed=True, description="", repo="core")]
 
 
 def test_parse_ss_output_empty_text():
@@ -110,8 +137,7 @@ def test_search_merges_repo_and_aur_when_helper_present(fake_run, fake_which):
     fake_run.set_response(["paru", "-Ss", "--aur"], stdout="aur/vim-plugin 1.0-1\n    a plugin\n")
 
     results = pacman.search("vim", include_aur=True)
-    names = [p.name for p in results]
-    assert names == ["vim", "vim-plugin"]
+    assert [(p.repo, p.name) for p in results] == [("core", "vim"), ("aur", "vim-plugin")]
 
 
 def test_search_skips_aur_when_no_helper(fake_run, fake_which):
@@ -136,7 +162,28 @@ def test_install_requires_packages():
 
 def test_install_runs_pacman_with_all_names(fake_run, fake_which):
     pacman.install(["vim", "htop"])
-    assert fake_run.last_call() == ["pkexec", "pacman", "-S", "--noconfirm", "vim", "htop"]
+    assert fake_run.last_call() == ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "vim", "htop"]
+
+
+def test_install_refuses_while_the_database_is_ahead_of_installed_packages(fake_run, fake_which):
+    # Something ran `pacman -Sy`: installing from that database now is a partial upgrade.
+    fake_run.set_response(["pacman", "-Qu"], stdout="glibc 2.38-1 -> 2.39-1\nopenssl 3.1-1 -> 3.2-1\n")
+    with pytest.raises(pacman.PartialUpgradeError, match="2 installed package.*glibc, openssl"):
+        pacman.install(["vim"])
+    assert fake_run.call_containing("pkexec") is None
+
+
+def test_install_ignores_packages_held_back_by_ignorepkg(fake_run, fake_which):
+    fake_run.set_response(["pacman", "-Qu"], stdout="linux 6.1-1 -> 6.2-1 [ignored]\n")
+    pacman.install(["vim"])
+    assert fake_run.last_call() == ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "vim"]
+
+
+def test_upgrade_and_install_is_one_full_upgrade(monkeypatch):
+    seen = []
+    monkeypatch.setattr(pacman, "run_privileged_streaming", lambda argv, on_line: seen.append(argv))
+    pacman.upgrade_and_install_streaming(["vim"], lambda _line: None)
+    assert seen == [["pacman", "-Syu", "--needed", "--noconfirm", "vim"]]
 
 
 def test_remove_requires_packages():

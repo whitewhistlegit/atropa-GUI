@@ -18,6 +18,8 @@ from __future__ import annotations
 import shutil
 from dataclasses import dataclass
 
+from .selinux import SELINUX_TOOL_PACKAGES
+
 
 @dataclass
 class Dependency:
@@ -35,6 +37,17 @@ class DependencyStatus:
     installed: bool
 
 
+def _aur_selinux_tool(tool: str, description: str) -> Dependency:
+    # Arch has no SELinux userspace in its official repositories, so these
+    # get a note instead of an Install button that would run `pacman -S`
+    # and fail with "target not found".
+    package = SELINUX_TOOL_PACKAGES[tool]
+    return Dependency(
+        tool, "SELinux", description, None,
+        note=f"AUR-only - install '{package}' with your AUR helper (Arch has no official SELinux packages)",
+    )
+
+
 # One entry per external tool, grouped roughly in sidebar module order.
 CATALOG: list[Dependency] = [
     Dependency("pkexec", "Core", "Runs every privileged action - Atropa has no other way to gain root", "polkit", required=True),
@@ -48,6 +61,12 @@ CATALOG: list[Dependency] = [
         "yay", "Package Management", "Alternative AUR helper for searching/installing AUR packages", None,
         note="AUR-only - not installable via pacman -S; build it from the AUR or install another AUR helper first",
     ),
+    Dependency(
+        "checkupdates", "Package Management",
+        "Checks the mirrors for updates without root and without refreshing the real package database",
+        "pacman-contrib",
+    ),
+    Dependency("fakeroot", "Package Management", "checkupdates won't run without it", "fakeroot"),
     Dependency("systemctl", "Services", "Start/stop/enable/disable systemd services", "systemd", required=True),
     Dependency("nmcli", "Network", "Manage connections, Wi-Fi, static IP via NetworkManager", "networkmanager"),
     Dependency("networkctl", "Network", "Read-only status for systemd-networkd, if used instead of NetworkManager", "systemd"),
@@ -63,15 +82,21 @@ CATALOG: list[Dependency] = [
     Dependency("usbguard", "Hardening", "USB device allow-listing (BadUSB protection)", "usbguard"),
     Dependency("auditctl", "Hardening", "Kernel audit logging status", "audit"),
     Dependency("arch-audit", "Hardening", "Scans installed packages against the Arch Security Team's CVE feed", "arch-audit"),
-    Dependency("sestatus", "SELinux", "SELinux status reporting", "policycoreutils", note="Arch has no official SELinux policy - most users get this via an AUR policy package (e.g. refpolicy-arch)"),
-    Dependency("getsebool", "SELinux", "List SELinux policy booleans", "policycoreutils"),
-    Dependency("setsebool", "SELinux", "Persist SELinux boolean changes", "policycoreutils"),
-    Dependency("restorecon", "SELinux", "Fix SELinux file contexts", "policycoreutils"),
-    Dependency("semodule", "SELinux", "Load/remove/list SELinux policy modules", "policycoreutils"),
-    Dependency("checkmodule", "SELinux", "Compile .te policy source into a loadable module", "policycoreutils"),
-    Dependency("semodule_package", "SELinux", "Package a compiled module into a .pp file", "policycoreutils"),
-    Dependency("audit2why", "SELinux", "Explain why an AVC denial was blocked", "audit"),
-    Dependency("audit2allow", "SELinux", "Draft an allow rule from AVC denials", "audit"),
+    *(
+        _aur_selinux_tool(tool, description)
+        for tool, description in (
+            ("sestatus", "SELinux status reporting"),
+            ("getsebool", "List SELinux policy booleans"),
+            ("setsebool", "Persist SELinux boolean changes"),
+            ("restorecon", "Fix SELinux file contexts"),
+            ("semodule", "Load/remove/list SELinux policy modules"),
+            ("checkmodule", "Compile .te policy source into a loadable module"),
+            ("semodule_package", "Package a compiled module into a .pp file"),
+            ("audit2why", "Explain why an AVC denial was blocked"),
+            ("audit2allow", "Draft an allow rule from AVC denials"),
+            ("semanage", "Map logins to SELinux users when activating a built policy"),
+        )
+    ),
     Dependency("ausearch", "SELinux", "Search /var/log/audit/audit.log for denials", "audit"),
     Dependency(
         "aide", "File Integrity", "Filesystem integrity baseline/checking (CIS 1.3)", None,

@@ -33,6 +33,12 @@ from . import selinux as selinux_mod
 from .privilege import CommandResult, backup_file, run_privileged, run_unprivileged
 
 SYSCTL_HARDENING_FILE = "/etc/sysctl.d/99-atropa-hardening.conf"
+# The kernel's active LSMs, comma separated, and AppArmor's own "enabled"
+# flag - both world-readable, and both say what's actually running.
+LSM_LIST = Path("/sys/kernel/security/lsm")
+APPARMOR_ENABLED_PARAM = Path("/sys/module/apparmor/parameters/enabled")
+# What the Arch wiki (AppArmor#Installation) adds to the kernel command line.
+APPARMOR_KERNEL_PARAMETER = "lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
 FAILLOCK_CONF = Path("/etc/security/faillock.conf")
 PAM_SYSTEM_LOGIN = Path("/etc/pam.d/system-login")
 PAM_PASSWD = Path("/etc/pam.d/passwd")
@@ -62,16 +68,28 @@ SYSCTL_RECOMMENDATIONS: list[tuple[str, str, str]] = [
 ]
 
 
+# Values stricter than the recommendation - these count as hardened too,
+# and applying the recommendation must not lower them.
+_STRICTER_SYSCTL_VALUES = {
+    "kernel.yama.ptrace_scope": {"2", "3"},  # admin-only attach / no attaching at all
+    "kernel.sysrq": {"0"},  # SysRq disabled entirely
+}
+
+
 @dataclass
 class SysctlSetting:
     key: str
     recommended: str
     description: str
-    current: str | None = None
+    current: str | None = None  # None: the key doesn't exist on this kernel, or couldn't be read
 
     @property
     def is_hardened(self) -> bool:
-        return self.current == self.recommended
+        return self.current == self.recommended or self.current in _STRICTER_SYSCTL_VALUES.get(self.key, ())
+
+    @property
+    def is_stricter(self) -> bool:
+        return self.current in _STRICTER_SYSCTL_VALUES.get(self.key, ())
 
 
 @dataclass
@@ -107,9 +125,16 @@ def get_sysctl_status() -> list[SysctlSetting]:
 
 
 def apply_sysctl_hardening(keys: list[str]) -> CommandResult:
-    """Write the selected recommended settings to a dedicated sysctl.d file and reload."""
-    chosen = {k: v for (k, v, _d) in SYSCTL_RECOMMENDATIONS if k in keys}
+    """
+    Write the selected recommended settings to a dedicated sysctl.d file
+    and reload. A key already set to something stricter than the
+    recommendation (e.g. ptrace_scope 3) is left out rather than lowered.
+    """
+    stricter = {s.key for s in get_sysctl_status() if s.key in keys and s.is_stricter}
+    chosen = {k: v for (k, v, _d) in SYSCTL_RECOMMENDATIONS if k in keys and k not in stricter}
     if not chosen:
+        if stricter:
+            return CommandResult(0, "already stricter than recommended: " + ", ".join(sorted(stricter)), "")
         raise ValueError("No settings selected")
 
     lines = ["# Managed by Atropa - kernel hardening. Edit freely; this file is only", "# rewritten when you re-apply from the Hardening page.", ""]
@@ -125,6 +150,17 @@ def apply_sysctl_hardening(keys: list[str]) -> CommandResult:
 
 def sysctl_hardening_file_exists() -> bool:
     return Path(SYSCTL_HARDENING_FILE).exists()
+
+
+def sysctl_hardening_gaps() -> tuple[list[str], int]:
+    """
+    (recommended keys not in effect right now, how many recommended keys
+    this kernel has). Read live with sysctl rather than from Atropa's
+    sysctl.d file: the file can exist while a later file overrides it, or
+    be missing while the settings come from somewhere else.
+    """
+    available = [s for s in get_sysctl_status() if s.current is not None]
+    return [s.key for s in available if not s.is_hardened], len(available)
 
 
 # -------------------------------------------------------------- fail2ban --
@@ -167,14 +203,28 @@ def fail2ban_protect_ssh() -> CommandResult:
 
 # -------------------------------------------------------------- AppArmor --
 
+def apparmor_kernel_enabled() -> bool:
+    """
+    True if AppArmor is one of the kernel's active LSMs. Read from the
+    kernel itself rather than the boot command line: the Arch wiki now
+    enables it with lsm=...,apparmor,..., which the old "apparmor=1" check
+    never matched, and apparmor=1 alone doesn't enable it on a kernel
+    whose built-in LSM list leaves it out.
+    """
+    try:
+        return "apparmor" in LSM_LIST.read_text().strip().split(",")
+    except OSError:
+        pass  # securityfs not mounted, or not readable
+    try:
+        return APPARMOR_ENABLED_PARAM.read_text().strip() == "Y"
+    except OSError:
+        return False
+
+
 def apparmor_status() -> ServiceHardeningStatus:
     installed = shutil.which("aa-status") is not None or Path("/sys/kernel/security/apparmor").exists()
     active = run_unprivileged(["systemctl", "is-active", "apparmor"]).stdout.strip() == "active"
-
-    kernel_enabled = False
-    cmdline_path = Path("/proc/cmdline")
-    if cmdline_path.exists():
-        kernel_enabled = "apparmor=1" in cmdline_path.read_text()
+    kernel_enabled = apparmor_kernel_enabled()
 
     return ServiceHardeningStatus(
         installed=installed,
@@ -186,8 +236,8 @@ def apparmor_status() -> ServiceHardeningStatus:
 
 def apparmor_enable_service() -> CommandResult:
     """
-    Enables the apparmor.service. Note: AppArmor also needs `apparmor=1
-    security=apparmor` on the kernel command line to actually enforce
+    Enables the apparmor.service. Note: AppArmor also has to be in the
+    kernel's LSM list (APPARMOR_KERNEL_PARAMETER) to actually enforce
     anything - we don't touch bootloader config automatically since a
     bad kernel parameter can affect bootability. The UI surfaces this.
     """
@@ -196,11 +246,19 @@ def apparmor_enable_service() -> CommandResult:
 
 # -------------------------------------------------------------- USBGuard --
 
+USBGUARD_RULES = "/etc/usbguard/rules.conf"
+
+
 def usbguard_status() -> ServiceHardeningStatus:
     installed = shutil.which("usbguard") is not None
     active = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
     enabled = run_unprivileged(["systemctl", "is-enabled", "usbguard"]).stdout.strip() == "enabled"
-    has_policy = Path("/etc/usbguard/rules.conf").exists() and Path("/etc/usbguard/rules.conf").stat().st_size > 0
+    try:
+        has_policy: bool | None = Path(USBGUARD_RULES).stat().st_size > 0
+    except FileNotFoundError:
+        has_policy = False
+    except PermissionError:
+        has_policy = None  # /etc/usbguard isn't searchable by us
     return ServiceHardeningStatus(installed=installed, active=active, enabled=enabled, extra={"has_policy": has_policy})
 
 
@@ -209,11 +267,32 @@ def usbguard_generate_and_enable() -> CommandResult:
     Generates an allow-list policy from devices plugged in RIGHT NOW, then
     enables enforcement. Anything plugged in later will need approval via
     `usbguard allow-device` (or a GUI applet) - that's the point of the tool.
+
+    The policy is generated first and only written once it's in hand: the
+    old `generate-policy > rules.conf` emptied the file before
+    generate-policy ran, with no backup, so a failure left an empty
+    policy - which blocks every device, keyboards included, the next time
+    the daemon starts. It's written with mode 0600 because usbguard-daemon
+    refuses a rules file with any other mode, which a freshly created one
+    (0644 from root's umask) had.
     """
-    generate = run_privileged(["bash", "-c", "usbguard generate-policy > /etc/usbguard/rules.conf"])
+    generate = run_privileged(["usbguard", "generate-policy"])
     if not generate.ok:
         return generate
-    return run_privileged(["systemctl", "enable", "--now", "usbguard"])
+    policy = generate.stdout
+    if not any(line.split(" ", 1)[0] in ("allow", "block", "reject") for line in policy.splitlines()):
+        return CommandResult(1, "", "usbguard generate-policy returned no rules - the current policy was left as it is")
+
+    backup_file(USBGUARD_RULES)
+    write = run_privileged(["install", "-m", "0600", "/dev/stdin", USBGUARD_RULES], input_text=policy)
+    if not write.ok:
+        return write
+    was_running = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
+    result = run_privileged(["systemctl", "enable", "--now", "usbguard"])
+    if result.ok and was_running:
+        # enable --now leaves a running daemon on the policy it loaded at start.
+        result = run_privileged(["systemctl", "restart", "usbguard"])
+    return result
 
 
 def usbguard_disable() -> CommandResult:
@@ -436,12 +515,21 @@ def run_audit() -> list[AuditCheck]:
         if not ssh.installed:
             checks.append(AuditCheck("SSH root login", "info", "OpenSSH not installed"))
         else:
-            if ssh.root_login.lower() in ("no", "prohibit-password"):
-                checks.append(AuditCheck("SSH root login", "pass", f"PermitRootLogin {ssh.root_login}"))
+            # Judged on the effective values (OpenSSH's defaults where
+            # sshd_config sets nothing): an unset PermitRootLogin is
+            # prohibit-password, an unset PasswordAuthentication is yes.
+            root_login = ssh.effective("root_login")
+            password_auth = ssh.effective("password_auth")
+            caveat = ""
+            if ssh.unreadable_includes:
+                caveat = f" - but couldn't read {', '.join(ssh.unreadable_includes)}, which may override it"
+            if root_login.lower() in ("no", "prohibit-password", "without-password"):
+                status = "warn" if caveat else "pass"
+                checks.append(AuditCheck("SSH root login", status, f"PermitRootLogin {root_login}{caveat}"))
             else:
-                checks.append(AuditCheck("SSH root login", "fail", f"PermitRootLogin {ssh.root_login}"))
-            if ssh.password_auth.lower() == "no":
-                checks.append(AuditCheck("SSH password auth", "pass", "Key-only authentication"))
+                checks.append(AuditCheck("SSH root login", "fail", f"PermitRootLogin {root_login}"))
+            if password_auth.lower() == "no":
+                checks.append(AuditCheck("SSH password auth", "warn" if caveat else "pass", f"Key-only authentication{caveat}"))
             else:
                 checks.append(AuditCheck("SSH password auth", "warn", "Password authentication is allowed"))
     except Exception as exc:  # noqa: BLE001
@@ -459,9 +547,13 @@ def run_audit() -> list[AuditCheck]:
     if not aa.installed:
         checks.append(AuditCheck("AppArmor", "info", "Not installed (optional if you use SELinux instead)"))
     elif aa.extra.get("kernel_enabled") and aa.active:
-        checks.append(AuditCheck("AppArmor", "pass", "Enforcing at kernel level"))
+        checks.append(AuditCheck("AppArmor", "pass", "Enabled in the kernel, profiles loaded at boot"))
+    elif not aa.extra.get("kernel_enabled"):
+        checks.append(
+            AuditCheck("AppArmor", "warn", f"Installed, but not enabled in the kernel ({APPARMOR_KERNEL_PARAMETER})")
+        )
     else:
-        checks.append(AuditCheck("AppArmor", "warn", "Installed but not fully enabled (service and/or kernel param)"))
+        checks.append(AuditCheck("AppArmor", "warn", "Enabled in the kernel, but apparmor.service isn't running"))
 
     try:
         se = selinux_mod.get_status()
@@ -503,10 +595,15 @@ def run_audit() -> list[AuditCheck]:
     else:
         checks.append(AuditCheck("auditd", "warn", "Installed but not running"))
 
-    if sysctl_hardening_file_exists():
-        checks.append(AuditCheck("Kernel sysctl hardening", "pass", "Atropa hardening profile applied"))
+    gaps, available = sysctl_hardening_gaps()
+    if not available:
+        checks.append(AuditCheck("Kernel sysctl hardening", "info", "Couldn't read any sysctl values"))
+    elif not gaps:
+        checks.append(AuditCheck("Kernel sysctl hardening", "pass", f"All {available} recommended settings in effect"))
     else:
-        checks.append(AuditCheck("Kernel sysctl hardening", "warn", "Recommended sysctl settings not applied"))
+        shown = ", ".join(gaps[:3]) + (f" and {len(gaps) - 3} more" if len(gaps) > 3 else "")
+        detail = f"{len(gaps)} of {available} recommended settings not in effect: {shown}"
+        checks.append(AuditCheck("Kernel sysctl hardening", "warn", detail))
 
     try:
         vulns = vulnerability_scan()

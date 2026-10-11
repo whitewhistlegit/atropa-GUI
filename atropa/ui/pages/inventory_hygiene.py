@@ -101,7 +101,7 @@ class InventoryHygienePage(BasePage):
     # -- Account & File Hygiene ----------------------------------------------
 
     def _scan_hygiene(self) -> None:
-        self.hygiene_summary_row.set_title("Scanning accounts & files…")
+        self.hygiene_summary_row.set_title(esc("Scanning accounts & files…"))
         self.clear_rows(self.hygiene_group, self._hygiene_rows)
         self._hygiene_rows = [self.start_loading(self.hygiene_group, "Checking accounts, homes, and permissions…")]
         self.run_async(account_hygiene.scan_all, self._on_hygiene_scanned)

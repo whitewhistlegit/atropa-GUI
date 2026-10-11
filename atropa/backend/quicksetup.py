@@ -59,8 +59,9 @@ CATALOG: list[SetupItem] = [
     ),
     SetupItem(
         "apparmor", "AppArmor",
-        "Installs and enables the AppArmor service. Actual enforcement also needs an "
-        "'apparmor=1 security=apparmor' kernel parameter and a reboot - not automated here.",
+        "Installs and enables the AppArmor service. Actual enforcement also needs AppArmor in "
+        f"the kernel's LSM list ('{hardening.APPARMOR_KERNEL_PARAMETER}') and a reboot - not "
+        "automated here.",
     ),
     SetupItem(
         "auditd", "auditd",
@@ -78,9 +79,11 @@ CATALOG: list[SetupItem] = [
     ),
     SetupItem(
         "selinux", "SELinux",
-        "Installs SELinux userspace tools (policycoreutils, checkpolicy, audit). Enabling "
-        "enforcement also needs a policy package (e.g. refpolicy-arch from the AUR), a "
-        "kernel parameter, and a reboot - not automated here.",
+        "Installs audit (for reviewing denials) and puts an enabled SELinux into permissive "
+        "mode. SELinux's own tools and a policy are AUR-only on Arch (policycoreutils, "
+        "checkpolicy, semodule-utils, selinux-python, and e.g. refpolicy-arch) - install those "
+        "with your AUR helper first. Enabling enforcement also needs a kernel parameter and a "
+        "reboot - not automated here.",
     ),
 ]
 
@@ -106,17 +109,20 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
         return CommandResult(0, "already active", "")
 
     ssh = security.ssh_status()
-    port = ssh.port if ssh.installed else "22"
-    on_line(f"Allowing SSH (port {port}) before enabling the firewall, so this doesn't lock you out...")
-    allow_result = security.firewall_allow_port(port)
-    if not allow_result.ok:
-        # Enabling deny-by-default without the SSH rule in place is exactly
-        # the remote lockout this ordering exists to prevent - stop here.
-        on_line(
-            f"Couldn't allow SSH port {port}: {allow_result.stderr.strip() or 'unknown error'}. "
-            "Not enabling the firewall, so SSH access isn't cut off."
-        )
-        return allow_result
+    # Every port sshd listens on - Port lines accumulate, and ListenAddress
+    # can name its own - not just the first one.
+    ports = (ssh.ports or ["22"]) if ssh.installed else ["22"]
+    for port in ports:
+        on_line(f"Allowing SSH (port {port}) before enabling the firewall, so this doesn't lock you out...")
+        allow_result = security.firewall_allow_port(port)
+        if not allow_result.ok:
+            # Enabling deny-by-default without the SSH rule in place is exactly
+            # the remote lockout this ordering exists to prevent - stop here.
+            on_line(
+                f"Couldn't allow SSH port {port}: {allow_result.stderr.strip() or 'unknown error'}. "
+                "Not enabling the firewall, so SSH access isn't cut off."
+            )
+            return allow_result
 
     on_line("Enabling firewall...")
     result = security.firewall_enable()
@@ -180,9 +186,9 @@ def _apply_apparmor(on_line: Callable[[str], None]) -> CommandResult:
     if not status.extra.get("kernel_enabled"):
         on_line(
             "AppArmor isn't enabled at the kernel level yet - that needs "
-            "'apparmor=1 security=apparmor' added to your kernel parameters and a reboot, "
-            "which isn't automated here. Installing/enabling the service now so it's ready "
-            "once that's done."
+            f"'{hardening.APPARMOR_KERNEL_PARAMETER}' added to your kernel parameters and a "
+            "reboot, which isn't automated here. Installing/enabling the service now so it's "
+            "ready once that's done."
         )
 
     result = hardening.apparmor_enable_service()
@@ -221,19 +227,30 @@ def _apply_usbguard(on_line: Callable[[str], None]) -> CommandResult:
 
 def _apply_selinux(on_line: Callable[[str], None]) -> CommandResult:
     on_line("=== SELinux ===")
-    if shutil.which("sestatus") is None:
-        on_line("Installing SELinux userspace tools (policycoreutils, checkpolicy, audit)...")
-        result = pacman.install(["policycoreutils", "checkpolicy", "audit"])
+    if shutil.which("ausearch") is None:
+        on_line("Installing audit (ausearch, for reviewing denials)...")
+        result = pacman.install(["audit"])
         if not result.ok:
-            on_line(f"Failed to install SELinux tools: {result.stderr.strip()}")
+            on_line(f"Failed to install audit: {result.stderr.strip()}")
             return result
+
+    if shutil.which("sestatus") is None:
+        # The old `pacman -S policycoreutils checkpolicy audit` could only
+        # fail: the SELinux userspace isn't in Arch's official repositories.
+        packages = sorted(set(selinux.SELINUX_TOOL_PACKAGES.values()))
+        on_line(
+            "SELinux's userspace tools aren't in Arch's official repositories - install them from the "
+            f"AUR ({', '.join(packages)}) with your AUR helper, along with a policy package (e.g. "
+            "refpolicy-arch), then run this step again."
+        )
+        return CommandResult(0, "skipped: SELinux userspace tools are AUR-only - a manual step", "")
 
     status = selinux.get_status()
     if not status.available:
         on_line(
             "SELinux isn't enabled at the kernel level. That needs a policy package (e.g. "
             "refpolicy-arch from the AUR), a kernel parameter, and a reboot - none of which "
-            "is automated here. Tools are installed and ready for when you do this manually."
+            "is automated here. The tools are installed and ready for when you do this manually."
         )
         return CommandResult(0, "tools installed; kernel enablement is a manual step", "")
 
@@ -269,7 +286,12 @@ def status_summary() -> dict[str, str]:
     f2b = hardening.fail2ban_status()
     summary["fail2ban"] = "Active" if f2b.active else ("Installed, inactive" if f2b.installed else "Not installed")
 
-    summary["sysctl"] = "Configured" if hardening.sysctl_hardening_file_exists() else "Not configured"
+    gaps, available = hardening.sysctl_hardening_gaps()
+    summary["sysctl"] = (
+        "Couldn't read sysctl values" if not available
+        else "All recommended settings in effect" if not gaps
+        else f"{len(gaps)} of {available} recommended settings not in effect"
+    )
 
     if hardening.faillock_wired_into_pam():
         fl = hardening.faillock_status()
@@ -316,6 +338,10 @@ def apply_items(keys: list[str], on_line: Callable[[str], None]) -> dict[str, Co
     results: dict[str, CommandResult] = {}
     ordered_keys = [key for key in _ORDER if key in keys]
     for key in ordered_keys:
-        results[key] = _APPLIERS[key](on_line)
+        try:
+            results[key] = _APPLIERS[key](on_line)
+        except Exception as exc:  # noqa: BLE001 - one step's error (e.g. a refused install) mustn't skip the rest
+            on_line(f"Failed: {exc}")
+            results[key] = CommandResult(1, "", str(exc))
         on_line("")
     return results

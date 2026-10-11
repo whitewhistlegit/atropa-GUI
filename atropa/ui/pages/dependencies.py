@@ -111,7 +111,7 @@ class DependenciesPage(BasePage):
     def _on_install_clicked(self, _btn: Gtk.Button, package: str) -> None:
         self.confirm(
             f"Install {package}?",
-            f"Runs 'pacman -S {package}'.",
+            f"Runs 'pacman -S --needed {package}'.",
             "Install",
-            lambda: self.run_async(lambda: pacman.install([package]), self.handle_command_result),
+            lambda: self.run_action(lambda: pacman.install([package]), self.handle_command_result),
         )

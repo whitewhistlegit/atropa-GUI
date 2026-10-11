@@ -21,6 +21,31 @@ from .privilege import CommandResult, backup_file, run_privileged, run_privilege
 
 SELINUX_CONFIG = Path("/etc/selinux/config")
 
+# Which package ships each SELinux tool Atropa runs. All of them are
+# AUR-only on Arch - "pacman -S policycoreutils" just says "target not
+# found" - and audit2allow/audit2why aren't in "audit", whatever its
+# name suggests.
+SELINUX_TOOL_PACKAGES = {
+    "sestatus": "policycoreutils",
+    "setsebool": "policycoreutils",
+    "restorecon": "policycoreutils",
+    "semodule": "policycoreutils",
+    "getsebool": "libselinux",
+    "checkmodule": "checkpolicy",
+    "semodule_package": "semodule-utils",
+    "audit2allow": "selinux-python",
+    "audit2why": "selinux-python",
+    "semanage": "selinux-python",
+}
+
+
+def missing_tool_error(tool: str) -> RuntimeError:
+    package = SELINUX_TOOL_PACKAGES.get(tool, "policycoreutils")
+    return RuntimeError(
+        f"'{tool}' isn't installed. It's in the {package} package, which Arch only has in the AUR - "
+        f"install it with your AUR helper (e.g. paru -S {package})."
+    )
+
 # Persistent home for compiled review artifacts (.te/.mod/.pp) and Setup
 # Mode state - kept around deliberately, as a paper trail of what was
 # proposed and when, rather than scrubbed after use.
@@ -127,6 +152,21 @@ def set_boolean(name: str, value: bool, persistent: bool = True) -> CommandResul
     return run_privileged(argv)
 
 
+def set_booleans(values: dict[str, bool], persistent: bool = True) -> CommandResult:
+    """
+    Several booleans in one setsebool call (`name=on name2=off ...`): with
+    -P every call rebuilds and reloads the whole policy, and each is its
+    own password prompt.
+    """
+    if not values:
+        raise ValueError("No booleans given")
+    argv = ["setsebool"]
+    if persistent:
+        argv.append("-P")
+    argv += [f"{name}={'on' if value else 'off'}" for name, value in values.items()]
+    return run_privileged(argv)
+
+
 def restorecon(path: str, recursive: bool = True) -> CommandResult:
     if not path:
         raise ValueError("Path is required")
@@ -227,8 +267,12 @@ def list_avc_denials(limit: int = 50) -> list[str]:
     """
     Reads recent 'avc:  denied' lines (and 'not defined in policy'
     messages - see _is_relevant_selinux_line) from the kernel log via
-    journalctl. Doesn't require root: these get printk'd to the kernel
-    ring buffer even when auditd is also logging separately.
+    journalctl. Doesn't require root, but only sees AVCs while auditd
+    isn't running: once it is, the kernel hands audit records to auditd
+    instead of printing them (apart from overflow when auditd falls
+    behind), so they're only in the audit log -
+    list_avc_denials_from_audit_log(). The 'not defined in policy'
+    messages are plain printk lines and stay in the kernel log either way.
     """
     result = run_unprivileged(
         ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "-n", str(limit * 3), "--output=cat"]
@@ -239,10 +283,10 @@ def list_avc_denials(limit: int = 50) -> list[str]:
 
 def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
     """
-    Fallback source via ausearch against /var/log/audit/audit.log, for
-    systems where AVCs don't reach the kernel ring buffer (e.g. dmesg
-    restricted or rate-limited). Requires root, so this is privileged and
-    only called when the user explicitly asks for it - not on every page load.
+    AVC denials since boot from /var/log/audit/audit.log via ausearch -
+    where they go while auditd runs (see list_avc_denials). Requires root,
+    so this is privileged and only called when the user explicitly asks
+    for it - not on every page load.
 
     Only covers real AVC audit records: 'not defined in policy' messages
     are raw kernel printk lines, not audit records, so ausearch never
@@ -251,7 +295,15 @@ def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
     """
     if not shutil.which("ausearch"):
         raise RuntimeError("ausearch isn't installed. Install it with: pacman -S audit")
-    result = run_privileged(["ausearch", "-m", "avc", "-ts", "recent"])
+    # Since boot, like the kernel-log source - "recent" was the last 10
+    # minutes only. --input-logs: read the log files even when our stdin is
+    # a pipe, instead of reading audit records from stdin.
+    result = run_privileged(["ausearch", "-m", "avc", "-ts", "boot", "--input-logs"])
+    if not result.ok and "<no matches>" not in result.stderr:
+        # A dismissed prompt or a broken log used to look like "no denials".
+        raise RuntimeError(
+            f"Couldn't read the audit log: {result.stderr.strip() or f'ausearch exited with {result.returncode}'}"
+        )
     lines = [l.strip() for l in result.stdout.strip().splitlines() if "avc:" in l.lower() and "denied" in l.lower()]
     return lines[-limit:]
 
@@ -259,7 +311,7 @@ def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
 def explain_denial(raw_avc_line: str) -> str:
     """Runs audit2why on a single AVC line to explain *why* it was denied."""
     if not shutil.which("audit2why"):
-        raise RuntimeError("audit2why isn't installed. Install it with: pacman -S audit")
+        raise missing_tool_error("audit2why")
     result = run_unprivileged(["audit2why"], input_text=raw_avc_line.strip() + "\n")
     output = (result.stdout or result.stderr).strip()
     if not output:
@@ -270,7 +322,7 @@ def explain_denial(raw_avc_line: str) -> str:
 def generate_te(raw_avc_line: str, module_name: str) -> str:
     """Runs audit2allow on a single AVC line and returns the suggested .te module text."""
     if not shutil.which("audit2allow"):
-        raise RuntimeError("audit2allow isn't installed. Install it with: pacman -S audit")
+        raise missing_tool_error("audit2allow")
     _validate_module_name(module_name)
     result = run_unprivileged(["audit2allow", "-m", module_name], input_text=raw_avc_line.strip() + "\n")
     if not result.stdout.strip():
@@ -315,7 +367,7 @@ def _compile_te(te_content: str, module_name: str, workdir: Path) -> str:
     _validate_module_name(module_name)
     for tool in ("checkmodule", "semodule_package"):
         if not shutil.which(tool):
-            raise RuntimeError(f"'{tool}' isn't installed. Install it with: pacman -S policycoreutils")
+            raise missing_tool_error(tool)
 
     workdir.mkdir(parents=True, exist_ok=True)
     te_path = workdir / f"{module_name}.te"
@@ -352,7 +404,7 @@ def compile_and_load_te(te_content: str, module_name: str) -> CommandResult:
     compiled files move from modules/ to approved/.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     pp_path = _compile_te(te_content, module_name, REVIEW_MODULES_DIR)
     result = run_privileged(["semodule", "-i", pp_path])
     if result.ok:
@@ -405,10 +457,9 @@ def import_te_files(paths: list[str]) -> list[ImportedTeFile]:
     - a single typo'd file, or one whose module name collides with
     something already pending, shouldn't block importing the rest.
     """
-    if not shutil.which("checkmodule") or not shutil.which("semodule_package"):
-        raise RuntimeError(
-            "'checkmodule'/'semodule_package' aren't installed. Install them with: pacman -S policycoreutils"
-        )
+    for tool in ("checkmodule", "semodule_package"):
+        if not shutil.which(tool):
+            raise missing_tool_error(tool)
 
     results: list[ImportedTeFile] = []
     for path_str in paths:
@@ -436,7 +487,7 @@ def install_pp_file(pp_path: str) -> CommandResult:
     files move to approved/ on success.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     path = Path(pp_path)
     if not path.exists():
         raise RuntimeError(f"{pp_path} no longer exists")
@@ -499,7 +550,7 @@ def reinstall_all_approved_modules() -> CommandResult:
     nothing to do with any single module being untrustworthy.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     inactive = [m for m in list_approved_modules() if not m["active"]]
     if not inactive:
         return CommandResult(0, "nothing to reinstall", "")
@@ -510,9 +561,12 @@ def reinstall_all_approved_modules() -> CommandResult:
 # ------------------------------------------------- per-application review --
 #
 # Ported from a shell workflow: instead of reviewing one AVC line at a time,
-# group denials by the program that triggered them (comm=) and generate one
-# .te per program - audit2allow produces a much more sensible policy when it
-# sees all of a program's related denials together rather than one at a time.
+# group denials by the program that triggered them and generate one .te per
+# program - audit2allow produces a much more sensible policy when it sees all
+# of a program's related denials together rather than one at a time. A
+# "program" is its comm= name AND its source domain: comm= is whatever name
+# the process gave itself, so the same name in two domains gets two reviews
+# rather than one module granting both domains' rules.
 
 _SKIP_PROGRAMS_RE = re.compile(r"^(systemd|kernel|audit|kworker|swapper)")
 
@@ -527,10 +581,27 @@ class ProgramPolicyReview:
     why_text: str = ""
     pp_path: str | None = None
     error: str | None = None
+    domain: str = "?"  # the denials' source type (scontext), "?" if it couldn't be parsed
+
+    @property
+    def label(self) -> str:
+        return f"{self.program} ({self.domain})" if self.domain != "?" else self.program
 
 
 def _sanitize_program_name(prog: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", prog) or "unknown"
+
+
+def _review_module_name(program: str, domain: str) -> str:
+    """
+    atropa_<program>_<domain>. Without the prefix a program called ssh,
+    mount or sudo produced a module named exactly that - and installing
+    it replaces the policy's own module of the same name.
+    """
+    parts = ["atropa", _sanitize_program_name(program)]
+    if domain != "?":
+        parts.append(_sanitize_program_name(domain))
+    return "_".join(parts)[:64]  # _validate_module_name()'s limit
 
 
 # Distinguishes "the caller didn't pass `since` at all" from "the caller
@@ -576,7 +647,7 @@ def build_policy_review(
     else:
         lines = list_avc_denials_from_audit_log(denial_limit) if source == "audit_log" else list_avc_denials(denial_limit)
 
-    groups: dict[str, list[str]] = {}
+    groups: dict[tuple[str, str], list[str]] = {}
     for line in lines:
         if _UNDEFINED_PERM_RE.search(line) or _UNDEFINED_CLASS_RE.search(line):
             # audit2allow can't do anything useful with these - they have no
@@ -587,14 +658,15 @@ def build_policy_review(
         prog = m.group(1) if m else "unknown"
         if _SKIP_PROGRAMS_RE.match(prog):
             continue
-        groups.setdefault(prog, []).append(line)
+        groups.setdefault((prog, _extract_context_type(line, "scontext")), []).append(line)
 
     reviews: list[ProgramPolicyReview] = []
-    for prog, denials in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-        safe_name = _sanitize_program_name(prog)
+    for (prog, domain), denials in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        safe_name = _review_module_name(prog, domain)
         joined = "\n".join(denials)
         review = ProgramPolicyReview(
-            program=prog, safe_name=safe_name, denial_count=len(denials), sample_denials=denials[:sample_size]
+            program=prog, safe_name=safe_name, denial_count=len(denials), sample_denials=denials[:sample_size],
+            domain=domain,
         )
 
         try:

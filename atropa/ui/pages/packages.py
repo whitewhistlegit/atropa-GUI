@@ -21,10 +21,12 @@ class PackagesPage(BasePage):
         actions_group = self.add_group("System", "Keep your package database and installed software current")
 
         self.updates_row = Adw.ActionRow(title="Checking for updates…")
-        sync_btn = Gtk.Button(label="Refresh database")
-        sync_btn.set_valign(Gtk.Align.CENTER)
-        sync_btn.connect("clicked", self._on_sync_clicked)
-        self.updates_row.add_suffix(sync_btn)
+        # Not "Refresh database": that was `pacman -Sy`, after which any
+        # install is a partial upgrade. check_updates() leaves it alone.
+        check_btn = Gtk.Button(label="Check for updates")
+        check_btn.set_valign(Gtk.Align.CENTER)
+        check_btn.connect("clicked", lambda _b: self._load_updates())
+        self.updates_row.add_suffix(check_btn)
 
         upgrade_btn = Gtk.Button(label="Upgrade system")
         upgrade_btn.add_css_class("suggested-action")
@@ -43,9 +45,7 @@ class PackagesPage(BasePage):
         # --- pending updates (visible list, not just a count) -----------------------
         self.updates_list_group = self.add_group(
             "Pending Updates",
-            "Updating a single package here instead of the full system is a partial "
-            "upgrade - Arch explicitly discourages this since other still-outdated "
-            "packages may depend on the old library versions. Prefer 'Upgrade system' above.",
+            "Arch only supports upgrading everything together - 'Upgrade system' above installs these.",
         )
 
         # --- Search / install ------------------------------------------------------
@@ -68,13 +68,22 @@ class PackagesPage(BasePage):
     # -- data loading -----------------------------------------------------------
 
     def refresh(self) -> None:
-        self.updates_row.set_title("Checking for updates…")
-        self.clear_rows(self.updates_list_group, getattr(self, "_update_rows", []))
-        self._update_rows = [self.start_loading(self.updates_list_group, "Checking for updates…")]
-        self.run_async(pacman.check_updates, self._on_updates_loaded)
+        self._load_updates()
         self.clear_rows(self.installed_group, getattr(self, "_installed_rows", []))
         self._installed_rows = [self.start_loading(self.installed_group, "Loading installed packages…")]
         self.run_async(pacman.list_explicit, self._on_installed_loaded)
+
+    def _load_updates(self) -> None:
+        self.updates_row.set_title("Checking for updates…")
+        if pacman.live_update_check_available():
+            self.updates_row.set_subtitle("")
+        else:
+            self.updates_row.set_subtitle(
+                "As of the last full upgrade - install pacman-contrib and fakeroot to check the mirrors"
+            )
+        self.clear_rows(self.updates_list_group, getattr(self, "_update_rows", []))
+        self._update_rows = [self.start_loading(self.updates_list_group, "Checking for updates…")]
+        self.run_async(pacman.check_updates, self._on_updates_loaded)
 
     def _on_updates_loaded(self, result, error) -> None:
         for row in list(getattr(self, "_update_rows", [])):
@@ -98,9 +107,6 @@ class PackagesPage(BasePage):
         for update in result:
             subtitle = f"{update.old_version} → {update.new_version}" if update.old_version else "version info unavailable"
             row = Adw.ActionRow(title=esc(update.name), subtitle=esc(subtitle))
-            update_btn = Gtk.Button(label="Update only this", valign=Gtk.Align.CENTER)
-            update_btn.connect("clicked", self._on_update_single_clicked, update.name)
-            row.add_suffix(update_btn)
             self.updates_list_group.add(row)
             self._update_rows.append(row)
 
@@ -125,10 +131,6 @@ class PackagesPage(BasePage):
 
     # -- actions -----------------------------------------------------------
 
-    def _on_sync_clicked(self, _btn: Gtk.Button) -> None:
-        self.notify("Refreshing package database…")
-        self.run_async(pacman.sync_database, self.handle_command_result)
-
     def _on_upgrade_clicked(self, _btn: Gtk.Button) -> None:
         self.confirm(
             "Upgrade entire system?",
@@ -142,7 +144,7 @@ class PackagesPage(BasePage):
             "Clean package cache?",
             "This removes cached package files that are no longer installed.",
             "Clean",
-            lambda: self.run_async(pacman.clean_cache, self.handle_command_result),
+            lambda: self.run_action(pacman.clean_cache, self.handle_command_result),
         )
 
     def _on_remove_clicked(self, _btn: Gtk.Button, package_name: str) -> None:
@@ -150,7 +152,7 @@ class PackagesPage(BasePage):
             f"Remove {package_name}?",
             "This uninstalls the package and any dependencies no longer needed by anything else.",
             "Remove",
-            lambda: self.run_async(lambda: pacman.remove([package_name]), self.handle_command_result),
+            lambda: self.run_action(lambda: pacman.remove([package_name]), self.handle_command_result),
         )
 
     def _on_search_clicked(self, _btn: Gtk.Button) -> None:
@@ -175,6 +177,15 @@ class PackagesPage(BasePage):
             row = Adw.ActionRow(title=esc(pkg.name), subtitle=esc(pkg.description or pkg.version))
             if pkg.installed:
                 row.add_suffix(Gtk.Label(label="installed", css_classes=["dim-label"]))
+            elif pkg.repo == "aur":
+                # pacman can't install AUR packages - the old Install button
+                # here just failed with "target not found".
+                aur_label = Gtk.Label(label="AUR", css_classes=["dim-label"])
+                aur_label.set_tooltip_text(
+                    f"Built from a user-submitted PKGBUILD - read it first, then install from a terminal "
+                    f"with your AUR helper (e.g. paru -S {pkg.name})"
+                )
+                row.add_suffix(aur_label)
             else:
                 install_btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
                 install_btn.connect("clicked", self._on_install_clicked, pkg.name)
@@ -183,17 +194,22 @@ class PackagesPage(BasePage):
             self._search_rows.append(row)
 
     def _on_install_clicked(self, _btn: Gtk.Button, package_name: str) -> None:
-        self.notify(f"Installing {package_name}…")
-        self.run_async(lambda: pacman.install([package_name]), self.handle_command_result)
+        if self.run_action(
+            lambda: pacman.install([package_name]), lambda r, e: self._on_install_done(r, e, package_name)
+        ):
+            self.notify(f"Installing {package_name}…")
 
-    def _on_update_single_clicked(self, _btn: Gtk.Button, package_name: str) -> None:
-        self.confirm(
-            f"Update only {package_name}?",
-            "This is a partial upgrade. Arch's own guidance is to avoid updating "
-            "individual packages while others stay behind - if this package now "
-            "expects a newer shared library than what's still installed for other "
-            "packages, something else could break. A full 'Upgrade system' is the "
-            "supported way to update. Continue anyway?",
-            "Update anyway",
-            lambda: self.run_async(lambda: pacman.update_single_package(package_name), self.handle_command_result),
-        )
+    def _on_install_done(self, result, error, package_name: str) -> bool:
+        if isinstance(error, pacman.PartialUpgradeError):
+            self.confirm(
+                "Upgrade the system first?",
+                f"{error}\n\n'Upgrade and install' runs pacman -Syu --needed {package_name}: a full system "
+                "upgrade that installs it as well.",
+                "Upgrade and install",
+                lambda: self.run_streaming_operation(
+                    f"Upgrading and installing {package_name}",
+                    lambda on_line: pacman.upgrade_and_install_streaming([package_name], on_line),
+                ),
+            )
+            return False
+        return self.handle_command_result(result, error, f"Installed {package_name}")

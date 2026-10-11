@@ -68,20 +68,23 @@ class HardeningPage(BasePage):
         self.f2b_row.add_suffix(self.f2b_toggle)
         f2b_group.add(self.f2b_row)
         protect_ssh_btn = Gtk.Button(label="Protect SSH (enable sshd jail)", valign=Gtk.Align.CENTER)
-        protect_ssh_btn.connect("clicked", lambda _b: self.run_async(hardening.fail2ban_protect_ssh, self.handle_command_result))
+        protect_ssh_btn.connect("clicked", lambda _b: self.run_action(hardening.fail2ban_protect_ssh, self.handle_command_result))
         f2b_group.add(protect_ssh_btn)
 
         # --- AppArmor -----------------------------------------------------
         aa_group = self.add_group("AppArmor", "Mandatory access control confining what programs can do")
         self.aa_row = Adw.ActionRow(title="Checking AppArmor…")
         aa_enable_btn = Gtk.Button(label="Enable service", valign=Gtk.Align.CENTER)
-        aa_enable_btn.connect("clicked", lambda _b: self.run_async(hardening.apparmor_enable_service, self.handle_command_result))
+        aa_enable_btn.connect(
+            "clicked", lambda _b: self.run_action(hardening.apparmor_enable_service, self.handle_command_result)
+        )
         self.aa_row.add_suffix(aa_enable_btn)
         aa_group.add(self.aa_row)
         aa_note = Adw.ActionRow(
             title="Kernel parameter required",
-            subtitle="Add apparmor=1 security=apparmor to your bootloader kernel parameters, then reboot. "
-            "Atropa doesn't edit boot parameters automatically to avoid an unbootable system.",
+            subtitle=f"Add {hardening.APPARMOR_KERNEL_PARAMETER} to your bootloader kernel parameters "
+            "(Arch wiki: AppArmor), then reboot. Atropa doesn't edit boot parameters automatically to "
+            "avoid an unbootable system.",
         )
         aa_group.add(aa_note)
 
@@ -196,17 +199,12 @@ class HardeningPage(BasePage):
         self._run_audit()
 
     def _refresh_audit_rule_statuses(self) -> None:
-        for rule_set in audit_rules.RULE_SETS:
-            self.run_async(
-                lambda key=rule_set.key: audit_rules.is_audit_rule_set_active(key),
-                lambda result, error, key=rule_set.key: self._on_audit_rule_status_loaded(result, error, key),
-            )
+        # One auditctl -l (one password prompt) for every rule set, not one each.
+        self.run_async(audit_rules.active_rule_set_keys, self._on_audit_rule_statuses_loaded)
 
-    def _on_audit_rule_status_loaded(self, result, error, key: str) -> bool:
-        icon = self._audit_rule_status_icons.get(key)
-        if icon is None:
-            return False
-        icon.set_visible(bool(result) and not error)
+    def _on_audit_rule_statuses_loaded(self, active_keys, error) -> bool:
+        for key, icon in self._audit_rule_status_icons.items():
+            icon.set_visible(not error and active_keys is not None and key in active_keys)
         return False
 
     def _run_audit(self) -> None:
@@ -266,7 +264,7 @@ class HardeningPage(BasePage):
             self.aa_row.set_title("AppArmor not installed")
             self.aa_row.set_subtitle("pacman -S apparmor")
         else:
-            kernel = "enforcing" if result.extra.get("kernel_enabled") else "kernel param not set"
+            kernel = "enabled in the kernel" if result.extra.get("kernel_enabled") else "not enabled in the kernel"
             self.aa_row.set_title(f"Service {'active' if result.active else 'inactive'}")
             self.aa_row.set_subtitle(kernel)
         return False
@@ -276,7 +274,12 @@ class HardeningPage(BasePage):
             self.ug_row.set_title("USBGuard not installed")
             self.ug_row.set_subtitle("pacman -S usbguard")
         else:
-            policy = "has device policy" if result.extra.get("has_policy") else "no policy generated yet"
+            has_policy = result.extra.get("has_policy")
+            policy = (
+                "has device policy" if has_policy
+                else "couldn't check the policy file" if has_policy is None
+                else "no policy generated yet"
+            )
             self.ug_row.set_title(f"USBGuard is {'active' if result.active else 'inactive'}")
             self.ug_row.set_subtitle(policy)
         return False
@@ -297,13 +300,14 @@ class HardeningPage(BasePage):
     def _on_faillock_loaded(self, result, error) -> bool:
         if error:
             self.faillock_status_row.set_title("Couldn't read faillock status")
-            self.faillock_status_row.set_subtitle(str(error))
+            self.faillock_status_row.set_subtitle(esc(error))
             return False
         if not result["wired"]:
             self.faillock_status_row.set_title("pam_faillock isn't wired into the login stack")
             self.faillock_status_row.set_subtitle(
-                "Add 'auth required pam_faillock.so' to /etc/pam.d/system-login manually - "
-                "Atropa won't auto-edit PAM to avoid a lockout risk"
+                "Stock Arch loads it from /etc/pam.d/system-auth (three pam_faillock.so lines: preauth, "
+                "authfail, authsucc) - compare yours with the pambase package's copy. Atropa won't edit PAM "
+                "itself: a mistake there can lock everyone out"
             )
         else:
             self.faillock_status_row.set_title("pam_faillock is active")
@@ -313,13 +317,14 @@ class HardeningPage(BasePage):
     def _on_pwquality_loaded(self, result, error) -> bool:
         if error:
             self.pwquality_status_row.set_title("Couldn't read password policy")
-            self.pwquality_status_row.set_subtitle(str(error))
+            self.pwquality_status_row.set_subtitle(esc(error))
             return False
         if not result["wired"]:
             self.pwquality_status_row.set_title("pam_pwquality isn't wired into the login stack")
             self.pwquality_status_row.set_subtitle(
-                "Add 'password requisite pam_pwquality.so' to /etc/pam.d/system-login manually - "
-                "Atropa won't auto-edit PAM to avoid a lockout risk"
+                "Arch doesn't load it by default. The Arch wiki adds 'password required pam_pwquality.so "
+                "retry=3' above the pam_unix.so line in /etc/pam.d/passwd. Atropa won't edit PAM itself: "
+                "a mistake there can lock everyone out"
             )
         else:
             self.pwquality_status_row.set_title("pam_pwquality is active")
@@ -344,15 +349,21 @@ class HardeningPage(BasePage):
             "Apply kernel hardening settings?",
             f"This writes {len(selected)} setting(s) to {hardening.SYSCTL_HARDENING_FILE} and reloads sysctl.",
             "Apply",
-            lambda: self.run_async(lambda: hardening.apply_sysctl_hardening(selected), self.handle_command_result),
+            lambda: self.run_action(lambda: hardening.apply_sysctl_hardening(selected), self.handle_command_result),
         )
 
-    def _on_f2b_toggle(self, _switch: Gtk.Switch, state: bool) -> bool:
+    def _on_f2b_toggle(self, switch: Gtk.Switch, state: bool) -> bool:
         if self._suppress_signals:
             return False
+        confirm = None
+        if not state:
+            confirm = (
+                "Turn off fail2ban?",
+                "Addresses that keep failing to log in are no longer banned, and it won't start at boot.",
+                "Turn Off",
+            )
         fn = hardening.fail2ban_enable if state else hardening.fail2ban_disable
-        self.run_async(fn, self.handle_command_result)
-        return False
+        return self.apply_switch(switch, state, fn, confirm=confirm)
 
     def _on_usbguard_enable(self, _btn: Gtk.Button) -> None:
         self.confirm(
@@ -361,15 +372,22 @@ class HardeningPage(BasePage):
             "afterward (including a USB keyboard) will be blocked until approved. "
             "Make sure you have another way to control this machine before continuing.",
             "Enable USBGuard",
-            lambda: self.run_async(hardening.usbguard_generate_and_enable, self.handle_command_result),
+            lambda: self.run_action(hardening.usbguard_generate_and_enable, self.handle_command_result),
         )
 
-    def _on_auditd_toggle(self, _switch: Gtk.Switch, state: bool) -> bool:
+    def _on_auditd_toggle(self, switch: Gtk.Switch, state: bool) -> bool:
         if self._suppress_signals:
             return False
+        confirm = None
+        if not state:
+            confirm = (
+                "Turn off auditd?",
+                "Audit events stop being recorded - including the SELinux/AppArmor denials the review "
+                "pages read from the audit log - and it won't start at boot.",
+                "Turn Off",
+            )
         fn = hardening.auditd_enable if state else hardening.auditd_disable
-        self.run_async(fn, self.handle_command_result)
-        return False
+        return self.apply_switch(switch, state, fn, confirm=confirm)
 
     def _on_scan_cve_clicked(self, _btn: Gtk.Button) -> None:
         self.cve_row.set_title("Scanning…")
@@ -385,7 +403,7 @@ class HardeningPage(BasePage):
 
         if error:
             self.cve_row.set_title("Scan failed")
-            self.cve_row.set_subtitle(str(error))
+            self.cve_row.set_subtitle(esc(error))
             return False
 
         self.cve_results_group.set_visible(bool(result))
@@ -395,7 +413,7 @@ class HardeningPage(BasePage):
         else:
             self.cve_row.set_title(f"{len(result)} advisory line(s) found")
             for line in result[:100]:
-                row = Adw.ActionRow(title=line)
+                row = Adw.ActionRow(title=esc(line))
                 self.cve_results_group.add(row)
                 self._cve_rows.append(row)
         return False
@@ -403,7 +421,7 @@ class HardeningPage(BasePage):
     def _on_apply_faillock(self, _btn: Gtk.Button) -> None:
         deny = int(self.deny_row.get_value())
         unlock_time = int(self.unlock_row.get_value())
-        self.run_async(lambda: hardening.set_faillock_policy(deny, unlock_time), self.handle_command_result)
+        self.run_action(lambda: hardening.set_faillock_policy(deny, unlock_time), self.handle_command_result)
 
     def _on_apply_password_complexity(self, _btn: Gtk.Button) -> None:
         minlen = int(self.minlen_row.get_value())
@@ -413,13 +431,13 @@ class HardeningPage(BasePage):
             "(at least one digit/uppercase/lowercase/special character required, 3 tries before rejection). "
             "Only takes effect if pam_pwquality is already wired into the login stack.",
             "Apply",
-            lambda: self.run_async(
+            lambda: self.run_action(
                 lambda: hardening.set_password_complexity_policy(minlen=minlen), self.handle_command_result
             ),
         )
 
     def _on_apply_one_audit_rule_set(self, _btn: Gtk.Button, key: str) -> None:
-        self.run_async(lambda: audit_rules.apply_audit_rule_set(key), self.handle_command_result)
+        self.run_action(lambda: audit_rules.apply_audit_rule_set(key), self.handle_command_result)
 
     def _on_apply_all_audit_rules(self, _btn: Gtk.Button) -> None:
         self.confirm(
@@ -428,7 +446,7 @@ class HardeningPage(BasePage):
             "auditd's rules once at the end. A rule set with nothing applicable on this system "
             "(e.g. a watch path Arch doesn't have) is skipped rather than failing.",
             "Apply All",
-            lambda: self.run_async(audit_rules.apply_all_rule_sets, self._on_apply_all_audit_done),
+            lambda: self.run_action(audit_rules.apply_all_rule_sets, self._on_apply_all_audit_done),
         )
 
     def _on_apply_all_audit_done(self, result, error) -> bool:

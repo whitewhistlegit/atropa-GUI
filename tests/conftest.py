@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atropa.backend import migration, privilege, selinux
+from atropa.backend import hardening, migration, privilege, selinux
 
 
 @dataclass
@@ -73,6 +73,10 @@ class FakeRun:
 @pytest.fixture
 def fake_run(monkeypatch):
     fr = FakeRun()
+    # privilege._subprocess_run is the one place commands are started from
+    # (subprocess.run's interface, run through Popen); subprocess.run is
+    # patched too so nothing slips through to a real command.
+    monkeypatch.setattr(privilege, "_subprocess_run", fr)
     monkeypatch.setattr(subprocess, "run", fr)
     return fr
 
@@ -120,3 +124,19 @@ def privilege_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(migration, "OLD_USER_DATA_DIR", tmp_path / "archyast")
 
     return SimpleNamespace(backup_dir=backup_dir, manifest=manifest, log_path=log_path, home=home)
+
+
+@pytest.fixture(autouse=True)
+def kernel_state(monkeypatch, tmp_path):
+    """
+    Points the checks that read live kernel state (the active LSM list,
+    AppArmor's enabled flag) at files under tmp_path that don't exist
+    unless a test writes them, so no result depends on the kernel the
+    tests happen to run on.
+    """
+    kernel = tmp_path / "kernel"
+    kernel.mkdir()
+    state = SimpleNamespace(lsm=kernel / "lsm", apparmor_enabled=kernel / "apparmor-enabled")
+    monkeypatch.setattr(hardening, "LSM_LIST", state.lsm)
+    monkeypatch.setattr(hardening, "APPARMOR_ENABLED_PARAM", state.apparmor_enabled)
+    return state

@@ -44,9 +44,46 @@ def test_get_sysctl_status_marks_hardened(fake_run):
     settings = hardening.get_sysctl_status()
     kptr = next(s for s in settings if s.key == "kernel.kptr_restrict")
     assert kptr.is_hardened is True
-    other = next(s for s in settings if s.key == "kernel.sysrq")
+    other = next(s for s in settings if s.key == "kernel.dmesg_restrict")
     assert other.current == "0"
-    assert other.is_hardened is False  # recommended is "4"
+    assert other.is_hardened is False  # recommended is "1"
+
+
+def test_stricter_than_recommended_counts_as_hardened(fake_run):
+    fake_run.set_response(["sysctl", "-n", "kernel.yama.ptrace_scope"], stdout="3\n")
+    fake_run.set_response(["sysctl", "-n", "kernel.sysrq"], stdout="0\n")
+    fake_run.set_response(["sysctl", "-n", "fs.protected_fifos"], stdout="1\n")
+    by_key = {s.key: s for s in hardening.get_sysctl_status()}
+    assert by_key["kernel.yama.ptrace_scope"].is_hardened  # recommended 1; 3 = no attaching at all
+    assert by_key["kernel.sysrq"].is_hardened  # recommended 4; 0 = SysRq off
+    assert not by_key["fs.protected_fifos"].is_hardened  # recommended 2; 1 is weaker
+
+
+def test_apply_sysctl_hardening_never_lowers_a_stricter_setting(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["sysctl", "-n", "kernel.yama.ptrace_scope"], stdout="3\n")
+    hardening.apply_sysctl_hardening(["kernel.yama.ptrace_scope", "kernel.kptr_restrict"])
+    written = next(text for call, text in zip(fake_run.calls, fake_run.inputs) if call[:2] == ["pkexec", "tee"])
+    assert "kernel.kptr_restrict = 2" in written
+    assert "ptrace_scope" not in written
+
+
+def test_audit_sysctl_check_reads_live_values_not_the_file(fake_run, fake_which, monkeypatch, tmp_path):
+    # Atropa's file exists, but something later in sysctl.d overrides it.
+    sysctl_file = tmp_path / "99-atropa-hardening.conf"
+    sysctl_file.write_text("kernel.kptr_restrict = 2\n")
+    monkeypatch.setattr(hardening, "SYSCTL_HARDENING_FILE", str(sysctl_file))
+    for key, recommended, _desc in hardening.SYSCTL_RECOMMENDATIONS:
+        fake_run.set_response(["sysctl", "-n", key], stdout=f"{recommended}\n")
+    fake_run.set_response(["sysctl", "-n", "kernel.kptr_restrict"], stdout="0\n")
+    check = next(c for c in hardening.run_audit() if c.name == "Kernel sysctl hardening")
+    assert check.status == "warn" and "kernel.kptr_restrict" in check.detail
+
+
+def test_audit_sysctl_check_passes_when_settings_are_live_without_atropas_file(fake_run, fake_which):
+    for key, recommended, _desc in hardening.SYSCTL_RECOMMENDATIONS:
+        fake_run.set_response(["sysctl", "-n", key], stdout=f"{recommended}\n")
+    check = next(c for c in hardening.run_audit() if c.name == "Kernel sysctl hardening")
+    assert check.status == "pass"
 
 
 def test_apply_sysctl_hardening_requires_selection():
@@ -127,26 +164,30 @@ def test_apparmor_status_not_installed_not_kernel_enabled(fake_run, fake_which):
     assert status.extra["kernel_enabled"] is False
 
 
-def test_apparmor_status_fully_enabled(fake_run, fake_which, monkeypatch, tmp_path):
+def test_apparmor_status_fully_enabled(fake_run, fake_which, kernel_state):
     fake_which.add("aa-status")
     fake_run.set_response(["systemctl", "is-active", "apparmor"], stdout="active\n")
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("BOOT_IMAGE=/vmlinuz apparmor=1 security=apparmor\n")
-    monkeypatch.setattr(hardening, "Path", hardening.Path)  # no-op, keep real Path
-    # Patch just the specific cmdline check via a targeted monkeypatch:
-    real_path_cls = hardening.Path
-
-    def fake_path(arg):
-        if arg == "/proc/cmdline":
-            return cmdline
-        return real_path_cls(arg)
-
-    monkeypatch.setattr(hardening, "Path", fake_path)
-
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,apparmor,bpf")
     status = hardening.apparmor_status()
     assert status.installed is True
     assert status.active is True
     assert status.extra["kernel_enabled"] is True
+
+
+def test_apparmor_kernel_check_reads_the_active_lsm_list(kernel_state):
+    # The Arch wiki's lsm=... parameter never contains "apparmor=1".
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,bpf\n")
+    assert hardening.apparmor_kernel_enabled() is False
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,integrity,apparmor,bpf\n")
+    assert hardening.apparmor_kernel_enabled() is True
+
+
+def test_apparmor_kernel_check_falls_back_to_the_module_parameter(kernel_state):
+    # No securityfs: AppArmor's own enabled flag says the same thing.
+    kernel_state.apparmor_enabled.write_text("Y\n")
+    assert hardening.apparmor_kernel_enabled() is True
+    kernel_state.apparmor_enabled.write_text("N\n")
+    assert hardening.apparmor_kernel_enabled() is False
 
 
 # --------------------------------------------------------------- usbguard --
@@ -177,18 +218,53 @@ def test_usbguard_status_with_policy(fake_run, fake_which, monkeypatch, tmp_path
     assert status.extra["has_policy"] is True
 
 
+def test_usbguard_status_policy_unknown_when_its_directory_is_root_only(fake_run, fake_which, monkeypatch):
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if str(self) == hardening.USBGUARD_RULES:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert hardening.usbguard_status().extra["has_policy"] is None
+
+
+GENERATED_POLICY = 'allow id 1d6b:0002 serial "0000:00:14.0" name "xHCI Host Controller"\n'
+
+
 def test_usbguard_generate_and_enable_stops_if_generation_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=1, stderr="no devices")
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], returncode=1, stderr="no devices")
     result = hardening.usbguard_generate_and_enable()
     assert not result.ok
     assert fake_run.call_containing("enable") is None
+    # the old `> rules.conf` redirect emptied the policy before generate-policy even ran
+    assert fake_run.call_containing(hardening.USBGUARD_RULES) is None
 
 
-def test_usbguard_generate_and_enable_enables_on_success(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
-    fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
+def test_usbguard_generate_and_enable_keeps_the_policy_when_nothing_was_generated(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout="\n")
+    result = hardening.usbguard_generate_and_enable()
+    assert not result.ok and "left as it is" in result.stderr
+    assert fake_run.call_containing(hardening.USBGUARD_RULES) is None
+
+
+def test_usbguard_generate_and_enable_writes_a_0600_policy_then_enables(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout=GENERATED_POLICY)
     result = hardening.usbguard_generate_and_enable()
     assert result.ok
+    write = ["pkexec", "install", "-m", "0600", "/dev/stdin", hardening.USBGUARD_RULES]
+    assert write in fake_run.calls
+    assert fake_run.inputs[fake_run.calls.index(write)] == GENERATED_POLICY
+    assert ["pkexec", "systemctl", "enable", "--now", "usbguard"] in fake_run.calls
+    assert fake_run.call_containing("restart") is None  # wasn't running: enable --now loads it
+
+
+def test_usbguard_regenerating_restarts_a_running_daemon(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout=GENERATED_POLICY)
+    fake_run.set_response(["systemctl", "is-active", "usbguard"], stdout="active\n")
+    assert hardening.usbguard_generate_and_enable().ok
+    assert fake_run.last_call() == ["pkexec", "systemctl", "restart", "usbguard"]
 
 
 # --------------------------------------------------------------- auditd --
@@ -477,6 +553,47 @@ def test_run_audit_healthy_system_all_pass_or_expected(fake_run, fake_which, mon
     assert by_name["fail2ban"].status == "pass"
     assert by_name["auditd"].status == "pass"
     assert by_name["Known CVEs (arch-audit)"].status == "pass"
+
+
+def _ssh_audit(fake_run, fake_which, monkeypatch, tmp_path, config: str) -> dict:
+    conf = tmp_path / "sshd_config"
+    conf.write_text(config)
+    monkeypatch.setattr(hardening.security_mod, "SSHD_CONFIG", conf)
+    fake_which.add("sshd")
+    return {c.name: c for c in hardening.run_audit()}
+
+
+def test_run_audit_ssh_judges_unset_keys_by_openssh_defaults(fake_run, fake_which, monkeypatch, tmp_path):
+    # Stock config: everything commented out. Root login defaults to
+    # prohibit-password (fine), password auth defaults to yes (worth a warn).
+    checks = _ssh_audit(fake_run, fake_which, monkeypatch, tmp_path, "#PermitRootLogin prohibit-password\n")
+    assert checks["SSH root login"].status == "pass"
+    assert "prohibit-password" in checks["SSH root login"].detail
+    assert checks["SSH password auth"].status == "warn"
+
+
+def test_run_audit_ssh_no_pass_when_an_include_is_unreadable(fake_run, fake_which, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    dropins = tmp_path / "sshd_config.d"
+    dropins.mkdir()
+    hidden = dropins / "60-hidden.conf"
+    hidden.write_text("PasswordAuthentication yes\n")
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == hidden:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    checks = _ssh_audit(
+        fake_run, fake_which, monkeypatch, tmp_path,
+        "Include sshd_config.d/*.conf\nPermitRootLogin no\nPasswordAuthentication no\n",
+    )
+    assert checks["SSH password auth"].status == "warn"
+    assert "60-hidden.conf" in checks["SSH password auth"].detail
+    assert checks["SSH root login"].status == "warn"
 
 
 def test_run_audit_surfaces_failures_without_aborting(fake_run, fake_which, monkeypatch, tmp_path):

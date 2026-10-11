@@ -12,8 +12,10 @@ def test_list_services_parses_and_enriches_enabled_state(fake_run):
             "cups.service loaded inactive dead CUPS Printer Service\n"
         ),
     )
-    fake_run.set_response(["systemctl", "is-enabled", "sshd.service"], stdout="enabled\n")
-    fake_run.set_response(["systemctl", "is-enabled", "cups.service"], stdout="disabled\n")
+    fake_run.set_response(
+        ["systemctl", "show", "--property=Id,UnitFileState"],
+        stdout="UnitFileState=enabled\nId=sshd.service\n\nId=cups.service\nUnitFileState=disabled\n",
+    )
 
     result = services.list_services()
 
@@ -23,6 +25,11 @@ def test_list_services_parses_and_enriches_enabled_state(fake_run):
         description="OpenSSH Daemon", enabled="enabled",
     )
     assert result[1].enabled == "disabled"
+    # one call for every unit's state, not one is-enabled per service
+    assert fake_run.calls[-1] == [
+        "systemctl", "show", "--property=Id,UnitFileState", "--", "sshd.service", "cups.service"
+    ]
+    assert len(fake_run.calls) == 2
 
 
 def test_list_services_skips_malformed_lines(fake_run):
@@ -38,7 +45,7 @@ def test_list_services_unknown_when_is_enabled_blank(fake_run):
         ["systemctl", "list-units", "--type=service", "--all", "--no-legend", "--plain"],
         stdout="foo.service loaded active running Foo\n",
     )
-    fake_run.set_response(["systemctl", "is-enabled", "foo.service"], stdout="")
+    fake_run.set_response(["systemctl", "show"], stdout="Id=foo.service\nUnitFileState=\n")
     result = services.list_services()
     assert result[0].enabled == "unknown"
 
@@ -76,3 +83,10 @@ def test_journal_tail_passes_line_count(fake_run):
     fake_run.set_response(["journalctl", "-u", "sshd"], stdout="log lines\n")
     assert services.journal_tail("sshd", lines=50) == "log lines\n"
     assert fake_run.last_call() == ["journalctl", "-u", "sshd", "-n", "50", "--no-pager"]
+
+
+def test_stop_impact_names_what_breaks_for_critical_units():
+    assert "password prompts" in services.stop_impact("polkit.service")
+    assert "session" in services.stop_impact("user@1000.service")
+    assert "SSH" in services.stop_impact("sshd.service")
+    assert services.stop_impact("cups.service") == ""

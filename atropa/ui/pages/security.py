@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -11,6 +13,23 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from atropa.backend import security
 from atropa.ui.pages import BasePage, esc
+
+# PermitRootLogin values, in the order the combo row lists them.
+ROOT_LOGIN_CHOICES = [
+    ("no", "Not allowed"),
+    ("prohibit-password", "Keys only (OpenSSH default)"),
+    ("forced-commands-only", "Keys with a forced command only"),
+    ("yes", "Allowed, with a password too"),
+]
+ROOT_LOGIN_WARNINGS = {
+    "no": "Root can't log in over SSH at all, not even with a key. If you reach this machine as root, make "
+    "sure another account can log in over SSH and use sudo first.",
+    "prohibit-password": "Root can log in over SSH only with a key. If you log in as root with a password, "
+    "add your key to /root/.ssh/authorized_keys first.",
+    "forced-commands-only": "Root can log in only with a key that has a command= option, and only to run "
+    "that command.",
+    "yes": "Root can log in over SSH with a password - the account brute-force attacks try first.",
+}
 
 
 class SecurityPage(BasePage):
@@ -39,8 +58,12 @@ class SecurityPage(BasePage):
         self.ssh_status_row = Adw.ActionRow(title="Checking SSH status…")
         ssh_group.add(self.ssh_status_row)
 
-        self.root_login_row = Adw.SwitchRow(title="Allow root login over SSH")
-        self.root_login_row.connect("notify::active", self._on_root_login_toggled)
+        # A combo, not a switch: "off" used to mean both "no" and the OpenSSH
+        # default "prohibit-password", so getting from one to the other meant
+        # passing through "yes" (root password logins) on the way.
+        self.root_login_row = Adw.ComboRow(title="Root login over SSH")
+        self.root_login_row.set_model(Gtk.StringList.new([label for _value, label in ROOT_LOGIN_CHOICES]))
+        self.root_login_row.connect("notify::selected", self._on_root_login_selected)
         ssh_group.add(self.root_login_row)
 
         self.password_auth_row = Adw.SwitchRow(title="Allow password authentication (vs. keys only)")
@@ -101,6 +124,7 @@ class SecurityPage(BasePage):
         sudo_group.add(self.sudo_row)
 
         self._suppress_signals = False
+        self._ssh_status: security.SshStatus | None = None
         self.refresh()
 
     def refresh(self) -> None:
@@ -144,36 +168,62 @@ class SecurityPage(BasePage):
             return False
 
         status = result
+        self._ssh_status = status
         self._suppress_signals = True
         if not status.installed:
             self.ssh_status_row.set_title("OpenSSH is not installed")
         else:
             self.ssh_status_row.set_title(f"sshd is {'running' if status.running else 'stopped'}")
-        self.root_login_row.set_active(status.root_login.lower() in ("yes", "true"))
-        self.password_auth_row.set_active(status.password_auth.lower() in ("yes", "true"))
+        if status.unreadable_includes:
+            self.ssh_status_row.set_subtitle(
+                esc(f"Couldn't read {', '.join(status.unreadable_includes)} - sshd may use different values than shown")
+            )
+        else:
+            self.ssh_status_row.set_subtitle("")
+
+        # Switches show what sshd actually uses: a keyword sshd_config never
+        # sets means OpenSSH's default (e.g. password logins are allowed).
+        def is_yes(name: str) -> bool:
+            return status.effective(name).lower() in ("yes", "true")
+
+        root_login = status.effective("root_login").lower().replace("without-password", "prohibit-password")
+        values = [value for value, _label in ROOT_LOGIN_CHOICES]
+        if root_login in values:
+            self.root_login_row.set_selected(values.index(root_login))
+        self.password_auth_row.set_active(is_yes("password_auth"))
         if status.port.isdigit():
             self.ssh_port_row.set_value(int(status.port))
-        if status.max_auth_tries.isdigit():
-            self.max_auth_tries_row.set_value(int(status.max_auth_tries))
+        if status.effective("max_auth_tries").isdigit():
+            self.max_auth_tries_row.set_value(int(status.effective("max_auth_tries")))
+        default_note = " (OpenSSH default)" if status.log_level == "unknown" else ""
         self.log_level_row.set_subtitle(
-            f"Currently: {status.log_level} · CIS recommends INFO or VERBOSE"
+            f"Currently: {status.effective('log_level')}{default_note} · CIS recommends INFO or VERBOSE"
         )
-        self.x11_forwarding_row.set_active(status.x11_forwarding.lower() in ("yes", "true"))
-        self.ignore_rhosts_row.set_active(status.ignore_rhosts.lower() in ("yes", "true"))
-        self.hostbased_auth_row.set_active(status.hostbased_authentication.lower() in ("yes", "true"))
-        self.permit_empty_passwords_row.set_active(status.permit_empty_passwords.lower() in ("yes", "true"))
-        self.permit_user_environment_row.set_active(status.permit_user_environment.lower() in ("yes", "true"))
+        self.x11_forwarding_row.set_active(is_yes("x11_forwarding"))
+        self.ignore_rhosts_row.set_active(is_yes("ignore_rhosts"))
+        self.hostbased_auth_row.set_active(is_yes("hostbased_authentication"))
+        self.permit_empty_passwords_row.set_active(is_yes("permit_empty_passwords"))
+        self.permit_user_environment_row.set_active(is_yes("permit_user_environment"))
         self._suppress_signals = False
         return False
 
-    def _on_firewall_toggle(self, _switch: Gtk.Switch, state: bool) -> bool:
+    def _on_firewall_toggle(self, switch: Gtk.Switch, state: bool) -> bool:
         if self._suppress_signals:
             return False
         if state:
-            self.run_async(security.firewall_enable, self.handle_command_result)
+            body = "Incoming connections that no rule allows get blocked."
+            ssh = self._ssh_status
+            if ssh is not None and ssh.installed:
+                ports = ssh.ports or ["22"]
+                body += (
+                    f" sshd listens on port {', '.join(ports)} - if you reach this machine over SSH, allow "
+                    f"{'them' if len(ports) > 1 else 'it'} first (Quick Setup does this for you)."
+                )
+            confirm = ("Turn on the firewall?", body, "Turn On")
         else:
-            self.run_async(security.firewall_disable, self.handle_command_result)
-        return False
+            confirm = ("Turn off the firewall?", "Every incoming connection is allowed while it's off.", "Turn Off")
+        work_fn = security.firewall_enable if state else security.firewall_disable
+        return self.apply_switch(switch, state, work_fn, confirm=confirm)
 
     def _on_allow_port(self, _btn: Gtk.Button) -> None:
         self._apply_port(allow=True)
@@ -191,59 +241,117 @@ class SecurityPage(BasePage):
         else:
             port, proto = raw, "tcp"
         fn = security.firewall_allow_port if allow else security.firewall_deny_port
-        self.run_async(lambda: fn(port, proto), self.handle_command_result)
+        self.run_action(lambda: fn(port, proto), self.handle_command_result)
 
-    def _on_root_login_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
+    # -- SSH ---------------------------------------------------------------
+
+    def _apply_ssh(self, work_fn, confirm: tuple[str, str, str] | None = None) -> None:
+        """
+        Runs an sshd_config change, then re-reads sshd_config whatever the
+        outcome - the switches move the moment they're clicked, so after a
+        failure, a refusal or a cancelled confirmation they'd otherwise keep
+        showing a setting that was never applied.
+        """
+
+        def resync() -> None:
+            self.run_async(security.ssh_status, self._on_ssh_loaded)
+
+        def done(result, error) -> bool:
+            self.handle_command_result(result, error, refresh=False)
+            resync()
+            return False
+
+        def start() -> None:
+            if not self.run_action(work_fn, done):
+                resync()
+
+        if confirm is None:
+            start()
+        else:
+            heading, body, label = confirm
+            self.confirm(heading, body, label, start, on_cancel=resync)
+
+    def _on_root_login_selected(self, row: Adw.ComboRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(lambda: security.set_ssh_root_login(switch.get_active()), self.handle_command_result)
+        value, label = ROOT_LOGIN_CHOICES[row.get_selected()]
+        self._apply_ssh(
+            lambda: security.set_ssh_permit_root_login(value),
+            confirm=(f'Set root login over SSH to "{label}"?', ROOT_LOGIN_WARNINGS[value], "Change"),
+        )
 
     def _on_password_auth_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(lambda: security.set_ssh_password_auth(switch.get_active()), self.handle_command_result)
+        allow = switch.get_active()
+        confirm = None
+        if not allow:
+            body = (
+                "Logging in over SSH will need a key in the account's ~/.ssh/authorized_keys. Without one, "
+                "you lose remote access to this machine."
+            )
+            if not _has_authorized_keys():
+                body += " You don't have one yourself (~/.ssh/authorized_keys is missing or empty)."
+            confirm = ("Turn off SSH password logins?", body, "Turn Off")
+        self._apply_ssh(lambda: security.set_ssh_password_auth(allow), confirm=confirm)
 
     def _on_apply_ssh_port(self, _btn: Gtk.Button) -> None:
         port = int(self.ssh_port_row.get_value())
-        self.run_async(lambda: security.set_ssh_port(port), self.handle_command_result)
+        current = ", ".join(self._ssh_status.ports or ["22"]) if self._ssh_status else "its current port"
+        self._apply_ssh(
+            lambda: security.set_ssh_port(port),
+            confirm=(
+                f"Move sshd to port {port}?",
+                f"sshd stops listening on {current} once it reloads. Allow {port}/tcp in the firewall "
+                f"first, or you can lose SSH access. With SELinux enforcing, the port also needs the "
+                f"ssh_port_t label (semanage port -a -t ssh_port_t -p tcp {port}).",
+                "Move",
+            ),
+        )
 
     def _on_apply_max_auth_tries(self, _btn: Gtk.Button) -> None:
         count = int(self.max_auth_tries_row.get_value())
-        self.run_async(lambda: security.set_ssh_max_auth_tries(count), self.handle_command_result)
+        self._apply_ssh(lambda: security.set_ssh_max_auth_tries(count))
 
     def _on_set_log_level(self, level: str) -> None:
-        self.run_async(lambda: security.set_ssh_log_level(level), self.handle_command_result)
+        self._apply_ssh(lambda: security.set_ssh_log_level(level))
 
     def _on_x11_forwarding_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(lambda: security.set_ssh_x11_forwarding(switch.get_active()), self.handle_command_result)
+        allow = switch.get_active()
+        self._apply_ssh(lambda: security.set_ssh_x11_forwarding(allow))
 
     def _on_ignore_rhosts_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(lambda: security.set_ssh_ignore_rhosts(switch.get_active()), self.handle_command_result)
+        enabled = switch.get_active()
+        self._apply_ssh(lambda: security.set_ssh_ignore_rhosts(enabled))
 
     def _on_hostbased_auth_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(
-            lambda: security.set_ssh_hostbased_authentication(switch.get_active()), self.handle_command_result
-        )
+        allow = switch.get_active()
+        self._apply_ssh(lambda: security.set_ssh_hostbased_authentication(allow))
 
     def _on_permit_empty_passwords_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(
-            lambda: security.set_ssh_permit_empty_passwords(switch.get_active()), self.handle_command_result
-        )
+        allow = switch.get_active()
+        confirm = None
+        if allow:
+            confirm = (
+                "Allow empty passwords over SSH?",
+                "Any account without a password could then log in over SSH without one.",
+                "Allow",
+            )
+        self._apply_ssh(lambda: security.set_ssh_permit_empty_passwords(allow), confirm=confirm)
 
     def _on_permit_user_environment_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
         if self._suppress_signals:
             return
-        self.run_async(
-            lambda: security.set_ssh_permit_user_environment(switch.get_active()), self.handle_command_result
-        )
+        allow = switch.get_active()
+        self._apply_ssh(lambda: security.set_ssh_permit_user_environment(allow))
 
     def _on_check_sudoers(self, _btn: Gtk.Button) -> None:
         self.run_async(security.sudoers_check, lambda result, error: self._on_sudo_check_done(result, error))
@@ -257,4 +365,11 @@ class SecurityPage(BasePage):
             self.sudo_row.set_subtitle(esc(output or "OK"))
         else:
             self.sudo_row.set_subtitle(esc(f"Problem: {output or f'visudo exited with {result.returncode}'}"))
+        return False
+
+
+def _has_authorized_keys() -> bool:
+    try:
+        return (Path.home() / ".ssh" / "authorized_keys").stat().st_size > 0
+    except OSError:
         return False

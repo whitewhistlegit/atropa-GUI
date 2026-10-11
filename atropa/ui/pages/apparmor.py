@@ -30,11 +30,14 @@ class ApparmorPage(BasePage):
             "own fields, so review them before appending.",
         )
         self.denials_group = denials_group
-        refresh_row = Adw.ActionRow(title="Source: kernel log (journalctl -k)")
+        self.source_row = Adw.ActionRow(title="Source: kernel log (journalctl -k)")
         refresh_btn = Gtk.Button(label="Refresh", valign=Gtk.Align.CENTER)
         refresh_btn.connect("clicked", lambda _b: self._load_denials())
-        refresh_row.add_suffix(refresh_btn)
-        denials_group.add(refresh_row)
+        self.source_row.add_suffix(refresh_btn)
+        audit_log_btn = Gtk.Button(label="Check audit.log (needs auth)", valign=Gtk.Align.CENTER)
+        audit_log_btn.connect("clicked", lambda _b: self._load_denials(from_audit_log=True))
+        self.source_row.add_suffix(audit_log_btn)
+        denials_group.add(self.source_row)
 
         self.refresh()
 
@@ -44,10 +47,31 @@ class ApparmorPage(BasePage):
         self.run_async(apparmor.list_profiles, self._on_profiles_loaded)
         self._load_denials()
 
-    def _load_denials(self) -> None:
+    def _load_denials(self, from_audit_log: bool = False) -> None:
         self.clear_rows(self.denials_group, getattr(self, "_denial_rows", []))
         self._denial_rows = [self.start_loading(self.denials_group, "Loading denials…")]
-        self.run_async(apparmor.list_denials, self._on_denials_loaded)
+        if from_audit_log:
+            self.source_row.set_title("Source: audit log (ausearch)")
+            self.source_row.set_subtitle("")
+            self.run_async(apparmor.list_denials_from_audit_log, self._on_denials_loaded)
+            return
+        self.source_row.set_title("Source: kernel log (journalctl -k)")
+
+        def load():
+            return apparmor.list_denials(), apparmor.auditd_running()
+
+        self.run_async(load, self._on_kernel_denials_loaded)
+
+    def _on_kernel_denials_loaded(self, result, error) -> bool:
+        if error is None:
+            denials, auditd_running = result
+            # With auditd running the kernel log stops getting new denials.
+            self.source_row.set_subtitle(
+                "auditd is running, so new denials go to the audit log instead - check audit.log"
+                if auditd_running else ""
+            )
+            result = denials
+        return self._on_denials_loaded(result, error)
 
     # -- profiles -----------------------------------------------------
 
@@ -147,13 +171,29 @@ class ApparmorPage(BasePage):
         dialog.present(self.get_root())
         return False
 
-    def _on_toggle_capability(self, _switch: Gtk.Switch, state: bool, profile_file: str, capability: str) -> bool:
-        self.run_async(lambda: apparmor.set_capability_rule(profile_file, capability, state), self.handle_command_result)
-        return False
+    def _on_toggle_capability(self, switch: Gtk.Switch, state: bool, profile_file: str, capability: str) -> bool:
+        return self._apply_rule_toggle(
+            switch, state, profile_file, f"capability {capability},",
+            lambda: apparmor.set_capability_rule(profile_file, capability, state),
+        )
 
-    def _on_toggle_network(self, _switch: Gtk.Switch, state: bool, profile_file: str, spec: str) -> bool:
-        self.run_async(lambda: apparmor.set_network_rule(profile_file, spec, state), self.handle_command_result)
-        return False
+    def _on_toggle_network(self, switch: Gtk.Switch, state: bool, profile_file: str, spec: str) -> bool:
+        return self._apply_rule_toggle(
+            switch, state, profile_file, f"network {spec},", lambda: apparmor.set_network_rule(profile_file, spec, state)
+        )
+
+    def _apply_rule_toggle(self, switch: Gtk.Switch, state: bool, profile_file: str, rule: str, work_fn) -> bool:
+        name = profile_file.rsplit("/", 1)[-1]
+        if state:
+            confirm = (f"Allow this for {name}?", f"Adds '{rule}' to {profile_file} and reloads the profile.", "Allow")
+        else:
+            confirm = (
+                f"Take this away from {name}?",
+                f"Removes '{rule}' from {profile_file} and reloads the profile. The program fails "
+                "wherever it still needs it.",
+                "Remove",
+            )
+        return self.apply_switch(switch, state, work_fn, confirm=confirm)
 
     # -- denials -----------------------------------------------------
 
@@ -207,7 +247,7 @@ class ApparmorPage(BasePage):
 
     def _on_why_result(self, result, error) -> bool:
         dialog = Adw.AlertDialog(heading="Why was this denied?")
-        dialog.set_body(esc(error) if error else esc(result))
+        dialog.set_body(str(error) if error else result)  # AlertDialog bodies are plain text, not markup
         dialog.add_response("close", "Close")
         dialog.present(self.get_root())
         return False
