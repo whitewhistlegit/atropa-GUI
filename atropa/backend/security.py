@@ -8,12 +8,15 @@ well-known, single-purpose settings rather than freeform config files.
 
 from __future__ import annotations
 
+import glob
+import os
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .privilege import CommandResult, backup_file, restore_file, run_privileged, run_unprivileged
+from .privilege import CommandResult, backup_file, run_privileged, run_unprivileged
 
 SSHD_CONFIG = Path("/etc/ssh/sshd_config")
 
@@ -43,11 +46,50 @@ class SshStatus:
     # line; this says whether that value was actually configured, so a
     # profile export doesn't record the default as if it were a setting.
     port_explicit: bool = False
+    # Every port sshd listens on per its config (Port lines are cumulative,
+    # unlike other keywords; ListenAddress host:port adds more). Empty means
+    # nothing is configured and sshd uses 22.
+    ports: list[str] = field(default_factory=list)
+    # Included files that exist but couldn't be read - their settings could
+    # override anything reported above, so callers shouldn't call it a pass.
+    unreadable_includes: list[str] = field(default_factory=list)
+
+    def effective(self, name: str) -> str:
+        """The value sshd actually uses: what's configured, else OpenSSH's own default."""
+        value = getattr(self, name)
+        return SSHD_DEFAULTS.get(name, value) if value == "unknown" else value
 
 
 # Every value sshd accepts for PermitRootLogin ("without-password" is the
 # deprecated spelling of "prohibit-password").
 SSH_PERMIT_ROOT_LOGIN_VALUES = ("yes", "no", "prohibit-password", "without-password", "forced-commands-only")
+
+# sshd_config keyword (lowercase - keywords are case-insensitive) -> SshStatus field.
+_SSHD_FIELDS = {
+    "permitrootlogin": "root_login",
+    "passwordauthentication": "password_auth",
+    "loglevel": "log_level",
+    "x11forwarding": "x11_forwarding",
+    "maxauthtries": "max_auth_tries",
+    "ignorerhosts": "ignore_rhosts",
+    "hostbasedauthentication": "hostbased_authentication",
+    "permitemptypasswords": "permit_empty_passwords",
+    "permituserenvironment": "permit_user_environment",
+}
+
+# OpenSSH's compiled-in defaults (sshd_config(5)) for the fields above -
+# what applies when sshd_config never sets the keyword.
+SSHD_DEFAULTS = {
+    "root_login": "prohibit-password",
+    "password_auth": "yes",
+    "log_level": "INFO",
+    "x11_forwarding": "no",
+    "max_auth_tries": "6",
+    "ignore_rhosts": "yes",
+    "hostbased_authentication": "no",
+    "permit_empty_passwords": "no",
+    "permit_user_environment": "no",
+}
 
 
 def firewall_backend() -> str:
@@ -144,83 +186,249 @@ def firewall_deny_port(port: str, protocol: str = "tcp") -> CommandResult:
     raise RuntimeError("No firewall backend installed")
 
 
+# ------------------------------------------------------------ sshd_config --
+#
+# sshd's own parsing rules, which both reading and editing have to follow:
+#  - the FIRST value read for a keyword wins (Port and ListenAddress are the
+#    exceptions: they accumulate);
+#  - `Include` pulls files in at that point (relative paths are under
+#    /etc/ssh, globs in lexical order);
+#  - after a `Match` line nothing applies globally until a `Match all`, and a
+#    Match inside an included file ends with that file.
+# Reading only the main file and letting the last line win reported settings
+# sshd wasn't using; editing with a replace-every-line sed (Match blocks
+# included) or an append at the end of the file (inside whatever Match block
+# came last) could leave the real setting unchanged while reporting success.
+
+_MAX_INCLUDE_DEPTH = 16  # sshd's own limit
+
+
+def _split_directive(line: str) -> tuple[str, str]:
+    """('keyword' lowercased, 'value') for one non-comment sshd_config line.
+    Keyword and value may be separated by whitespace or a single '='; a
+    trailing '#' comment is dropped."""
+    parts = re.split(r"\s*=\s*|\s+", line.strip(), maxsplit=1)
+    keyword = parts[0].lower()
+    tokens = parts[1].split() if len(parts) > 1 else []
+    for i, token in enumerate(tokens):
+        if token.startswith("#"):
+            tokens = tokens[:i]
+            break
+    return keyword, " ".join(tokens).strip('"')
+
+
+def _include_paths(value: str) -> list[Path]:
+    paths: list[Path] = []
+    for pattern in value.split():
+        full = pattern if os.path.isabs(pattern) else str(SSHD_CONFIG.parent / pattern)
+        paths.extend(Path(p) for p in sorted(glob.glob(full)))
+    return paths
+
+
+def _sshd_global_directives(path: Path, unreadable: list[str], depth: int = 0) -> list[tuple[str, str]]:
+    """Every (keyword, value) sshd applies globally from `path`, in the order it reads them."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        unreadable.append(str(path))
+        return []
+
+    directives: list[tuple[str, str]] = []
+    active = True
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        keyword, value = _split_directive(line)
+        if keyword == "match":
+            active = value.lower() == "all"
+        elif not active:
+            continue
+        elif keyword == "include":
+            if depth < _MAX_INCLUDE_DEPTH:
+                for included in _include_paths(value):
+                    directives += _sshd_global_directives(included, unreadable, depth + 1)
+        else:
+            directives.append((keyword, value))
+    return directives
+
+
+def _listen_ports(directives: list[tuple[str, str]]) -> list[str]:
+    ports = [value for keyword, value in directives if keyword == "port"]
+    for keyword, value in directives:
+        if keyword == "listenaddress":
+            # host:port or [v6addr]:port; a bare address uses the Port lines
+            m = re.match(r"^(?:\[[^\]]+\]|[^:\s]+):(\d+)", value)
+            if m:
+                ports.append(m.group(1))
+    return list(dict.fromkeys(ports))
+
+
 def ssh_status() -> SshStatus:
     installed = shutil.which("sshd") is not None
     running_result = run_unprivileged(["systemctl", "is-active", "sshd"])
     running = running_result.stdout.strip() == "active"
 
-    fields = {
-        "port": "22", "root_login": "unknown", "password_auth": "unknown", "log_level": "unknown",
-        "x11_forwarding": "unknown", "max_auth_tries": "unknown", "ignore_rhosts": "unknown",
-        "hostbased_authentication": "unknown", "permit_empty_passwords": "unknown", "permit_user_environment": "unknown",
-    }
-    port_explicit = False
-    if SSHD_CONFIG.exists():
-        text = run_unprivileged(["cat", str(SSHD_CONFIG)]).stdout
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("#") or not line:
-                continue
-            lower = line.lower()
-            if lower.startswith("port "):
-                fields["port"] = line.split(maxsplit=1)[1]
-                port_explicit = True
-            elif lower.startswith("permitrootlogin"):
-                fields["root_login"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("passwordauthentication"):
-                fields["password_auth"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("loglevel"):
-                fields["log_level"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("x11forwarding"):
-                fields["x11_forwarding"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("maxauthtries"):
-                fields["max_auth_tries"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("ignorerhosts"):
-                fields["ignore_rhosts"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("hostbasedauthentication"):
-                fields["hostbased_authentication"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("permitemptypasswords"):
-                fields["permit_empty_passwords"] = line.split(maxsplit=1)[1]
-            elif lower.startswith("permituserenvironment"):
-                fields["permit_user_environment"] = line.split(maxsplit=1)[1]
+    fields = dict.fromkeys(_SSHD_FIELDS.values(), "unknown")
+    unreadable: list[str] = []
+    directives = _sshd_global_directives(SSHD_CONFIG, unreadable) if SSHD_CONFIG.exists() else []
+    for keyword, value in directives:
+        name = _SSHD_FIELDS.get(keyword)
+        if name and fields[name] == "unknown":  # first value wins
+            fields[name] = value
 
-    return SshStatus(installed=installed, running=running, port_explicit=port_explicit, **fields)
+    configured_ports = [value for keyword, value in directives if keyword == "port"]
+    return SshStatus(
+        installed=installed,
+        running=running,
+        port=configured_ports[0] if configured_ports else "22",
+        port_explicit=bool(configured_ports),
+        ports=_listen_ports(directives),
+        unreadable_includes=unreadable,
+        **fields,
+    )
+
+
+def _include_sets(value: str, keyword: str) -> bool:
+    """Whether the files an `Include` line pulls in set `keyword` globally -
+    or might: an unreadable included file counts as yes."""
+    unreadable: list[str] = []
+    found = False
+    for included in _include_paths(value):
+        found = found or any(k == keyword for k, _v in _sshd_global_directives(included, unreadable, 1))
+    return found or bool(unreadable)
+
+
+def _edit_sshd_global_option(
+    text: str, key: str, value: str, include_sets: Callable[[str, str], bool] = _include_sets
+) -> str:
+    """
+    Returns sshd_config `text` with `key value` as the value sshd reads
+    first for `key`. Only the global section is edited - lines inside Match
+    blocks are never touched. In order of preference: the first active
+    global line for `key` is replaced in place; or a commented-out
+    `#Key ...` template in the global section is uncommented; or the line
+    is inserted before the first Include/Match (so it's read first) or at
+    the end. If an Include earlier than the existing line could set `key`,
+    the line goes above that Include instead. Later global lines for `key`
+    (dead once ours wins) are set to the same value so the file doesn't
+    read as if they applied.
+    """
+    key_lower = key.lower()
+    new_line = f"{key} {value}"
+    lines = text.splitlines()
+
+    active = True
+    occurrences: list[int] = []
+    template_index: int | None = None
+    first_boundary: int | None = None  # first Include or Match line
+    blocking_include: int | None = None
+    includes: list[str] = []
+    for i, raw_line in enumerate(lines):
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            body = line.lstrip("#").strip()
+            if active and template_index is None and body and _split_directive(body)[0] == key_lower:
+                template_index = i
+            continue
+        keyword, rest = _split_directive(line)
+        if keyword == "match":
+            first_boundary = i if first_boundary is None else first_boundary
+            active = rest.lower() == "all"
+        elif not active:
+            continue
+        elif keyword == "include":
+            first_boundary = i if first_boundary is None else first_boundary
+            includes.append(rest)
+            if not occurrences and blocking_include is None and include_sets(rest, key_lower):
+                blocking_include = i
+        elif keyword == key_lower:
+            occurrences.append(i)
+
+    if key_lower == "port":
+        # Port lines accumulate rather than override - "setting the port"
+        # can't be done safely by adding or rewriting one of several.
+        if len(occurrences) > 1 or any(include_sets(rest, "port") for rest in includes):
+            raise ValueError(
+                "sshd listens on Port settings from several lines (or an included file) - "
+                "change them in sshd_config by hand"
+            )
+
+    def indent_of(index: int) -> str:
+        return lines[index][: len(lines[index]) - len(lines[index].lstrip())]
+
+    if occurrences and blocking_include is None:
+        targets = occurrences
+    else:
+        targets = occurrences[:]  # dead copies after the Include, kept consistent
+        if blocking_include is not None:
+            lines.insert(blocking_include, new_line)
+            targets = [i + 1 for i in targets]
+        elif template_index is not None:
+            lines[template_index] = indent_of(template_index) + new_line
+        elif first_boundary is not None:
+            lines.insert(first_boundary, new_line)
+        else:
+            lines.append(new_line)
+    for i in targets:
+        lines[i] = indent_of(i) + new_line
+    return "\n".join(lines) + "\n"
+
+
+def _read_sshd_config() -> str:
+    try:
+        return SSHD_CONFIG.read_text(encoding="utf-8")
+    except PermissionError:
+        result = run_privileged(["cat", str(SSHD_CONFIG)])
+        if not result.ok:
+            raise RuntimeError(f"Couldn't read {SSHD_CONFIG}: {result.stderr.strip()}") from None
+        return result.stdout
 
 
 def _set_sshd_option(key: str, value: str) -> CommandResult:
     """
-    Idempotently set `key value` in sshd_config: replace an existing
-    (possibly commented) line, or append if missing. Backs up the file
-    first, then validates the result with `sshd -t` BEFORE reloading -
-    a syntax error here can lock out remote access, so we check before
-    committing rather than reload-and-hope. If validation fails, the
-    backup is restored automatically and sshd is never touched.
+    Sets `key value` so it's the value sshd actually uses (see the rules
+    above), written back in one privileged step. The file is backed up
+    first and the result validated with `sshd -t` BEFORE anything is
+    reloaded - a bad config can lock out remote access. If validation
+    fails, the original content (kept in memory, so this doesn't depend on
+    the backup) is written back and sshd is never reloaded; the error says
+    plainly if even that failed.
     """
-    backup_name = backup_file(str(SSHD_CONFIG))
+    if not SSHD_CONFIG.exists():
+        raise RuntimeError(f"{SSHD_CONFIG} doesn't exist - is OpenSSH installed?")
+    original = _read_sshd_config()
+    updated = _edit_sshd_global_option(original, key, value)
+    if updated == original:
+        return CommandResult(0, f"{key} is already {value}", "")
 
-    pattern = rf"^#?\s*{re.escape(key)}\s+.*$"
-    replacement = f"{key} {value}"
-
-    check = run_unprivileged(["grep", "-Ei", pattern, str(SSHD_CONFIG)])
-    if check.stdout.strip():
-        sed_expr = f"s/{pattern}/{replacement}/I"
-        result = run_privileged(["sed", "-i", "-E", sed_expr, str(SSHD_CONFIG)])
-    else:
-        result = run_privileged(["bash", "-c", f"echo '{replacement}' >> {SSHD_CONFIG}"])
-
-    if not result.ok:
-        return result
+    backup_file(str(SSHD_CONFIG))
+    write_result = run_privileged(["tee", str(SSHD_CONFIG)], input_text=updated)
+    if not write_result.ok:
+        return write_result
 
     test_result = run_privileged(["sshd", "-t"])
     if not test_result.ok:
-        if backup_name:
-            restore_file(backup_name, str(SSHD_CONFIG))
+        problem = test_result.stderr.strip() or f"sshd -t exited with {test_result.returncode}"
+        restore_result = run_privileged(["tee", str(SSHD_CONFIG)], input_text=original)
+        if restore_result.ok:
+            raise RuntimeError(
+                f"New sshd_config failed validation (sshd -t): {problem}. "
+                "Restored the previous config; sshd was NOT reloaded."
+            )
         raise RuntimeError(
-            f"New sshd_config failed validation (sshd -t): {test_result.stderr.strip()}. "
-            "Reverted to the previous config; sshd was NOT reloaded."
+            f"New sshd_config failed validation (sshd -t): {problem}. Restoring the previous config "
+            f"ALSO failed ({restore_result.stderr.strip() or 'unknown error'}), so {SSHD_CONFIG} still "
+            "contains the rejected change - sshd was NOT reloaded, but fix the file (a backup is under "
+            "Activity & Backups) before sshd restarts."
         )
 
-    return run_privileged(["systemctl", "reload", "sshd"])
+    # try-reload-or-restart: reloads a running sshd, and is a no-op (not an
+    # error, unlike `reload`) when sshd isn't running - the new config then
+    # simply applies whenever it starts.
+    return run_privileged(["systemctl", "try-reload-or-restart", "sshd"])
 
 
 def set_ssh_root_login(allow: bool) -> CommandResult:

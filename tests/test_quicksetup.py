@@ -102,6 +102,26 @@ def test_apply_firewall_allows_ssh_port_before_enabling(fake_run, fake_which, mo
     assert any("2222" in arg for arg in fake_run.calls[allow_index])
 
 
+def test_apply_firewall_allows_every_port_sshd_listens_on(fake_run, fake_which, monkeypatch, tmp_path):
+    # Port lines accumulate (and ListenAddress can add its own); allowing only
+    # the first would still cut off the others.
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\nPort 2222\nListenAddress 0.0.0.0:8022\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("ufw")
+    fake_which.add("sshd")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
+
+    assert quicksetup._apply_firewall(lambda _l: None).ok
+
+    allowed = [c[-1] for c in fake_run.calls if c[:3] == ["pkexec", "ufw", "allow"]]
+    assert allowed == ["22/tcp", "2222/tcp", "8022/tcp"]
+    enable_index = fake_run.calls.index(["pkexec", "ufw", "--force", "enable"])
+    assert all(fake_run.calls.index(["pkexec", "ufw", "allow", spec]) < enable_index for spec in allowed)
+
+
 def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_which):
     """If the SSH rule can't be added (auth dismissed, ufw error, ...), the
     firewall must stay off - enabling deny-by-default anyway is the remote

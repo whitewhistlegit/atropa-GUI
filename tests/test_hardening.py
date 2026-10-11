@@ -479,6 +479,47 @@ def test_run_audit_healthy_system_all_pass_or_expected(fake_run, fake_which, mon
     assert by_name["Known CVEs (arch-audit)"].status == "pass"
 
 
+def _ssh_audit(fake_run, fake_which, monkeypatch, tmp_path, config: str) -> dict:
+    conf = tmp_path / "sshd_config"
+    conf.write_text(config)
+    monkeypatch.setattr(hardening.security_mod, "SSHD_CONFIG", conf)
+    fake_which.add("sshd")
+    return {c.name: c for c in hardening.run_audit()}
+
+
+def test_run_audit_ssh_judges_unset_keys_by_openssh_defaults(fake_run, fake_which, monkeypatch, tmp_path):
+    # Stock config: everything commented out. Root login defaults to
+    # prohibit-password (fine), password auth defaults to yes (worth a warn).
+    checks = _ssh_audit(fake_run, fake_which, monkeypatch, tmp_path, "#PermitRootLogin prohibit-password\n")
+    assert checks["SSH root login"].status == "pass"
+    assert "prohibit-password" in checks["SSH root login"].detail
+    assert checks["SSH password auth"].status == "warn"
+
+
+def test_run_audit_ssh_no_pass_when_an_include_is_unreadable(fake_run, fake_which, monkeypatch, tmp_path):
+    from pathlib import Path
+
+    dropins = tmp_path / "sshd_config.d"
+    dropins.mkdir()
+    hidden = dropins / "60-hidden.conf"
+    hidden.write_text("PasswordAuthentication yes\n")
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == hidden:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    checks = _ssh_audit(
+        fake_run, fake_which, monkeypatch, tmp_path,
+        "Include sshd_config.d/*.conf\nPermitRootLogin no\nPasswordAuthentication no\n",
+    )
+    assert checks["SSH password auth"].status == "warn"
+    assert "60-hidden.conf" in checks["SSH password auth"].detail
+    assert checks["SSH root login"].status == "warn"
+
+
 def test_run_audit_surfaces_failures_without_aborting(fake_run, fake_which, monkeypatch, tmp_path):
     """An insecure system should surface warn/fail per-check, and one
     failing sub-check must not prevent the rest of the audit from running."""
