@@ -319,6 +319,10 @@ def apply_items(keys: list[str], on_line: Callable[[str], None]) -> dict[str, Co
     results: dict[str, CommandResult] = {}
     ordered_keys = [key for key in _ORDER if key in keys]
     for key in ordered_keys:
-        results[key] = _APPLIERS[key](on_line)
+        try:
+            results[key] = _APPLIERS[key](on_line)
+        except Exception as exc:  # noqa: BLE001 - one step's error (e.g. a refused install) mustn't skip the rest
+            on_line(f"Failed: {exc}")
+            results[key] = CommandResult(1, "", str(exc))
         on_line("")
     return results

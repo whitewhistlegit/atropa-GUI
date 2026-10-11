@@ -55,7 +55,7 @@ _ACTIONS: list[RegistryAction] = [
     _action("compliance.generate_report", compliance.generate_report, False,
             "Generates the categorized, scored compliance report."),
     _action("pacman.check_updates", pacman.check_updates, False,
-            "Lists pending package updates (pacman -Qu) - does not install anything."),
+            "Lists pending package updates (checkupdates, or pacman -Qu without it) - does not install anything."),
     _action("pacman.list_explicit", pacman.list_explicit, False,
             "Lists explicitly-installed packages (pacman -Qe)."),
     _action("services.list_services", services.list_services, False,
@@ -68,8 +68,6 @@ _ACTIONS: list[RegistryAction] = [
     # the button - see run_plugin_action() in plugins.py.
     _action("pacman.clean_cache", pacman.clean_cache, True,
             "Removes old/uninstalled packages from the pacman cache (pacman -Sc)."),
-    _action("pacman.sync_database", pacman.sync_database, True,
-            "Refreshes the package database (pacman -Sy) - does not install/upgrade anything."),
     _action("services.restart", services.restart, True,
             "Restarts a systemd service.", param_names=["unit"]),
     _action("services.start", services.start, True,

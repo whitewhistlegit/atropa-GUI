@@ -49,6 +49,11 @@ def test_higher_risk_domains_are_not_exposed():
         assert not key.startswith(forbidden_prefixes), f"{key} should not be exposed to plugins"
 
 
+def test_partial_upgrade_actions_are_not_exposed():
+    # `pacman -Sy` without -u leaves every later install a partial upgrade.
+    assert "pacman.sync_database" not in plugin_registry.REGISTRY
+
+
 def test_describe_call_renders_params():
     text = plugin_registry.describe_call("services.restart", {"unit": "sshd"})
     assert text == "services.restart('sshd')"
