@@ -43,6 +43,17 @@ def test_list_users_excludes_system_users_by_default(fake_passwd_db):
     assert "bob" in names
 
 
+def test_nobody_is_not_listed_as_a_regular_account(fake_passwd_db):
+    # uid/gid 65534 is above login.defs' UID_MAX; it used to show up with a delete button.
+    entries, groups = fake_passwd_db
+    entries.append(FakePwEntry("nobody", 65534, 65534, "Kernel Overflow User", "/", "/usr/bin/nologin"))
+    groups.append(FakeGrEntry("nobody", 65534, []))
+    assert "nobody" not in [u.username for u in users.list_users()]
+    assert "nobody" not in [g.name for g in users.list_groups()]
+    assert "nobody" in [u.username for u in users.list_users(include_system=True)]
+    assert "nobody" in [g.name for g in users.list_groups(include_system=True)]
+
+
 def test_list_users_includes_system_when_requested(fake_passwd_db):
     result = users.list_users(include_system=True)
     assert {u.username for u in result} == {"root", "daemon", "alice", "bob"}
@@ -105,6 +116,29 @@ def test_set_password_uses_stdin_not_argv(fake_run, fake_which):
     call = fake_run.last_call()
     assert call == ["pkexec", "chpasswd"]
     assert "hunter2" not in call  # must never appear on the command line
+    assert fake_run.inputs[-1] == "carol:hunter2\n"
+
+
+@pytest.mark.parametrize(
+    "username, password",
+    [
+        ("carol", "one\nroot:two"),  # a pasted second line would be a second chpasswd entry
+        ("carol", "one\rtwo"),
+        ("carol", ""),
+        ("", "hunter2"),
+        ("carol:x", "hunter2"),
+        ("carol\nroot", "hunter2"),
+    ],
+)
+def test_set_password_refuses_what_would_not_stay_one_entry(fake_run, fake_which, username, password):
+    with pytest.raises(ValueError):
+        users.set_password(username, password)
+    assert fake_run.calls == []
+
+
+def test_set_password_allows_a_colon_in_the_password(fake_run, fake_which):
+    users.set_password("carol", "with: colon")
+    assert fake_run.inputs[-1] == "carol:with: colon\n"
 
 
 def test_modify_user_lock(fake_run, fake_which):
@@ -137,6 +171,48 @@ def test_create_and_delete_group(fake_run, fake_which):
     assert fake_run.last_call() == ["pkexec", "groupadd", "developers"]
     users.delete_group("developers")
     assert fake_run.last_call() == ["pkexec", "groupdel", "developers"]
+
+
+def test_set_groups_replaces_the_whole_list(fake_run, fake_which):
+    users.set_groups("carol", ["audio", "wheel"])
+    assert fake_run.last_call() == ["pkexec", "usermod", "-G", "audio,wheel", "carol"]
+    users.set_groups("carol", [])
+    assert fake_run.last_call() == ["pkexec", "usermod", "-G", "", "carol"]
+
+
+def test_supplementary_groups_lists_memberships(fake_passwd_db):
+    assert users.supplementary_groups("alice") == ["users", "wheel"]
+    assert users.supplementary_groups("root") == []
+
+
+def test_groups_warning_when_the_only_admin_leaves_wheel(fake_passwd_db):
+    assert "only member" in users.groups_warning("alice", ["users"])
+    assert users.groups_warning("alice", ["users", "wheel"]) == ""
+    assert users.groups_warning("bob", []) == ""  # was never in it
+
+
+def test_groups_warning_when_another_admin_remains(fake_passwd_db):
+    _entries, groups = fake_passwd_db
+    groups[1] = groups[1]._replace(gr_mem=["alice", "bob"])
+    assert "stops being an administrator" in users.groups_warning("alice", ["users"])
+
+
+def test_groups_warning_ignores_admins_through_the_primary_group(fake_passwd_db):
+    # usermod -G can't take a primary group away, so nothing is lost.
+    entries, groups = fake_passwd_db
+    entries.append(FakePwEntry("carol", 1002, 10, "", "/home/carol", "/bin/bash"))
+    groups[1] = groups[1]._replace(gr_mem=["alice", "carol"])
+    assert users.groups_warning("carol", []) == ""
+
+
+def test_group_delete_refusal(fake_passwd_db):
+    _entries, groups = fake_passwd_db
+    groups.append(FakeGrEntry("developers", 1005, ["alice", "bob"]))
+    assert "root" in users.group_delete_refusal("root")
+    assert "administrator" in users.group_delete_refusal("wheel")
+    assert "alice" in users.group_delete_refusal("users")  # gid 1000 is alice's primary group
+    assert users.group_delete_refusal("developers") is None
+    assert users.group_delete_refusal("nosuchgroup") is None
 
 
 # ------------------------------------------------------------ lock/delete guards --

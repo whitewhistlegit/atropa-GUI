@@ -15,8 +15,15 @@ from dataclasses import dataclass, field
 
 from .privilege import CommandResult, run_privileged
 
-# Arch's minimum UID for "real" (non-system) users, per /etc/login.defs default
+# Arch's UID/GID range for "real" (non-system) accounts, per /etc/login.defs
+# defaults. Above it come nobody (65534) and systemd's dynamic and container
+# users - listed as regular accounts, they got a delete button like anyone else.
 DEFAULT_MIN_UID = 1000
+DEFAULT_MAX_UID = 60000
+
+
+def _is_regular(number: int) -> bool:
+    return DEFAULT_MIN_UID <= number <= DEFAULT_MAX_UID
 
 # polkit's administrator group on Arch (/usr/share/polkit-1/rules.d/50-default.rules):
 # Atropa's password prompts accept a member's password. With nobody in it,
@@ -45,7 +52,7 @@ class Group:
 def list_users(include_system: bool = False) -> list[UserAccount]:
     users = []
     for entry in pwd.getpwall():
-        if not include_system and entry.pw_uid < DEFAULT_MIN_UID and entry.pw_uid != 0:
+        if not include_system and not _is_regular(entry.pw_uid) and entry.pw_uid != 0:
             continue
         member_groups = [g.gr_name for g in grp.getgrall() if entry.pw_name in g.gr_mem]
         users.append(
@@ -65,7 +72,7 @@ def list_users(include_system: bool = False) -> list[UserAccount]:
 def list_groups(include_system: bool = False) -> list[Group]:
     groups = []
     for entry in grp.getgrall():
-        if not include_system and entry.gr_gid < DEFAULT_MIN_UID and entry.gr_gid != 0:
+        if not include_system and not _is_regular(entry.gr_gid) and entry.gr_gid != 0:
             continue
         groups.append(Group(name=entry.gr_name, gid=entry.gr_gid, members=list(entry.gr_mem)))
     return sorted(groups, key=lambda g: g.gid)
@@ -88,7 +95,19 @@ def create_user(
 
 
 def set_password(username: str, password: str) -> CommandResult:
-    """Sets a user's password via chpasswd, fed through stdin (never argv)."""
+    """
+    Sets a user's password via chpasswd, fed through stdin (never argv).
+
+    chpasswd reads one `name:password` entry per line, so a line break in
+    either part would start a second entry - a pasted two-line password
+    could set another account's password. Those are refused here.
+    """
+    if not username or any(char in username for char in ":\r\n"):
+        raise ValueError("That isn't a valid username")
+    if not password:
+        raise ValueError("The password is empty")
+    if "\n" in password or "\r" in password:
+        raise ValueError("A password can't contain a line break")
     return run_privileged(["chpasswd"], input_text=f"{username}:{password}\n")
 
 
@@ -177,6 +196,46 @@ def delete_user(username: str, remove_home: bool = False) -> CommandResult:
         argv.append("-r")
     argv.append(username)
     return run_privileged(argv)
+
+
+def supplementary_groups(username: str) -> list[str]:
+    """The groups `username` is a listed member of (its primary group isn't one of them)."""
+    return sorted(group.gr_name for group in grp.getgrall() if username in group.gr_mem)
+
+
+def set_groups(username: str, groups: list[str]) -> CommandResult:
+    """Puts `username` in exactly `groups`, next to its primary group (usermod -G)."""
+    return modify_user(username, extra_groups=groups)
+
+
+def groups_warning(username: str, groups: list[str]) -> str:
+    """What set_groups(username, groups) breaks ("" if nothing): leaving the administrator group."""
+    if ADMIN_GROUP in groups or ADMIN_GROUP not in supplementary_groups(username):
+        return ""
+    admin_gid = next((group.gr_gid for group in grp.getgrall() if group.gr_name == ADMIN_GROUP), None)
+    if any(entry.pw_name == username and entry.pw_gid == admin_gid for entry in pwd.getpwall()):
+        return ""  # still in it through the primary group
+    if not _admin_usernames() - {username}:
+        return (
+            f"{username} is the only member of the {ADMIN_GROUP} group. With nobody in it, password prompts "
+            "ask for root's password instead - make sure you know it."
+        )
+    return f"{username} stops being an administrator ({ADMIN_GROUP} group) and can no longer answer password prompts."
+
+
+def group_delete_refusal(name: str) -> str | None:
+    """Why Atropa won't delete the group `name`, or None."""
+    entry = next((group for group in grp.getgrall() if group.gr_name == name), None)
+    if entry is None:
+        return None
+    if entry.gr_gid == 0:
+        return "The root group can't be deleted."
+    if name == ADMIN_GROUP:
+        return f"{ADMIN_GROUP} is the administrator group - Atropa's password prompts accept its members."
+    primary_of = sorted(user.pw_name for user in pwd.getpwall() if user.pw_gid == entry.gr_gid)
+    if primary_of:
+        return f"It is the primary group of {', '.join(primary_of)} - an account always needs one."
+    return None
 
 
 def create_group(name: str) -> CommandResult:

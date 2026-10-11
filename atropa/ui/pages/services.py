@@ -13,6 +13,7 @@ from atropa.backend import services
 from atropa.ui.pages import BasePage, esc
 
 MAX_ROWS = 150
+JOURNAL_LINES = 100
 
 
 class ServicesPage(BasePage):
@@ -57,7 +58,17 @@ class ServicesPage(BasePage):
             subtitle = f"{svc.active}/{svc.sub} · {svc.enabled}"
             row = Adw.ActionRow(title=esc(svc.unit), subtitle=esc(subtitle))
 
+            journal_btn = Gtk.Button(
+                icon_name="text-x-generic-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"]
+            )
+            journal_btn.set_tooltip_text("Show its journal")
+            journal_btn.connect("clicked", self._on_journal_clicked, svc.unit)
+            row.add_suffix(journal_btn)
+
             if svc.active == "active":
+                restart_btn = Gtk.Button(label="Restart", valign=Gtk.Align.CENTER, css_classes=["flat"])
+                restart_btn.connect("clicked", self._on_restart_clicked, svc.unit)
+                row.add_suffix(restart_btn)
                 toggle_btn = Gtk.Button(label="Stop", valign=Gtk.Align.CENTER)
                 toggle_btn.connect("clicked", self._on_stop_clicked, svc.unit)
             else:
@@ -82,6 +93,51 @@ class ServicesPage(BasePage):
 
     def _on_stop_clicked(self, _btn: Gtk.Button, unit: str) -> None:
         self._confirm_unit_change(unit, "Stop", f"{unit} stops right away.", services.stop)
+
+    def _on_restart_clicked(self, _btn: Gtk.Button, unit: str) -> None:
+        # stop_impact() describes the unit being gone. A restart is that for a
+        # moment - and for good if the unit doesn't come back up, as sshd
+        # won't with a broken config.
+        impact = services.stop_impact(unit)
+        body = f"{unit} stops and starts again."
+        if impact:
+            body += f"\n\nUntil it is back - or for good, if it fails to start: {impact}"
+        self.confirm(
+            f"Restart {unit}?",
+            body,
+            "Restart",
+            lambda: self.run_action(
+                lambda: services.restart(unit),
+                lambda result, error: self.handle_command_result(result, error, f"Restarted {unit}"),
+            ),
+        )
+
+    def _on_journal_clicked(self, _btn: Gtk.Button, unit: str) -> None:
+        buffer = Gtk.TextBuffer()
+        buffer.set_text("Loading…")
+        text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True, cursor_visible=False)
+        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+        scroller = Gtk.ScrolledWindow(min_content_height=360, min_content_width=560)
+        scroller.set_child(text_view)
+
+        dialog = Adw.AlertDialog(
+            heading=f"Journal: {unit}", body=f"The last {JOURNAL_LINES} lines, newest at the bottom."
+        )
+        dialog.set_heading_use_markup(False)
+        dialog.set_extra_child(scroller)
+        dialog.add_response("close", "Close")
+
+        def on_loaded(result, error) -> bool:
+            if error:
+                buffer.set_text(f"Couldn't read the journal: {error}")
+            else:
+                buffer.set_text(result.strip() or "No journal entries for this unit.")
+            buffer.place_cursor(buffer.get_end_iter())
+            text_view.scroll_to_mark(buffer.get_insert(), 0.0, True, 0.0, 1.0)
+            return False
+
+        self.run_async(lambda: services.journal_tail(unit, JOURNAL_LINES), on_loaded)
+        dialog.present(self.get_root())
 
     def _on_enable_clicked(self, _btn: Gtk.Button, unit: str) -> None:
         self.run_action(lambda: services.enable(unit), self.handle_command_result)

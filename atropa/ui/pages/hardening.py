@@ -94,6 +94,10 @@ class HardeningPage(BasePage):
         ug_generate_btn = Gtk.Button(label="Generate policy & enable", valign=Gtk.Align.CENTER)
         ug_generate_btn.connect("clicked", self._on_usbguard_enable)
         self.ug_row.add_suffix(ug_generate_btn)
+        # The way back: shown while the daemon runs or is set to start at boot.
+        self.ug_disable_btn = Gtk.Button(label="Turn off", valign=Gtk.Align.CENTER, visible=False)
+        self.ug_disable_btn.connect("clicked", self._on_usbguard_disable)
+        self.ug_row.add_suffix(self.ug_disable_btn)
         ug_group.add(self.ug_row)
         ug_note = Adw.ActionRow(
             title="Heads up",
@@ -270,6 +274,9 @@ class HardeningPage(BasePage):
         return False
 
     def _on_ug_loaded(self, result, error) -> bool:
+        self.ug_disable_btn.set_visible(
+            not error and bool(result.installed) and bool(result.active or result.enabled)
+        )
         if error or not result.installed:
             self.ug_row.set_title("USBGuard not installed")
             self.ug_row.set_subtitle("pacman -S usbguard")
@@ -373,6 +380,18 @@ class HardeningPage(BasePage):
             "Make sure you have another way to control this machine before continuing.",
             "Enable USBGuard",
             lambda: self.run_action(hardening.usbguard_generate_and_enable, self.handle_command_result),
+        )
+
+    def _on_usbguard_disable(self, _btn: Gtk.Button) -> None:
+        self.confirm(
+            "Turn off USBGuard?",
+            "USB devices are no longer checked: anything plugged in works straight away, and USBGuard "
+            "won't start at boot. The device policy stays where it is, for turning it back on.",
+            "Turn Off",
+            lambda: self.run_action(
+                hardening.usbguard_disable,
+                lambda result, error: self.handle_command_result(result, error, "USBGuard turned off"),
+            ),
         )
 
     def _on_auditd_toggle(self, switch: Gtk.Switch, state: bool) -> bool:
