@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from atropa.backend import quicksetup
+from atropa.backend.privilege import CommandResult
 
 # The sandbox container this runs in has a real /sys/fs/selinux mount (from
 # the host), even though SELinux itself isn't in use here - same issue
@@ -64,7 +65,7 @@ def test_apply_firewall_installs_when_backend_missing(fake_run, fake_which, monk
 
     monkeypatch.setattr(security, "firewall_backend", fake_backend)
 
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=0)
     fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
     fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "ufw", "allow"], returncode=0)
@@ -100,6 +101,26 @@ def test_apply_firewall_allows_ssh_port_before_enabling(fake_run, fake_which, mo
     enable_index = next(i for i, c in enumerate(fake_run.calls) if "enable" in c)
     assert allow_index < enable_index
     assert any("2222" in arg for arg in fake_run.calls[allow_index])
+
+
+def test_apply_firewall_allows_every_port_sshd_listens_on(fake_run, fake_which, monkeypatch, tmp_path):
+    # Port lines accumulate (and ListenAddress can add its own); allowing only
+    # the first would still cut off the others.
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\nPort 2222\nListenAddress 0.0.0.0:8022\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("ufw")
+    fake_which.add("sshd")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
+
+    assert quicksetup._apply_firewall(lambda _l: None).ok
+
+    allowed = [c[-1] for c in fake_run.calls if c[:3] == ["pkexec", "ufw", "allow"]]
+    assert allowed == ["22/tcp", "2222/tcp", "8022/tcp"]
+    enable_index = fake_run.calls.index(["pkexec", "ufw", "--force", "enable"])
+    assert all(fake_run.calls.index(["pkexec", "ufw", "allow", spec]) < enable_index for spec in allowed)
 
 
 def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_which):
@@ -141,7 +162,7 @@ def test_apply_firewall_skips_when_already_active(fake_run, fake_which):
 
 
 def test_apply_firewall_stops_if_install_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=1, stderr="no network")
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=1, stderr="no network")
     result = quicksetup._apply_firewall(lambda _l: None)
     assert not result.ok
     assert fake_run.call_containing("enable") is None
@@ -150,7 +171,7 @@ def test_apply_firewall_stops_if_install_fails(fake_run, fake_which):
 # --------------------------------------------------------------- fail2ban --
 
 def test_apply_fail2ban_installs_enables_and_protects_ssh(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "fail2ban"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "fail2ban"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "fail2ban"], stdout="inactive\n")
     fake_run.set_response(["systemctl", "is-enabled", "fail2ban"], stdout="disabled\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "fail2ban", "--now"], returncode=0)
@@ -215,7 +236,7 @@ def test_apply_faillock_applies_when_wired_in(fake_run, fake_which, privilege_pa
 # --------------------------------------------------------------- apparmor --
 
 def test_apply_apparmor_installs_when_missing(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "apparmor"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "apparmor"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "apparmor"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "apparmor", "--now"], returncode=0)
 
@@ -236,7 +257,7 @@ def test_apply_apparmor_warns_when_kernel_not_enabled(fake_run, fake_which):
 # --------------------------------------------------------------- auditd --
 
 def test_apply_auditd_installs_and_enables(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "audit"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "audit"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "auditd"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "auditd", "--now"], returncode=0)
 
@@ -247,8 +268,8 @@ def test_apply_auditd_installs_and_enables(fake_run, fake_which):
 # --------------------------------------------------------------- usbguard --
 
 def test_apply_usbguard_installs_generates_and_enables(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "usbguard"], returncode=0)
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "usbguard"], returncode=0)
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout="allow id 1d6b:0002\n")
     fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
 
     result = quicksetup._apply_usbguard(lambda _l: None)
@@ -257,21 +278,27 @@ def test_apply_usbguard_installs_generates_and_enables(fake_run, fake_which):
 
 # --------------------------------------------------------------- selinux (never auto-enforce) --
 
-def test_apply_selinux_installs_tools_when_missing(fake_run, fake_which):
-    # is_available() is False here (sestatus not in fake_which, and the
-    # sandbox's real /sys/fs/selinux is neutralized by the autouse fixture
-    # above) - so after installing tools, the function should stop and
-    # report that kernel enablement is still a manual step, not proceed to
-    # call sestatus at all.
-    fake_run.set_response(
-        ["pkexec", "pacman", "-S", "--noconfirm", "policycoreutils", "checkpolicy", "audit"], returncode=0
-    )
-
+def test_apply_selinux_never_tries_to_pacman_install_the_aur_only_tools(fake_run, fake_which):
+    # `pacman -S policycoreutils checkpolicy` can only fail: SELinux's
+    # userspace isn't in Arch's official repos. audit (ausearch) is.
     lines = []
     result = quicksetup._apply_selinux(lines.append)
     assert result.ok
-    assert "not automated" in result.stdout or "manual step" in result.stdout
+    assert "manual step" in result.stdout
+    assert ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "audit"] in fake_run.calls
+    assert not any("policycoreutils" in call for call in fake_run.calls)
+    assert any("AUR" in line and "policycoreutils" in line for line in lines)
     assert fake_run.call_containing("sestatus") is None
+
+
+def test_apply_selinux_reports_kernel_enablement_as_manual_once_tools_exist(fake_run, fake_which):
+    # is_available() is False here (no /sys/fs/selinux in the sandbox), so
+    # with the tools present the step stops at the kernel-level note.
+    fake_which.update({"sestatus", "ausearch"})
+    fake_run.set_response(["sestatus"], stdout="SELinux status:                 disabled\n")
+    result = quicksetup._apply_selinux(lambda _l: None)
+    assert result.ok
+    assert "manual step" in result.stdout
 
 
 def test_apply_selinux_never_sets_enforcing(fake_run, fake_which):
@@ -339,7 +366,7 @@ def test_apply_items_only_runs_requested_keys(fake_run, fake_which):
 def test_apply_items_continues_after_one_step_fails(fake_run, fake_which, privilege_paths):
     """One failing step (e.g. a package install error) must not prevent
     later steps in the batch from running."""
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=1, stderr="network error")
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=1, stderr="network error")
     fake_run.set_response(["sysctl", "-n"], stdout="0\n")
     fake_run.set_response(["pkexec", "tee"], returncode=0)
     fake_run.set_response(["pkexec", "sysctl", "--system"], returncode=0)
@@ -348,6 +375,20 @@ def test_apply_items_continues_after_one_step_fails(fake_run, fake_which, privil
 
     assert not results["firewall"].ok
     assert results["sysctl"].ok
+
+
+def test_apply_items_keeps_going_when_a_step_raises(monkeypatch):
+    def refused(_on_line):
+        raise quicksetup.pacman.PartialUpgradeError("database is ahead")
+
+    ran = []
+    monkeypatch.setitem(quicksetup._APPLIERS, "firewall", refused)
+    monkeypatch.setitem(quicksetup._APPLIERS, "sysctl", lambda _on_line: ran.append("sysctl") or CommandResult(0, "", ""))
+    lines: list[str] = []
+    results = quicksetup.apply_items(["firewall", "sysctl"], lines.append)
+    assert not results["firewall"].ok and "database is ahead" in results["firewall"].stderr
+    assert ran == ["sysctl"] and results["sysctl"].ok
+    assert "Failed: database is ahead" in lines
 
 
 def test_apply_single_runs_exactly_that_item(fake_run, fake_which):

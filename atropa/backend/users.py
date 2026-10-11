@@ -9,6 +9,7 @@ always accurate; writes go through privileged commands.
 from __future__ import annotations
 
 import grp
+import os
 import pwd
 from dataclasses import dataclass, field
 
@@ -16,6 +17,11 @@ from .privilege import CommandResult, run_privileged
 
 # Arch's minimum UID for "real" (non-system) users, per /etc/login.defs default
 DEFAULT_MIN_UID = 1000
+
+# polkit's administrator group on Arch (/usr/share/polkit-1/rules.d/50-default.rules):
+# Atropa's password prompts accept a member's password. With nobody in it,
+# polkit falls back to asking for root's.
+ADMIN_GROUP = "wheel"
 
 
 @dataclass
@@ -106,6 +112,63 @@ def modify_user(
         argv.append("-U")
     argv.append(username)
     return run_privileged(argv)
+
+
+def _admin_usernames() -> set[str]:
+    for group in grp.getgrall():
+        if group.gr_name == ADMIN_GROUP:
+            names = set(group.gr_mem)
+            names.update(entry.pw_name for entry in pwd.getpwall() if entry.pw_gid == group.gr_gid)
+            return names
+    return set()
+
+
+def _uid_of(username: str) -> int | None:
+    return next((entry.pw_uid for entry in pwd.getpwall() if entry.pw_name == username), None)
+
+
+def lock_refusal(username: str) -> str | None:
+    """
+    Why Atropa won't lock `username`'s password, or None. Both cases take
+    away the only password that can answer Atropa's prompts - including
+    the one needed to unlock it again - so there'd be no way back short
+    of a rescue boot.
+    """
+    uid = _uid_of(username)
+    if uid == os.getuid():
+        return (
+            "This is the account you're signed in with - locking it would disable the password "
+            "Atropa's prompts need, including the one to unlock it again."
+        )
+    if uid == 0 and not _admin_usernames():
+        return (
+            f"Nobody is in the {ADMIN_GROUP} group, so password prompts ask for root's password - "
+            "locking it would leave no way to run privileged actions."
+        )
+    return None
+
+
+def lock_warning(username: str) -> str:
+    """What else locking `username` breaks, beyond that user's own logins ("" if nothing)."""
+    admins = _admin_usernames()
+    if username in admins and not admins - {username}:
+        return (
+            f"{username} is the only member of the {ADMIN_GROUP} group, so Atropa's password prompts "
+            "(and pkexec's) would ask for a password that no longer works."
+        )
+    if username in admins:
+        return f"{username} is an administrator ({ADMIN_GROUP} group) and can no longer answer password prompts."
+    return ""
+
+
+def delete_refusal(username: str) -> str | None:
+    """Why Atropa won't delete `username`, or None."""
+    uid = _uid_of(username)
+    if uid == os.getuid():
+        return "This is the account you're signed in with."
+    if uid == 0:
+        return "The root account can't be deleted."
+    return None
 
 
 def delete_user(username: str, remove_home: bool = False) -> CommandResult:

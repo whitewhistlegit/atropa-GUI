@@ -138,15 +138,40 @@ def _insert_before_final_brace(content: str, rule_line: str) -> str:
     return content[:idx] + f"  {rule_line}\n" + content[idx:]
 
 
+def _write_and_reload(profile_file: str, original: str, new_content: str) -> CommandResult:
+    """
+    Writes new_content and reloads the profile from it. When apparmor_parser
+    rejects the result, the kernel keeps the profile it already had loaded;
+    the file is put back to match, so the next boot or reload doesn't trip
+    over the rejected version.
+    """
+    result = run_privileged(["tee", profile_file], input_text=new_content)
+    if not result.ok:
+        return result
+    reload_result = run_privileged(["apparmor_parser", "-r", profile_file])
+    if reload_result.ok:
+        return reload_result
+
+    problem = reload_result.stderr.strip() or f"apparmor_parser exited with {reload_result.returncode}"
+    restore_result = run_privileged(["tee", profile_file], input_text=original)
+    if restore_result.ok:
+        raise RuntimeError(
+            f"apparmor_parser rejected the change: {problem}. Restored the previous profile; the loaded "
+            "policy is unchanged."
+        )
+    raise RuntimeError(
+        f"apparmor_parser rejected the change: {problem}. Restoring the previous profile ALSO failed "
+        f"({restore_result.stderr.strip() or 'unknown error'}), so {profile_file} still contains the rejected "
+        "change - restore it from Activity & Backups before the next reload."
+    )
+
+
 def append_rule_to_profile(profile_file: str, rule_line: str) -> CommandResult:
     """Backs up the profile, appends rule_line before its closing brace, and reloads it."""
     backup_file(profile_file)
     content = _read_file_safely(profile_file)
     new_content = _insert_before_final_brace(content, rule_line.strip())
-    result = run_privileged(["tee", profile_file], input_text=new_content)
-    if not result.ok:
-        return result
-    return run_privileged(["apparmor_parser", "-r", profile_file])
+    return _write_and_reload(profile_file, content, new_content)
 
 
 def _set_rule_presence(profile_file: str, rule_line: str, present: bool) -> CommandResult:
@@ -164,10 +189,7 @@ def _set_rule_presence(profile_file: str, rule_line: str, present: bool) -> Comm
     else:
         return CommandResult(0, "no change needed", "")
 
-    result = run_privileged(["tee", profile_file], input_text=new_content)
-    if not result.ok:
-        return result
-    return run_privileged(["apparmor_parser", "-r", profile_file])
+    return _write_and_reload(profile_file, content, new_content)
 
 
 def set_capability_rule(profile_file: str, capability: str, allow: bool) -> CommandResult:
@@ -191,10 +213,39 @@ def profile_toggle_states(profile_file: str) -> dict:
 # ---------------------------------------------------------------- denials --
 
 def list_denials(limit: int = 50) -> list[str]:
-    """Recent 'apparmor="DENIED"' lines from the kernel log."""
+    """
+    Recent 'apparmor="DENIED"' lines from the kernel log. Only complete
+    while auditd isn't running: once it is, the kernel hands audit records
+    to auditd instead of printing them, so new denials only show up in
+    list_denials_from_audit_log().
+    """
     result = run_unprivileged(["journalctl", "-k", "--no-pager", "-g", "apparmor=", "-n", str(limit * 3), "--output=cat"])
     lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip() and "denied" in l.lower()]
     return lines[-limit:]
+
+
+def list_denials_from_audit_log(limit: int = 50) -> list[str]:
+    """
+    AppArmor denials since boot from the audit log, where they go while
+    auditd runs. The log is root-only, so this needs a password prompt and
+    only runs when asked for.
+    """
+    if not shutil.which("ausearch"):
+        raise RuntimeError("ausearch isn't installed. Install it with: pacman -S audit")
+    # --input-logs: read the log files even when our stdin is a pipe -
+    # otherwise ausearch reads audit records from stdin instead.
+    result = run_privileged(["ausearch", "-m", "AVC,APPARMOR_DENIED", "-ts", "boot", "--input-logs"])
+    if not result.ok and "<no matches>" not in result.stderr:
+        raise RuntimeError(
+            f"Couldn't read the audit log: {result.stderr.strip() or f'ausearch exited with {result.returncode}'}"
+        )
+    lines = [l.strip() for l in result.stdout.splitlines() if 'apparmor="DENIED"' in l]
+    return lines[-limit:]
+
+
+def auditd_running() -> bool:
+    """True if auditd is collecting audit records - the kernel log then misses new denials."""
+    return run_unprivileged(["systemctl", "is-active", "auditd"]).stdout.strip() == "active"
 
 
 def _extract_field(raw_line: str, key: str) -> str | None:

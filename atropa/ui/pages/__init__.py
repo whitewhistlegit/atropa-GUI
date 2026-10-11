@@ -53,11 +53,16 @@ class BasePage(Gtk.Box):
         self.preferences_page = Adw.PreferencesPage()
         self.toast_overlay.set_child(self.preferences_page)
 
+        self._action_running = False
+        self._programmatic_switches: set = set()
+
     def add_group(self, title: str, description: str = "") -> Adw.PreferencesGroup:
+        # Group titles/descriptions render as Pango markup too - a plain "&"
+        # (e.g. "Time & Date") blanked the title instead of showing it.
         group = Adw.PreferencesGroup()
-        group.set_title(title)
+        group.set_title(esc(title))
         if description:
-            group.set_description(description)
+            group.set_description(esc(description))
         self.preferences_page.add(group)
         return group
 
@@ -98,7 +103,7 @@ class BasePage(Gtk.Box):
         """
         spinner = Gtk.Spinner()
         spinner.start()
-        row = Adw.ActionRow(title=message)
+        row = Adw.ActionRow(title=esc(message))  # messages can embed user input, e.g. a search term
         row.add_prefix(spinner)
         group.add(row)
         return row
@@ -140,12 +145,16 @@ class BasePage(Gtk.Box):
         """
         if on_done is None:
             on_done = self.handle_command_result
+        if self._action_running:
+            self.notify("Still working on the previous change - try again when it finishes")
+            return
+        self._action_running = True
 
         dialog = Adw.Dialog()
         dialog.set_title(title)
         dialog.set_content_width(560)
         dialog.set_content_height(420)
-        dialog.set_can_close(False)  # don't let it be dismissed mid-operation
+        dialog.set_can_close(False)  # no accidental Escape mid-operation; "Hide" below closes it on purpose
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -165,7 +174,10 @@ class BasePage(Gtk.Box):
         spinner.start()
         status_row = Adw.ActionRow(title="Running…")
         status_row.add_prefix(spinner)
-        box.append(status_row)
+        # A row has to live in a list box - GTK asserts when focus lands on one that doesn't.
+        status_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        status_list.append(status_row)
+        box.append(status_list)
 
         buffer = Gtk.TextBuffer()
         text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True, cursor_visible=False)
@@ -178,10 +190,19 @@ class BasePage(Gtk.Box):
         scroller.set_min_content_height(260)
         box.append(scroller)
 
-        close_btn = Gtk.Button(label="Close")
-        close_btn.set_sensitive(False)
+        # "Hide" while running: a hung command used to leave this dialog -
+        # and so the whole window - stuck until it timed out. Hiding doesn't
+        # stop the command; on_done still reports how it ended.
+        finished = False
+        close_btn = Gtk.Button(label="Hide")
         close_btn.set_halign(Gtk.Align.END)
-        close_btn.connect("clicked", lambda _b: dialog.close())
+
+        def on_close_clicked(_btn: Gtk.Button) -> None:
+            if not finished:
+                self.notify(f"{title} is still running - you'll be told when it finishes")
+            dialog.force_close()
+
+        close_btn.connect("clicked", on_close_clicked)
         box.append(close_btn)
 
         toolbar.set_content(box)
@@ -197,10 +218,13 @@ class BasePage(Gtk.Box):
             GLib.idle_add(append_line, line)
 
         def finish(result: Any, error: Exception | None) -> bool:
+            nonlocal finished
+            finished = True
+            self._action_running = False
             spinner.stop()
             spinner.set_visible(False)
             dialog.set_can_close(True)
-            close_btn.set_sensitive(True)
+            close_btn.set_label("Close")
             if error:
                 status_row.set_title("Failed")
                 status_row.set_subtitle(esc(str(error)))
@@ -237,6 +261,73 @@ class BasePage(Gtk.Box):
             GLib.idle_add(on_done, result, error)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def run_action(self, work_fn: Callable[[], Any], on_done: Callable[[Any, Exception | None], Any]) -> bool:
+        """
+        run_async() for state-changing actions: at most one at a time per
+        page. A second click (or a different button) while one is still
+        running used to start a parallel privileged sequence - two pacman
+        transactions fighting over the lock, or two sshd_config edits
+        racing each other's validate/restore. Returns False (and says so)
+        if it refused to start, so callers can put a widget back.
+        """
+        if self._action_running:
+            self.notify("Still working on the previous change - try again when it finishes")
+            return False
+        self._action_running = True
+
+        def done(result: Any, error: Exception | None) -> Any:
+            self._action_running = False
+            return on_done(result, error)
+
+        self.run_async(work_fn, done)
+        return True
+
+    def apply_switch(
+        self,
+        switch: Gtk.Switch,
+        requested: bool,
+        work_fn: Callable[[], Any],
+        confirm: tuple[str, str, str] | None = None,
+        on_done: Callable[[Any, Exception | None], Any] | None = None,
+    ) -> bool:
+        """
+        Body of a Gtk.Switch "state-set" handler that applies a system
+        change - return its result from the handler. Takes over GTK's
+        default state handling, optionally asks first (`confirm` is
+        (heading, body, button label)), runs work_fn via run_action(), and
+        puts the switch back if the change is cancelled, refused or fails:
+        a switch must never keep showing a state that was never applied.
+        """
+        if switch in self._programmatic_switches:
+            return False  # our own revert below - let GTK apply it
+
+        def settle(state: bool) -> None:
+            # Both calls are needed: set_active() is a no-op when the knob is
+            # already there (the success case), and on GTK 4.14 set_state()
+            # doesn't move the knob. The guard above lets the state-set that
+            # set_active() re-emits through to GTK's default handler.
+            self._programmatic_switches.add(switch)
+            try:
+                switch.set_active(state)
+                switch.set_state(state)
+            finally:
+                self._programmatic_switches.discard(switch)
+
+        def done(result: Any, error: Exception | None) -> Any:
+            settle(requested if error is None and getattr(result, "ok", True) else not requested)
+            return (on_done or self.handle_command_result)(result, error)
+
+        def start() -> None:
+            if not self.run_action(work_fn, done):
+                settle(not requested)
+
+        if confirm is not None:
+            heading, body, label = confirm
+            self.confirm(heading, body, label, start, on_cancel=lambda: settle(not requested))
+        else:
+            start()
+        return True
 
     def confirm(
         self,

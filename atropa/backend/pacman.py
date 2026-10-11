@@ -4,6 +4,10 @@ atropa.backend.pacman
 Wraps pacman (and, if present, an AUR helper) for the Package Management
 module. Read operations run unprivileged; installs/removals/upgrades go
 through the privilege layer.
+
+Nothing here refreshes the real package database without upgrading
+(`pacman -Sy`): once the database is newer than the installed packages,
+every later `pacman -S` is a partial upgrade, which Arch doesn't support.
 """
 
 from __future__ import annotations
@@ -17,12 +21,17 @@ from .privilege import CommandResult, run_privileged, run_privileged_streaming, 
 AUR_HELPERS = ["paru", "yay"]  # checked in priority order
 
 
+class PartialUpgradeError(RuntimeError):
+    """Installing now would be a partial upgrade - upgrade the system first."""
+
+
 @dataclass
 class Package:
     name: str
     version: str
     installed: bool = True
     description: str = ""
+    repo: str = ""  # "core", "extra", ... or "aur"; empty when pacman didn't say
 
 
 @dataclass
@@ -32,16 +41,41 @@ class PendingUpdate:
     new_version: str
 
 
+def live_update_check_available() -> bool:
+    """
+    True if check_updates() asks the mirrors: checkupdates (pacman-contrib)
+    refuses to run without fakeroot, which isn't part of base.
+    """
+    return shutil.which("checkupdates") is not None and shutil.which("fakeroot") is not None
+
+
 def check_updates() -> list[PendingUpdate]:
     """
     List packages with a pending update (empty list if fully up to date).
-    pacman -Qu prints lines like 'firefox 120.0-1 -> 121.0-1', occasionally
-    with an '[ignored]' suffix for packages held back by IgnorePkg.
+
+    Uses checkupdates (pacman-contrib) when it can run: it syncs a private
+    copy of the database, so it needs no root and leaves the real one alone - the old "Refresh database" button ran `pacman -Sy`
+    instead, which turned the next install into a partial upgrade.
+    Without it this falls back to `pacman -Qu`, which only knows what the
+    last full upgrade's sync saw.
+
+    Lines look like 'firefox 120.0-1 -> 121.0-1', occasionally with an
+    '[ignored]' suffix for packages held back by IgnorePkg.
     """
+    if live_update_check_available():
+        result = run_unprivileged(["checkupdates"])
+        if result.returncode == 2:  # checkupdates' "no updates available"
+            return []
+        if not result.ok:
+            raise RuntimeError(f"checkupdates failed: {result.stderr.strip() or f'exit code {result.returncode}'}")
+        return _parse_updates(result.stdout)
     # -Qu exits 1 with empty stdout when nothing to update, which is not an error for us.
-    result = run_unprivileged(["pacman", "-Qu"])
+    return _parse_updates(run_unprivileged(["pacman", "-Qu"]).stdout)
+
+
+def _parse_updates(text: str) -> list[PendingUpdate]:
     updates = []
-    for line in result.stdout.strip().splitlines():
+    for line in text.strip().splitlines():
         line = line.strip()
         if not line:
             continue
@@ -56,20 +90,14 @@ def check_updates() -> list[PendingUpdate]:
     return updates
 
 
-def update_single_package(name: str) -> CommandResult:
+def _behind_local_database() -> list[str]:
     """
-    Upgrades a single package via `pacman -S <name>`.
-
-    Arch explicitly discourages partial upgrades: updating one package while
-    leaving others on old library versions can break anything that depended
-    on the old ABI, and pacman gives no safety net for this the way it does
-    for a full -Syu's dependency resolution. This exists for cases like an
-    urgent single-package security fix - the UI should warn accordingly and
-    default to recommending a full system upgrade instead.
+    Installed packages the local sync database already has newer versions
+    of (IgnorePkg holds aside). Non-empty means something refreshed the
+    database without upgrading.
     """
-    if not name:
-        raise ValueError("No package specified")
-    return run_privileged(["pacman", "-S", "--noconfirm", name])
+    result = run_unprivileged(["pacman", "-Qu"])
+    return [line.split()[0] for line in result.stdout.splitlines() if line.strip() and "[ignored]" not in line]
 
 
 def _detect_aur_helper() -> str | None:
@@ -116,7 +144,7 @@ def list_orphans() -> list[Package]:
 
 
 def search(query: str, include_aur: bool = True) -> list[Package]:
-    """Search official repos, optionally merged with AUR helper results."""
+    """Search official repos, optionally merged with AUR helper results (repo == "aur")."""
     results: list[Package] = []
 
     repo = run_unprivileged(["pacman", "-Ss", query])
@@ -140,21 +168,16 @@ def _parse_ss_output(text: str) -> list[Package]:
         header = lines[i]
         if "/" in header:
             repo_name, _, rest = header.partition(" ")
-            name = repo_name.split("/", 1)[1]
+            repo, name = repo_name.split("/", 1)
             version = rest.split(" ")[0] if rest else ""
             installed = "[installed" in header
             desc = ""
             if i + 1 < len(lines) and lines[i + 1].startswith(" "):
                 desc = lines[i + 1].strip()
                 i += 1
-            packages.append(Package(name=name, version=version, installed=installed, description=desc))
+            packages.append(Package(name=name, version=version, installed=installed, description=desc, repo=repo))
         i += 1
     return packages
-
-
-def sync_database() -> CommandResult:
-    """pacman -Sy : refresh package database."""
-    return run_privileged(["pacman", "-Sy", "--noconfirm"])
 
 
 def upgrade_system() -> CommandResult:
@@ -173,9 +196,29 @@ def upgrade_system_streaming(on_line) -> CommandResult:
 
 
 def install(package_names: list[str]) -> CommandResult:
+    """
+    pacman -S --needed. Refuses (PartialUpgradeError) while the package
+    database is newer than what's installed: a package from that database
+    can need newer libraries than the installed ones - the partial upgrade
+    Arch doesn't support. upgrade_and_install_streaming() is the way then.
+    """
     if not package_names:
         raise ValueError("No packages specified")
-    return run_privileged(["pacman", "-S", "--noconfirm", *package_names])
+    behind = _behind_local_database()
+    if behind:
+        shown = ", ".join(behind[:5]) + (f" and {len(behind) - 5} more" if len(behind) > 5 else "")
+        raise PartialUpgradeError(
+            f"The package database is newer than {len(behind)} installed package(s) ({shown}), so "
+            "installing now would be a partial upgrade. Upgrade the system first."
+        )
+    return run_privileged(["pacman", "-S", "--needed", "--noconfirm", *package_names])
+
+
+def upgrade_and_install_streaming(package_names: list[str], on_line) -> CommandResult:
+    """pacman -Syu --needed <names>: the Arch wiki's way to install on an out-of-date system."""
+    if not package_names:
+        raise ValueError("No packages specified")
+    return run_privileged_streaming(["pacman", "-Syu", "--needed", "--noconfirm", *package_names], on_line)
 
 
 def remove(package_names: list[str], purge_config: bool = False) -> CommandResult:

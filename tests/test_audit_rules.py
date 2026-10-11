@@ -88,6 +88,36 @@ def test_is_audit_rule_set_active_unknown_key():
     assert audit_rules.is_audit_rule_set_active("not-a-real-key") is False
 
 
+AUDITCTL_L = """\
+-a always,exit -F arch=b64 -S adjtimex,settimeofday -F key=time-change
+-w /etc/passwd -p wa -k identity
+-w /etc/sudoers -p wa -k scope-extra
+"""
+
+
+def test_active_rule_set_keys_reads_every_set_from_one_auditctl_call(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "auditctl", "-l"], stdout=AUDITCTL_L)
+    assert audit_rules.active_rule_set_keys() == {"time-change", "identity"}
+    assert fake_run.calls == [["pkexec", "auditctl", "-l"]]
+
+
+def test_active_rule_set_keys_matches_whole_keys_only(fake_run, fake_which):
+    # "-k scope-extra" isn't the "scope" rule set, though it starts with it.
+    fake_run.set_response(["pkexec", "auditctl", "-l"], stdout=AUDITCTL_L)
+    assert "scope" not in audit_rules.active_rule_set_keys()
+
+
+def test_active_rule_set_keys_none_when_rules_cant_be_read(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "auditctl", "-l"], returncode=126, stderr="dismissed")
+    assert audit_rules.active_rule_set_keys() is None
+
+
+def test_apply_all_rule_sets_creates_the_rules_dir_once(fake_run, fake_which, monkeypatch):
+    monkeypatch.setattr(audit_rules, "_applicable_lines", lambda rule_set: [f"-w /etc/x -p wa -k {rule_set.key}"])
+    audit_rules.apply_all_rule_sets()
+    assert sum(1 for call in fake_run.calls if "mkdir" in call) == 1
+
+
 # --------------------------------------------------------------- apply_audit_rule_set --
 
 def test_apply_audit_rule_set_unknown_key_raises():

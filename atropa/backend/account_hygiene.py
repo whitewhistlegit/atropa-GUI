@@ -202,19 +202,24 @@ def _check_empty_passwords() -> HygieneFinding:
 
 def _check_root_path() -> HygieneFinding:
     lines: list[str] = []
+    unread = ""
 
     # /root/.bash_profile and /root/.bashrc both need a privileged read (root-
     # owned, mode 600) - combined into one pkexec call rather than one per
-    # file. Two separate privileged reads meant two separate authentication
-    # prompts for what's conceptually a single check; cat concatenating both
-    # files' output is fine here since this function only ever scans the
-    # combined lines for "PATH=" content, never needs to know which file a
-    # given line came from.
+    # file, so it's one authentication prompt. cat still prints every file
+    # it can open when one is missing, it just exits 1: that output used to
+    # be thrown away along with the error, so one missing file (common on
+    # Arch, where /root starts out empty) hid the other file's PATH lines.
+    # Only pkexec's own codes (126 dismissed, 127 not authorized) mean
+    # nothing was read.
     root_owned = [p for p in _ROOT_PROFILE_FILES if p.startswith("/root/")]
     if root_owned:
-        result = run_privileged(["cat", *root_owned])
-        if result.ok:
+        result = run_privileged(["cat", "--", *root_owned])
+        if result.returncode in (0, 1):
             lines.extend(result.stdout.splitlines())
+        else:
+            reason = result.stderr.strip()[:80] or f"exit code {result.returncode}"
+            unread = f"couldn't read {' or '.join(root_owned)} ({reason})"
 
     for path_str in _ROOT_PROFILE_FILES:
         if path_str.startswith("/root/"):
@@ -230,7 +235,7 @@ def _check_root_path() -> HygieneFinding:
     if not path_assignments:
         return HygieneFinding(
             "root-path", "Root PATH integrity", "info",
-            "No PATH= assignment found in /root/.bash_profile, /root/.bashrc, or /etc/profile",
+            f"No PATH= assignment found in {', '.join(_ROOT_PROFILE_FILES)}" + (f" - but {unread}" if unread else ""),
         )
 
     problems = []
@@ -252,7 +257,11 @@ def _check_root_path() -> HygieneFinding:
 
     if problems:
         return HygieneFinding("root-path", "Root PATH integrity", "fail", "; ".join(problems))
-    return HygieneFinding("root-path", "Root PATH integrity", "pass", f"Checked {len(path_assignments)} PATH assignment(s), nothing risky found")
+    checked = f"Checked {len(path_assignments)} PATH assignment(s), nothing risky found"
+    if unread:
+        # A pass that never saw root's own profile files isn't one.
+        return HygieneFinding("root-path", "Root PATH integrity", "info", f"{checked} - but {unread}")
+    return HygieneFinding("root-path", "Root PATH integrity", "pass", checked)
 
 
 def scan_all() -> list[HygieneFinding]:

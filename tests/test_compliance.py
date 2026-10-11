@@ -42,19 +42,10 @@ def _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path):
     fake_run.set_response(["fail2ban-client", "status"], stdout="Jail list:\tsshd\n")
 
     fake_run.set_response(["systemctl", "is-active", "apparmor"], stdout="active\n")
-    # apparmor_status() also checks kernel-level enablement (a real
-    # /proc/cmdline read) - AppArmor only scores "pass" in run_audit() when
-    # BOTH the service is active AND the kernel param is set.
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("BOOT_IMAGE=/vmlinuz apparmor=1 security=apparmor\n")
-    real_path_cls = Path
-
-    def fake_path(arg):
-        if str(arg) == "/proc/cmdline":
-            return cmdline
-        return real_path_cls(arg)
-
-    monkeypatch.setattr(hardening, "Path", fake_path)
+    # apparmor_status() also checks that AppArmor is an active LSM (the
+    # kernel_state fixture's lsm file) - AppArmor only scores "pass" in
+    # run_audit() when BOTH the service is active AND the kernel has it on.
+    hardening.LSM_LIST.write_text("capability,landlock,lockdown,yama,integrity,apparmor,bpf\n")
 
     fake_run.set_response(["systemctl", "is-active", "usbguard"], stdout="inactive\n")
     fake_run.set_response(["systemctl", "is-enabled", "usbguard"], stdout="disabled\n")
@@ -69,9 +60,8 @@ def _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path):
 
     fake_run.set_response(["pkexec", "visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
 
-    sysctl_file = tmp_path / "99-atropa-hardening.conf"
-    sysctl_file.write_text("kernel.kptr_restrict = 2\n")
-    monkeypatch.setattr(hardening, "SYSCTL_HARDENING_FILE", str(sysctl_file))
+    for key, recommended, _desc in hardening.SYSCTL_RECOMMENDATIONS:
+        fake_run.set_response(["sysctl", "-n", key], stdout=f"{recommended}\n")
 
     # Service Inventory: nothing installed -> every entry scores "pass".
     fake_run.set_response(["pacman", "-Q"], returncode=1)
@@ -266,3 +256,11 @@ def test_save_report_to_file_writes_markdown(tmp_path, fake_run, fake_which):
     content = path.read_text()
     assert content.startswith("# Atropa Security Baseline Report")
     assert compliance.DISCLAIMER in content
+
+
+def test_total_check_count_counts_every_check_in_the_report(fake_run, fake_which, monkeypatch, tmp_path):
+    # It used to count only run_audit()'s checks: "29 scored checks, 3 total".
+    _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path)
+    report = compliance.generate_report()
+    assert report.total_check_count == sum(len(category.checks) for category in report.categories)
+    assert report.scored_check_count <= report.total_check_count

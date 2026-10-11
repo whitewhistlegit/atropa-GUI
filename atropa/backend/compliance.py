@@ -151,7 +151,9 @@ def generate_report() -> ComplianceReport:
         categories=sorted(categories, key=lambda c: c.name),
         overall_score=overall,
         scored_check_count=scored_count,
-        total_check_count=len(checks),
+        # Every check in the report - this used to count only the run_audit()
+        # ones, so the header could claim "29 scored checks, 3 total".
+        total_check_count=sum(len(cat_checks) for cat_checks in by_category.values()),
     )
 
 

@@ -186,22 +186,46 @@ def test_empty_password_check_handles_unreadable_shadow(fake_run, fake_which):
 # --------------------------------------------------------------- root PATH --
 
 def test_root_path_with_no_assignment_found_is_info(fake_run, fake_which, monkeypatch):
-    fake_run.set_response(["pkexec", "cat", "/root/.bash_profile", "/root/.bashrc"], returncode=1)
+    fake_run.set_response(["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"], returncode=1)
     monkeypatch.setattr(ah.Path, "exists", lambda self: False)
     result = ah._check_root_path()
     assert result.status == "info"
 
 
 def test_root_path_flags_dot_component(fake_run, fake_which, monkeypatch):
-    fake_run.set_response(["pkexec", "cat", "/root/.bash_profile", "/root/.bashrc"], stdout='PATH="/usr/bin:.:/bin"\n')
+    fake_run.set_response(["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"], stdout='PATH="/usr/bin:.:/bin"\n')
     monkeypatch.setattr(ah.Path, "exists", lambda self: False)
     result = ah._check_root_path()
     assert result.status == "fail"
     assert "'.'" in result.detail
 
 
+def test_root_path_still_reads_one_file_when_the_other_is_missing(fake_run, fake_which, monkeypatch):
+    # cat prints the file it could open and exits 1 for the missing one.
+    fake_run.set_response(
+        ["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"],
+        stdout='export PATH=".:$PATH"\n',
+        stderr="cat: /root/.bashrc: No such file or directory\n",
+        returncode=1,
+    )
+    monkeypatch.setattr(ah.Path, "exists", lambda self: False)
+    result = ah._check_root_path()
+    assert result.status == "fail"
+    assert "'.'" in result.detail
+
+
+def test_root_path_without_roots_files_is_not_a_pass(fake_run, fake_which, monkeypatch, tmp_path):
+    profile = tmp_path / "profile"
+    profile.write_text("PATH=/usr/local/sbin:/usr/bin\n")
+    monkeypatch.setattr(ah, "_ROOT_PROFILE_FILES", ["/root/.bash_profile", "/root/.bashrc", str(profile)])
+    fake_run.set_response(["pkexec", "cat"], returncode=126, stderr="Request dismissed")
+    result = ah._check_root_path()
+    assert result.status == "info"
+    assert "couldn't read /root/.bash_profile or /root/.bashrc" in result.detail
+
+
 def test_root_path_clean_assignment_passes(fake_run, fake_which, monkeypatch):
-    fake_run.set_response(["pkexec", "cat", "/root/.bash_profile", "/root/.bashrc"], stdout="PATH=/usr/local/sbin:/usr/bin:/sbin\n")
+    fake_run.set_response(["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"], stdout="PATH=/usr/local/sbin:/usr/bin:/sbin\n")
     monkeypatch.setattr(ah.Path, "exists", lambda self: False)
     result = ah._check_root_path()
     assert result.status == "pass"
@@ -229,7 +253,7 @@ def test_file_perms_missing_file_is_info(monkeypatch):
 
 def test_scan_all_aggregates_every_check(fake_passwd_db, fake_run, fake_which):
     fake_run.set_response(["pkexec", "cat", "/etc/shadow"], returncode=1)
-    fake_run.set_response(["pkexec", "cat", "/root/.bash_profile", "/root/.bashrc"], returncode=1)
+    fake_run.set_response(["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"], returncode=1)
     results = ah.scan_all()
     keys = {f.key for f in results}
     assert "dup-uid" in keys

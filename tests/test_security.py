@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 
 from atropa.backend import security
+from atropa.backend.privilege import CommandResult
 
 
 # --------------------------------------------------------------- firewall --
@@ -116,6 +117,21 @@ def test_firewall_deny_port_firewalld_stopped_uses_offline_cmd(fake_run, fake_wh
 
 # --------------------------------------------------------------- ssh_status --
 
+@pytest.fixture
+def sshd_conf(monkeypatch, tmp_path):
+    """A temp sshd_config wired in as SSHD_CONFIG - stock-Arch-like by
+    default: the settings only as commented-out templates."""
+    conf = tmp_path / "sshd_config"
+    conf.write_text("#Port 22\n#PermitRootLogin prohibit-password\n#PasswordAuthentication yes\nUsePAM yes\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    return conf
+
+
+def _written_configs(fake_run, conf) -> list[str]:
+    """The content of every privileged write to sshd_config, in order."""
+    return [text for call, text in zip(fake_run.calls, fake_run.inputs) if call == ["pkexec", "tee", str(conf)]]
+
+
 def test_ssh_status_not_installed(fake_run, fake_which):
     fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
     status = security.ssh_status()
@@ -163,16 +179,84 @@ def test_ssh_status_port_explicit_only_for_uncommented_port_line(fake_run, fake_
     assert security.ssh_status().port_explicit is True
 
 
-def test_set_ssh_permit_root_login_writes_exact_value(fake_run, fake_which, privilege_paths, monkeypatch, tmp_path):
-    conf = tmp_path / "sshd_config"
-    conf.write_text("PermitRootLogin yes\n")
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
-    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
+def test_ssh_status_first_value_wins(fake_run, fake_which, sshd_conf):
+    # The old parser let the last line win; sshd keeps the first.
+    sshd_conf.write_text("PasswordAuthentication no\nPasswordAuthentication yes\n")
+    assert security.ssh_status().password_auth == "no"
 
+
+def test_ssh_status_reads_includes_where_they_appear(fake_run, fake_which, sshd_conf):
+    dropins = sshd_conf.parent / "sshd_config.d"
+    dropins.mkdir()
+    (dropins / "50-cloud-init.conf").write_text("PasswordAuthentication yes\n")
+    sshd_conf.write_text("Include sshd_config.d/*.conf\nPasswordAuthentication no\n")
+    assert security.ssh_status().password_auth == "yes"
+
+
+def test_ssh_status_ignores_match_blocks_until_match_all(fake_run, fake_which, sshd_conf):
+    sshd_conf.write_text(
+        "PermitRootLogin no\nMatch User admin\n    PermitRootLogin yes\n    PasswordAuthentication yes\n"
+        "Match all\nX11Forwarding yes\n"
+    )
+    status = security.ssh_status()
+    assert status.root_login == "no"
+    assert status.password_auth == "unknown"  # only set inside the Match block
+    assert status.x11_forwarding == "yes"  # global again after Match all
+
+
+def test_ssh_status_match_inside_an_include_ends_with_that_file(fake_run, fake_which, sshd_conf):
+    dropins = sshd_conf.parent / "sshd_config.d"
+    dropins.mkdir()
+    (dropins / "20-sftp.conf").write_text("Match Group sftp\n    PasswordAuthentication yes\n")
+    sshd_conf.write_text("Include sshd_config.d/*.conf\nPasswordAuthentication no\n")
+    assert security.ssh_status().password_auth == "no"
+
+
+def test_ssh_status_collects_every_listening_port(fake_run, fake_which, sshd_conf):
+    sshd_conf.write_text("Port 22\nPort 2222\nListenAddress 10.0.0.1:8022\nListenAddress 192.168.1.5\n")
+    status = security.ssh_status()
+    assert status.port == "22"
+    assert status.ports == ["22", "2222", "8022"]
+
+
+def test_ssh_status_accepts_equals_syntax_and_trailing_comments(fake_run, fake_which, sshd_conf):
+    sshd_conf.write_text("PasswordAuthentication=no  # keys only\nMaxAuthTries 3 # CIS\n")
+    status = security.ssh_status()
+    assert status.password_auth == "no"
+    assert status.max_auth_tries == "3"
+
+
+def test_ssh_status_reports_includes_it_cannot_read(fake_run, fake_which, sshd_conf, monkeypatch):
+    from pathlib import Path
+
+    dropins = sshd_conf.parent / "sshd_config.d"
+    dropins.mkdir()
+    secret = dropins / "40-secret.conf"
+    secret.write_text("PasswordAuthentication yes\n")
+    sshd_conf.write_text("Include sshd_config.d/*.conf\nPasswordAuthentication no\n")
+    real_read_text = Path.read_text
+
+    def read_text(self, *args, **kwargs):
+        if self == secret:
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    status = security.ssh_status()
+    assert status.unreadable_includes == [str(secret)]
+
+
+def test_effective_falls_back_to_openssh_defaults():
+    status = security.SshStatus(installed=True, running=True)
+    assert status.effective("password_auth") == "yes"
+    assert status.effective("root_login") == "prohibit-password"
+    assert security.SshStatus(installed=True, running=True, password_auth="no").effective("password_auth") == "no"
+
+
+def test_set_ssh_permit_root_login_writes_exact_value(fake_run, fake_which, privilege_paths, sshd_conf):
+    sshd_conf.write_text("PermitRootLogin yes\n")
     assert security.set_ssh_permit_root_login("Prohibit-Password").ok
-
-    sed_call = fake_run.call_containing("sed")
-    assert sed_call is not None and "PermitRootLogin prohibit-password" in sed_call[4]
+    assert _written_configs(fake_run, sshd_conf) == ["PermitRootLogin prohibit-password\n"]
 
 
 @pytest.mark.parametrize("value", ["unknown", "", "maybe", "yes/e;touch /tmp/pwned;#"])
@@ -184,102 +268,148 @@ def test_set_ssh_permit_root_login_rejects_anything_sshd_does_not_accept(fake_ru
 
 
 # --------------------------------------------------------------- _set_sshd_option --
+#
+# Edits are checked on the content actually written (stdin of the privileged
+# tee), against sshd's own rules: first value wins, Match blocks are
+# conditional, Includes are read where they appear.
 
-def test_set_sshd_option_replaces_existing_line(
-    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
+def test_set_sshd_option_replaces_first_global_line_in_place(fake_run, fake_which, privilege_paths, sshd_conf):
+    sshd_conf.write_text("Port 22\nPermitRootLogin yes\nUsePAM yes\n")
+    assert security.set_ssh_root_login(False).ok
+    assert _written_configs(fake_run, sshd_conf) == ["Port 22\nPermitRootLogin no\nUsePAM yes\n"]
+    assert fake_run.last_call() == ["pkexec", "systemctl", "try-reload-or-restart", "sshd"]
+
+
+def test_set_sshd_option_uncomments_the_template_line(fake_run, fake_which, privilege_paths, sshd_conf):
+    assert security.set_ssh_password_auth(False).ok
+    assert _written_configs(fake_run, sshd_conf) == [
+        "#Port 22\n#PermitRootLogin prohibit-password\nPasswordAuthentication no\nUsePAM yes\n"
+    ]
+
+
+def test_set_sshd_option_never_edits_match_blocks(fake_run, fake_which, privilege_paths, sshd_conf):
+    """The old replace-every-line sed rewrote the only PasswordAuthentication
+    line - inside a Match block - so the global default (yes) stayed in
+    effect while Atropa reported key-only auth."""
+    sshd_conf.write_text("Port 22\nMatch Address 192.168.1.0/24\n    PasswordAuthentication yes\n")
+    assert security.set_ssh_password_auth(False).ok
+    assert _written_configs(fake_run, sshd_conf) == [
+        "Port 22\nPasswordAuthentication no\nMatch Address 192.168.1.0/24\n    PasswordAuthentication yes\n"
+    ]
+
+
+def test_set_sshd_option_inserts_before_a_trailing_match_not_at_eof(fake_run, fake_which, privilege_paths, sshd_conf):
+    # Appending at the end used to put the line inside the last Match block.
+    sshd_conf.write_text("UsePAM yes\nMatch User git\n    AllowTcpForwarding no\n")
+    assert security.set_ssh_x11_forwarding(False).ok
+    assert _written_configs(fake_run, sshd_conf) == [
+        "UsePAM yes\nX11Forwarding no\nMatch User git\n    AllowTcpForwarding no\n"
+    ]
+
+
+def test_set_sshd_option_goes_above_an_include_that_would_override_it(fake_run, fake_which, privilege_paths, sshd_conf):
+    dropins = sshd_conf.parent / "sshd_config.d"
+    dropins.mkdir()
+    (dropins / "50-cloud-init.conf").write_text("PasswordAuthentication yes\n")
+    # sshd reads the drop-in first, so this "no" line never applied.
+    sshd_conf.write_text("Include sshd_config.d/*.conf\nPasswordAuthentication no\n")
+
+    assert security.set_ssh_password_auth(False).ok
+    assert _written_configs(fake_run, sshd_conf) == [
+        "PasswordAuthentication no\nInclude sshd_config.d/*.conf\nPasswordAuthentication no\n"
+    ]
+
+
+def test_set_sshd_option_leaves_an_unrelated_include_alone(fake_run, fake_which, privilege_paths, sshd_conf):
+    dropins = sshd_conf.parent / "sshd_config.d"
+    dropins.mkdir()
+    (dropins / "10-keepalive.conf").write_text("ClientAliveInterval 60\n")
+    sshd_conf.write_text("Include sshd_config.d/*.conf\n#PasswordAuthentication yes\n")
+
+    assert security.set_ssh_password_auth(False).ok
+    assert _written_configs(fake_run, sshd_conf) == ["Include sshd_config.d/*.conf\nPasswordAuthentication no\n"]
+
+
+def test_set_sshd_option_inserts_when_missing(fake_run, fake_which, privilege_paths, sshd_conf):
+    sshd_conf.write_text("# nothing relevant here\n")
+    assert security.set_ssh_port(2222).ok
+    assert _written_configs(fake_run, sshd_conf) == ["# nothing relevant here\nPort 2222\n"]
+
+
+def test_set_sshd_option_already_in_effect_writes_nothing(fake_run, fake_which, sshd_conf):
+    sshd_conf.write_text("PasswordAuthentication no\n")
+    assert security.set_ssh_password_auth(False).ok
+    assert fake_run.calls == []
+
+
+def test_set_sshd_option_restores_the_original_when_validation_fails(
+    fake_run, fake_which, privilege_paths, sshd_conf
 ):
-    conf = tmp_path / "sshd_config"
-    conf.write_text("PermitRootLogin yes\n")
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
-
-    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
-    fake_run.set_response(["pkexec", "sshd", "-t"], returncode=0)
-    fake_run.set_response(["pkexec", "systemctl", "reload", "sshd"], returncode=0)
-
-    result = security.set_ssh_root_login(False)
-
-    assert result.ok
-    assert fake_run.call_containing("sed") is not None
-    # append form ("bash -c ... >> ...") must NOT have been used
-    assert fake_run.call_containing("bash") is None
-
-
-def test_set_sshd_option_appends_when_missing(
-    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
-):
-    conf = tmp_path / "sshd_config"
-    conf.write_text("# nothing relevant here\n")
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
-
-    fake_run.set_response(["grep", "-Ei"], stdout="")  # not found -> append path
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
-    fake_run.set_response(["pkexec", "sshd", "-t"], returncode=0)
-    fake_run.set_response(["pkexec", "systemctl", "reload", "sshd"], returncode=0)
-
-    result = security.set_ssh_port(2222)
-
-    assert result.ok
-    append_call = fake_run.call_containing("bash")
-    assert append_call is not None
-    assert "Port 2222" in append_call[-1]
-
-
-def test_set_sshd_option_rolls_back_on_failed_validation(
-    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
-):
-    """The critical safety path: if `sshd -t` fails after the edit, the
-    previous config must be restored and sshd must NEVER be reloaded."""
-    conf = tmp_path / "sshd_config"
-    conf.write_text("PermitRootLogin yes\n")
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
-
-    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    """The critical safety path: if `sshd -t` rejects the edit, the previous
+    content goes back and sshd is NEVER reloaded."""
+    sshd_conf.write_text("PermitRootLogin yes\n")
     fake_run.set_response(["pkexec", "sshd", "-t"], returncode=1, stderr="syntax error on line 1")
-    fake_run.set_response(["pkexec", "tee", str(conf)], returncode=0)
 
-    with pytest.raises(RuntimeError, match="failed validation"):
+    with pytest.raises(RuntimeError, match="Restored the previous config"):
         security.set_ssh_root_login(False)
 
-    # restore_file should have been invoked (tee to the original path)
-    assert fake_run.call_containing("tee") is not None
-    # reload must never have been called
-    assert fake_run.call_containing("reload") is None
+    assert _written_configs(fake_run, sshd_conf) == ["PermitRootLogin no\n", "PermitRootLogin yes\n"]
+    assert fake_run.call_containing("try-reload-or-restart") is None
 
 
-def test_set_sshd_option_no_backup_available_still_raises_but_skips_restore(
-    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
-):
-    """If the config didn't exist before (nothing to back up), a failed
-    validation should still raise, without attempting a restore call."""
-    conf = tmp_path / "sshd_config"  # never created
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+def test_set_sshd_option_says_so_when_the_restore_also_fails(fake_which, privilege_paths, sshd_conf, monkeypatch):
+    # The old message claimed "Reverted to the previous config" even when the
+    # restore was never attempted or failed.
+    sshd_conf.write_text("PermitRootLogin yes\n")
+    tee_calls = []
 
-    fake_run.set_response(["grep", "-Ei"], stdout="")
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
-    fake_run.set_response(["pkexec", "sshd", "-t"], returncode=1, stderr="bad config")
+    def fake_privileged(argv, input_text=None, timeout=600):
+        if argv[0] == "tee":
+            tee_calls.append(input_text)
+            ok = len(tee_calls) == 1  # the edit lands, the restore fails
+            return CommandResult(0 if ok else 1, "", "" if ok else "Read-only file system")
+        if argv[:2] == ["sshd", "-t"]:
+            return CommandResult(1, "", "bad option")
+        raise AssertionError(f"unexpected privileged call {argv}")
 
-    with pytest.raises(RuntimeError, match="failed validation"):
+    monkeypatch.setattr(security, "run_privileged", fake_privileged)
+    with pytest.raises(RuntimeError, match="ALSO failed") as excinfo:
+        security.set_ssh_root_login(False)
+    assert "Read-only file system" in str(excinfo.value)
+
+
+def test_set_sshd_option_missing_config_raises_without_writing(fake_run, fake_which, monkeypatch, tmp_path):
+    monkeypatch.setattr(security, "SSHD_CONFIG", tmp_path / "missing")
+    with pytest.raises(RuntimeError, match="doesn't exist"):
         security.set_ssh_port(2222)
+    assert fake_run.calls == []
 
-    assert fake_run.call_containing("tee") is None
+
+def test_set_sshd_option_stops_if_writing_fails(fake_run, fake_which, privilege_paths, sshd_conf):
+    sshd_conf.write_text("PermitRootLogin yes\n")
+    fake_run.set_response(["pkexec", "tee"], returncode=1, stderr="permission denied")
+    assert not security.set_ssh_root_login(False).ok
+    assert fake_run.call_containing("-t") is None  # sshd -t never reached
 
 
-def test_set_sshd_option_stops_early_if_edit_command_fails(
-    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
-):
-    conf = tmp_path / "sshd_config"
-    conf.write_text("PermitRootLogin yes\n")
-    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+def test_set_ssh_port_refuses_when_sshd_listens_on_several_ports(fake_run, fake_which, sshd_conf):
+    # Port lines accumulate - rewriting one of several isn't "setting the port".
+    sshd_conf.write_text("Port 22\nPort 443\n")
+    with pytest.raises(ValueError, match="several"):
+        security.set_ssh_port(2222)
+    assert fake_run.calls == []
 
-    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=1, stderr="sed failed")
 
-    result = security.set_ssh_root_login(False)
-    assert not result.ok
-    # sshd -t should never be reached if the edit itself failed
-    assert fake_run.call_containing("sshd") is None
+def test_edit_treats_lines_after_match_all_as_global_again():
+    text = "Match User git\n    X11Forwarding yes\nMatch all\nX11Forwarding yes\n"
+    out = security._edit_sshd_global_option(text, "X11Forwarding", "no", lambda _value, _key: False)
+    assert out == "Match User git\n    X11Forwarding yes\nMatch all\nX11Forwarding no\n"
+
+
+def test_edit_rewrites_later_dead_duplicates_to_match(fake_run, fake_which):
+    text = "PasswordAuthentication yes\nUsePAM yes\nPasswordAuthentication yes\n"
+    out = security._edit_sshd_global_option(text, "PasswordAuthentication", "no", lambda _value, _key: False)
+    assert out == "PasswordAuthentication no\nUsePAM yes\nPasswordAuthentication no\n"
 
 
 def test_sudoers_check_runs_visudo_as_root(fake_run, fake_which):
@@ -345,9 +475,9 @@ def test_ssh_status_permit_fields_dont_collide_with_each_other_or_root_login(fak
     assert status.permit_user_environment == "yes"
 
 
-def test_set_ssh_log_level_valid_values(fake_run, fake_which):
+def test_set_ssh_log_level_valid_values(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_log_level("VERBOSE")
-    assert any("LogLevel VERBOSE" in arg for call in fake_run.calls for arg in call)
+    assert "LogLevel VERBOSE\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
 def test_set_ssh_log_level_rejects_invalid_value():
@@ -355,14 +485,14 @@ def test_set_ssh_log_level_rejects_invalid_value():
         security.set_ssh_log_level("DEBUG3")
 
 
-def test_set_ssh_x11_forwarding(fake_run, fake_which):
+def test_set_ssh_x11_forwarding(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_x11_forwarding(False)
-    assert any("X11Forwarding no" in arg for call in fake_run.calls for arg in call)
+    assert "X11Forwarding no\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
-def test_set_ssh_max_auth_tries(fake_run, fake_which):
+def test_set_ssh_max_auth_tries(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_max_auth_tries(4)
-    assert any("MaxAuthTries 4" in arg for call in fake_run.calls for arg in call)
+    assert "MaxAuthTries 4\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
 def test_set_ssh_max_auth_tries_rejects_less_than_one():
@@ -370,21 +500,21 @@ def test_set_ssh_max_auth_tries_rejects_less_than_one():
         security.set_ssh_max_auth_tries(0)
 
 
-def test_set_ssh_ignore_rhosts(fake_run, fake_which):
+def test_set_ssh_ignore_rhosts(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_ignore_rhosts(True)
-    assert any("IgnoreRhosts yes" in arg for call in fake_run.calls for arg in call)
+    assert "IgnoreRhosts yes\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
-def test_set_ssh_hostbased_authentication(fake_run, fake_which):
+def test_set_ssh_hostbased_authentication(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_hostbased_authentication(False)
-    assert any("HostbasedAuthentication no" in arg for call in fake_run.calls for arg in call)
+    assert "HostbasedAuthentication no\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
-def test_set_ssh_permit_empty_passwords(fake_run, fake_which):
+def test_set_ssh_permit_empty_passwords(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_permit_empty_passwords(False)
-    assert any("PermitEmptyPasswords no" in arg for call in fake_run.calls for arg in call)
+    assert "PermitEmptyPasswords no\n" in _written_configs(fake_run, sshd_conf)[0]
 
 
-def test_set_ssh_permit_user_environment(fake_run, fake_which):
+def test_set_ssh_permit_user_environment(fake_run, fake_which, privilege_paths, sshd_conf):
     security.set_ssh_permit_user_environment(False)
-    assert any("PermitUserEnvironment no" in arg for call in fake_run.calls for arg in call)
+    assert "PermitUserEnvironment no\n" in _written_configs(fake_run, sshd_conf)[0]

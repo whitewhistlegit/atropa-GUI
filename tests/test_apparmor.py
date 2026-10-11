@@ -141,6 +141,50 @@ def test_set_network_rule_grammar(fake_run, fake_which, tmp_path):
     assert fake_run.call_containing("apparmor_parser") is not None
 
 
+def _tee_inputs(fake_run, profile):
+    return [text for call, text in zip(fake_run.calls, fake_run.inputs) if call == ["pkexec", "tee", str(profile)]]
+
+
+def test_rejected_rule_change_restores_the_previous_profile(fake_run, fake_which, tmp_path):
+    original = "profile /usr/bin/foo {\n}\n"
+    profile = tmp_path / "usr.bin.foo"
+    profile.write_text(original)
+    fake_run.set_response(["pkexec", "apparmor_parser", "-r", str(profile)], returncode=1, stderr="syntax error")
+
+    with pytest.raises(RuntimeError, match="syntax error.*Restored the previous profile"):
+        apparmor.set_capability_rule(str(profile), "net_admin", True)
+    written = _tee_inputs(fake_run, profile)
+    assert "capability net_admin," in written[0]
+    assert written[-1] == original  # put back after apparmor_parser said no
+
+
+def test_rejected_appended_rule_restores_the_previous_profile(fake_run, fake_which, tmp_path):
+    original = "profile /usr/bin/foo {\n}\n"
+    profile = tmp_path / "usr.bin.foo"
+    profile.write_text(original)
+    fake_run.set_response(["pkexec", "apparmor_parser", "-r", str(profile)], returncode=1, stderr="bad rule")
+
+    with pytest.raises(RuntimeError, match="Restored the previous profile"):
+        apparmor.append_rule_to_profile(str(profile), "/etc/shadow r,,")
+    assert _tee_inputs(fake_run, profile)[-1] == original
+
+
+def test_failed_restore_says_the_file_still_has_the_rejected_change(fake_run, fake_which, tmp_path, monkeypatch):
+    profile = tmp_path / "usr.bin.foo"
+    profile.write_text("profile /usr/bin/foo {\n}\n")
+    writes = iter([(0, ""), (1, "read-only file system")])
+
+    def fake_privileged(argv, input_text=None, **_kwargs):
+        if argv[0] == "tee":
+            code, err = next(writes)
+            return apparmor.CommandResult(code, "", err)
+        return apparmor.CommandResult(1, "", "syntax error")
+
+    monkeypatch.setattr(apparmor, "run_privileged", fake_privileged)
+    with pytest.raises(RuntimeError, match="ALSO failed.*read-only file system"):
+        apparmor.set_capability_rule(str(profile), "net_admin", True)
+
+
 def test_profile_toggle_states(tmp_path):
     profile = tmp_path / "usr.bin.foo"
     profile.write_text(
@@ -203,3 +247,38 @@ def test_list_denials_filters_and_limits(fake_run):
     denials = apparmor.list_denials(limit=1)
     assert len(denials) == 1
     assert "DENIED" in denials[0]
+
+
+def test_list_denials_from_audit_log_reads_apparmor_records_since_boot(fake_run, fake_which):
+    # Where denials go once auditd runs - the kernel log stops getting them.
+    fake_which.add("ausearch")
+    fake_run.set_response(
+        ["pkexec", "ausearch"],
+        stdout=(
+            "----\ntime->Tue Nov 14 22:13:20 2023\n"
+            'type=AVC msg=audit(1700000000.123:45): apparmor="DENIED" operation="open" profile="/usr/bin/foo"\n'
+            'type=AVC msg=audit(1700000000.124:46): apparmor="ALLOWED" operation="open" profile="/usr/bin/bar"\n'
+        ),
+    )
+    denials = apparmor.list_denials_from_audit_log()
+    assert denials == ['type=AVC msg=audit(1700000000.123:45): apparmor="DENIED" operation="open" profile="/usr/bin/foo"']
+    call = fake_run.call_containing("ausearch")
+    assert call[call.index("-ts") + 1] == "boot" and "--input-logs" in call
+
+
+def test_list_denials_from_audit_log_no_matches_is_empty(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(["pkexec", "ausearch"], returncode=1, stderr="<no matches>\n")
+    assert apparmor.list_denials_from_audit_log() == []
+
+
+def test_list_denials_from_audit_log_failure_is_an_error_not_no_denials(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(["pkexec", "ausearch"], returncode=126, stderr="Request dismissed")
+    with pytest.raises(RuntimeError, match="Request dismissed"):
+        apparmor.list_denials_from_audit_log()
+
+
+def test_list_denials_from_audit_log_requires_ausearch(fake_which):
+    with pytest.raises(RuntimeError, match="isn't installed"):
+        apparmor.list_denials_from_audit_log()
