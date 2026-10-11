@@ -49,7 +49,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .privilege import CommandResult, run_privileged, run_privileged_streaming, run_unprivileged
+from .privilege import CommandResult, path_exists, run_privileged, run_privileged_streaming, run_unprivileged
 
 CONFIG_FILE = "/etc/aide.conf"
 DB_ACTIVE_CANDIDATES = ["/var/lib/aide/aide.db.gz", "/var/lib/aide/aide.db"]
@@ -64,14 +64,23 @@ def is_installed() -> bool:
 
 
 def _find_existing(candidates: list[str]) -> str | None:
+    """The first candidate known to exist (one that can't be checked doesn't count)."""
     for path in candidates:
-        if Path(path).exists():
+        if path_exists(path):
             return path
     return None
 
 
-def baseline_initialized() -> bool:
-    return _find_existing(DB_ACTIVE_CANDIDATES) is not None
+def _unknowable(candidates: list[str]) -> list[str]:
+    """Candidates whose existence can't be told without root - /var/lib/aide is often 0700."""
+    return [path for path in candidates if path_exists(path) is None]
+
+
+def baseline_initialized() -> bool | None:
+    """True/False, or None when the database directory can't be looked into without root."""
+    if _find_existing(DB_ACTIVE_CANDIDATES) is not None:
+        return True
+    return None if _unknowable(DB_ACTIVE_CANDIDATES) else False
 
 
 def _unit_exists(unit: str) -> bool:
@@ -89,7 +98,7 @@ def detect_timer_unit() -> str | None:
 class AideStatus:
     installed: bool
     config_exists: bool
-    baseline_initialized: bool
+    baseline_initialized: bool | None  # None: couldn't tell without root
     timer_unit: str | None
     timer_active: bool
     timer_enabled: bool
@@ -130,13 +139,21 @@ def initialize_baseline(on_line: Callable[[str], None]) -> CommandResult:
         return result
 
     new_db = _find_existing(DB_NEW_CANDIDATES)
-    if not new_db:
+    # Can't look into a root-only database directory: try each possible new
+    # database in turn and let root's cp do the looking, rather than calling
+    # a successful --init a failure.
+    candidates = [new_db] if new_db else _unknowable(DB_NEW_CANDIDATES)
+    if not candidates:
         on_line("aide --init reported success, but no new database file was found to promote.")
         return CommandResult(returncode=1, stdout=result.stdout, stderr="No new database file found after --init")
 
-    active_db = new_db.replace(".new", "")
-    on_line(f"Promoting {new_db} -> {active_db}")
-    return run_privileged(["cp", new_db, active_db])
+    for candidate in candidates:
+        active_db = candidate.replace(".new", "")
+        on_line(f"Promoting {candidate} -> {active_db}")
+        promote = run_privileged(["cp", candidate, active_db])
+        if promote.ok:
+            break
+    return promote
 
 
 def update_baseline(on_line: Callable[[str], None]) -> CommandResult:

@@ -33,7 +33,7 @@ def test_run_missing_binary_raises_privilege_error(fake_run, monkeypatch):
     def raise_not_found(*a, **k):
         raise FileNotFoundError()
 
-    monkeypatch.setattr(subprocess, "run", raise_not_found)
+    monkeypatch.setattr(privilege, "_subprocess_run", raise_not_found)
     with pytest.raises(PrivilegeError, match="Command not found"):
         privilege.run_unprivileged(["nonexistent-tool"])
 
@@ -42,7 +42,7 @@ def test_run_timeout_raises_privilege_error(fake_run, monkeypatch):
     def raise_timeout(*a, **k):
         raise subprocess.TimeoutExpired(cmd="slow", timeout=1)
 
-    monkeypatch.setattr(subprocess, "run", raise_timeout)
+    monkeypatch.setattr(privilege, "_subprocess_run", raise_timeout)
     with pytest.raises(PrivilegeError, match="timed out"):
         privilege.run_unprivileged(["slow-tool"])
 
@@ -111,7 +111,7 @@ def test_backup_file_falls_back_to_privileged_read_on_permission_error(
         raise PermissionError()
 
     monkeypatch.setattr("pathlib.Path.read_bytes", raise_permission_error)
-    fake_run.set_response(["pkexec", "cat", str(src)], stdout="secret=1\n", returncode=0)
+    fake_run.set_response(["pkexec", "cat", "--", str(src)], stdout="secret=1\n", returncode=0)
 
     backup_name = privilege.backup_file(str(src))
     assert backup_name is not None
@@ -128,7 +128,7 @@ def test_backup_file_read_failure_returns_none(
         raise PermissionError()
 
     monkeypatch.setattr("pathlib.Path.read_bytes", raise_permission_error)
-    fake_run.set_response(["pkexec", "cat", str(src)], stdout="", stderr="denied", returncode=1)
+    fake_run.set_response(["pkexec", "cat", "--", str(src)], stdout="", stderr="denied", returncode=1)
 
     assert privilege.backup_file(str(src)) is None
 
@@ -230,6 +230,9 @@ class _FakeStdout:
     def __iter__(self):
         return iter(self._lines)
 
+    def close(self):
+        pass
+
 
 class _FakeStdin:
     """Stand-in for Popen.stdin that remembers what was written even after close()."""
@@ -250,7 +253,9 @@ class _FakePopen:
 
     def __init__(self, argv, stdout_lines=None, returncode=0, wait_raises=None, stdin_writable=True):
         self.args = argv
+        self.pid = 4242
         self.stdout = _FakeStdout(stdout_lines or [])
+        self.stderr = None  # merged into stdout, as run_*_streaming ask for
         self.stdin = _FakeStdin() if stdin_writable else None
         self._returncode = returncode
         self._wait_raises = wait_raises
@@ -394,3 +399,107 @@ def test_run_unprivileged_streaming_timeout_kills_process_and_raises(monkeypatch
     with pytest.raises(PrivilegeError, match="timed out"):
         privilege.run_unprivileged_streaming(["make", "all"], on_line=lambda _l: None, timeout=1)
     assert killed == [True]
+
+
+# --------------------------------------------------------------- timeouts that actually hold --
+
+SLEEPER = [sys.executable, "-c", "import time; time.sleep(10)"]
+
+
+def test_streaming_timeout_holds_for_a_command_that_prints_nothing():
+    # The timeout used to be checked only after the output ended, so a
+    # silent command ran for as long as it liked.
+    import time
+
+    start = time.monotonic()
+    with pytest.raises(PrivilegeError, match="timed out after 1s"):
+        privilege.run_unprivileged_streaming(SLEEPER, on_line=lambda _l: None, timeout=1)
+    assert time.monotonic() - start < 5
+
+
+def test_run_timeout_holds_for_a_real_command():
+    import time
+
+    start = time.monotonic()
+    with pytest.raises(PrivilegeError, match="timed out after 1s"):
+        privilege.run_unprivileged(SLEEPER, timeout=1)
+    assert time.monotonic() - start < 5
+
+
+class _RootChild:
+    """A Popen whose child runs as root: we may not signal it, and it never exits."""
+
+    def __init__(self, *_args, **_kwargs):
+        self.pid = 31337
+        self.stdin = self.stdout = self.stderr = None
+        self.waited_without_limit = False
+
+    def communicate(self, _input=None, timeout=None):
+        raise subprocess.TimeoutExpired(cmd="pkexec", timeout=timeout)
+
+    def kill(self):
+        raise PermissionError(1, "Operation not permitted")
+
+    def wait(self, timeout=None):
+        if timeout is None:
+            self.waited_without_limit = True
+            raise AssertionError("would hang: waited for a root child with no limit")
+        raise subprocess.TimeoutExpired(cmd="pkexec", timeout=timeout)
+
+
+def test_a_root_child_that_cant_be_killed_is_reported_not_waited_for(monkeypatch, fake_which):
+    # subprocess.run's own timeout handling raised PermissionError from kill()
+    # and then waited for the root child forever.
+    monkeypatch.setattr(subprocess, "Popen", _RootChild)
+    with pytest.raises(PrivilegeError, match="couldn't be stopped.*PID 31337"):
+        privilege.run_privileged(["pacman", "-Syu"], timeout=1)
+
+
+def test_a_streaming_root_child_that_cant_be_killed_is_reported(monkeypatch, fake_which):
+    fake_popen = _FakePopen(None, stdout_lines=[], wait_raises=subprocess.TimeoutExpired(cmd="slow", timeout=1))
+
+    def refuse():
+        raise PermissionError(1, "Operation not permitted")
+
+    fake_popen.kill = refuse
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: fake_popen)
+    with pytest.raises(PrivilegeError, match="couldn't be stopped.*PID 4242"):
+        privilege.run_privileged_streaming(["pacman", "-Syu"], on_line=lambda _l: None, timeout=1)
+
+
+# --------------------------------------------------------------- unreadable directories --
+
+def _unsearchable(monkeypatch, path):
+    """`path` behind a directory we can't search: Path.exists() raises (Python 3.11-3.13) and so does reading it."""
+    real_exists, real_read_bytes = Path.exists, Path.read_bytes
+
+    def exists(self, *args, **kwargs):
+        if str(self) == str(path):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    def read_bytes(self):
+        if str(self) == str(path):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_path_exists_says_none_when_it_cant_tell(monkeypatch, tmp_path):
+    target = tmp_path / "root-only" / "file"
+    _unsearchable(monkeypatch, target)
+    assert privilege.path_exists(target) is None
+    assert privilege.path_exists(tmp_path) is True
+    assert privilege.path_exists(tmp_path / "missing") is False
+
+
+def test_backup_file_reads_through_an_unsearchable_directory_as_root(monkeypatch, fake_run, fake_which, privilege_paths):
+    # This crashed with PermissionError before ever trying the privileged read.
+    target = "/efi/loader/loader.conf"
+    _unsearchable(monkeypatch, target)
+    fake_run.set_response(["pkexec", "cat", "--", target], stdout="timeout 3\n")
+    name = privilege.backup_file(target)
+    assert name is not None
+    assert (privilege_paths.backup_dir / name).read_text() == "timeout 3\n"

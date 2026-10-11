@@ -367,7 +367,9 @@ class SelinuxReviewPage(BasePage):
         path_row.set_text("/etc/selinux/refpolicy/src/policy")
         check_btn = Gtk.Button(label="Check", valign=Gtk.Align.CENTER)
         path_row.add_suffix(check_btn)
-        box.append(path_row)
+        path_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        path_list.append(path_row)  # rows must be inside a list box, or GTK asserts once one has focus
+        box.append(path_list)
         result_label = Gtk.Label(label="", wrap=True, xalign=0)
         box.append(result_label)
 

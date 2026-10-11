@@ -279,7 +279,12 @@ class HardeningPage(BasePage):
             self.ug_row.set_title("USBGuard not installed")
             self.ug_row.set_subtitle("pacman -S usbguard")
         else:
-            policy = "has device policy" if result.extra.get("has_policy") else "no policy generated yet"
+            has_policy = result.extra.get("has_policy")
+            policy = (
+                "has device policy" if has_policy
+                else "couldn't check the policy file" if has_policy is None
+                else "no policy generated yet"
+            )
             self.ug_row.set_title(f"USBGuard is {'active' if result.active else 'inactive'}")
             self.ug_row.set_subtitle(policy)
         return False

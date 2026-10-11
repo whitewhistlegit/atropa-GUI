@@ -91,7 +91,14 @@ class AidePage(BasePage):
         self.status_group.add(self.installed_row)
         self._status_rows.append(self.installed_row)
 
-        if status.baseline_initialized:
+        if status.baseline_initialized is None:
+            # /var/lib/aide is root-only: a check (which runs as root) will say.
+            self.baseline_row.set_subtitle(
+                "Can't tell without root - the database directory isn't readable. Run a check to find out"
+            )
+            self.init_btn.set_label("Initialize baseline")
+            self.check_btn.set_sensitive(True)
+        elif status.baseline_initialized:
             self.baseline_row.set_subtitle("Initialized")
             self.init_btn.set_label("Re-initialize")
             self.check_btn.set_sensitive(True)

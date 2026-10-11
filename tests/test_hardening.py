@@ -218,6 +218,18 @@ def test_usbguard_status_with_policy(fake_run, fake_which, monkeypatch, tmp_path
     assert status.extra["has_policy"] is True
 
 
+def test_usbguard_status_policy_unknown_when_its_directory_is_root_only(fake_run, fake_which, monkeypatch):
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if str(self) == hardening.USBGUARD_RULES:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+    assert hardening.usbguard_status().extra["has_policy"] is None
+
+
 GENERATED_POLICY = 'allow id 1d6b:0002 serial "0000:00:14.0" name "xHCI Host Controller"\n'
 
 

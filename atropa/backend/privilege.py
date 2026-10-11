@@ -19,9 +19,11 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable
 
 LOG_PATH = Path.home() / ".local" / "share" / "atropa" / "actions.log"
@@ -75,20 +77,83 @@ class CommandResult:
         return self.returncode == 0
 
 
+class _StillRunning(Exception):
+    """A command hit its timeout and couldn't be stopped."""
+
+    def __init__(self, pid: int):
+        super().__init__(pid)
+        self.pid = pid
+
+
+def _stop(proc: subprocess.Popen) -> bool:
+    """
+    Kill proc and reap it. False if we may not signal it: a command pkexec
+    started runs as root, and an unprivileged process can't kill a root
+    one - Popen.kill() raises PermissionError for it.
+    """
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass  # already gone
+    except PermissionError:
+        return False
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
+    return True
+
+
+def _abandon(proc: subprocess.Popen) -> None:
+    """Close our ends of proc's pipes without waiting for it."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except OSError:
+                pass
+
+
+def _subprocess_run(argv: list[str], input=None, capture_output=True, text=True, timeout=None):  # noqa: A002
+    """
+    The part of subprocess.run() Atropa uses, minus its one unbounded wait:
+    at a timeout subprocess.run kills the child and then waits for it with
+    no limit. A child pkexec started runs as root, so the kill raised
+    PermissionError and the wait after it never returned - a hung
+    privileged command hung its worker thread for good. Here such a child
+    is left running and reported (_StillRunning) instead.
+    """
+    proc = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE if input is not None else None,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text,
+    )
+    try:
+        stdout, stderr = proc.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if not _stop(proc):
+            _abandon(proc)
+            raise _StillRunning(proc.pid) from None
+        _abandon(proc)
+        raise
+    return SimpleNamespace(returncode=proc.returncode, stdout=stdout, stderr=stderr)
+
+
 def _run(argv: list[str], input_text: str | None = None, timeout: int = 300) -> CommandResult:
     logger.info("RUN: %s", " ".join(argv))
     try:
-        proc = subprocess.run(
-            argv,
-            input=input_text,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        proc = _subprocess_run(argv, input=input_text, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError as exc:
         raise PrivilegeError(f"Command not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise PrivilegeError(f"Command timed out: {' '.join(argv)}") from exc
+        raise PrivilegeError(f"Command timed out after {timeout}s: {' '.join(argv)}") from exc
+    except _StillRunning as exc:
+        raise PrivilegeError(
+            f"Command timed out after {timeout}s and couldn't be stopped - it runs as root (PID {exc.pid}), "
+            f"so it may still be running: {' '.join(argv)}"
+        ) from exc
 
     result = CommandResult(proc.returncode, proc.stdout, proc.stderr)
     if not result.ok:
@@ -149,22 +214,45 @@ def _run_streaming(argv: list[str], on_line: Callable[[str], None], input_text: 
     except FileNotFoundError as exc:
         raise PrivilegeError(f"Command not found: {argv[0]}") from exc
 
-    if input_text is not None and proc.stdin is not None:
-        proc.stdin.write(input_text)
-        proc.stdin.close()
-
+    # Output is read on its own thread so the timeout below counts while
+    # the command is running: reading inline blocked until the command
+    # closed its output, so a command that hung without printing (or kept
+    # printing) ran as long as it liked, whatever `timeout` said.
     lines: list[str] = []
-    if proc.stdout is not None:
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n")
-            lines.append(line)
-            on_line(line)
+
+    def read_output() -> None:
+        if proc.stdout is None:
+            return
+        try:
+            for raw_line in proc.stdout:
+                line = raw_line.rstrip("\n")
+                lines.append(line)
+                on_line(line)
+        except (OSError, ValueError):
+            pass  # pipe closed under us after a timeout
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+
+    if input_text is not None and proc.stdin is not None:
+        try:
+            proc.stdin.write(input_text)
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass  # exited without reading it; its exit status says why
 
     try:
         returncode = proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        raise PrivilegeError(f"Command timed out: {' '.join(argv)}") from exc
+        stopped = _stop(proc)
+        _abandon(proc)
+        if not stopped:
+            raise PrivilegeError(
+                f"Command timed out after {timeout}s and couldn't be stopped - it runs as root "
+                f"(PID {proc.pid}), so it may still be running: {' '.join(argv)}"
+            ) from exc
+        raise PrivilegeError(f"Command timed out after {timeout}s: {' '.join(argv)}") from exc
+    reader.join(timeout=5)  # whatever it printed right before exiting
 
     output = "\n".join(lines)
     result = CommandResult(returncode, output, "")
@@ -214,6 +302,19 @@ def run_unprivileged_streaming(
     return _run_streaming(argv, on_line, input_text, timeout)
 
 
+def path_exists(path: str | Path) -> bool | None:
+    """
+    Path.exists(), except None when it can't be told: on Python 3.11-3.13
+    Path.exists() raises PermissionError instead of answering when a
+    directory on the way isn't searchable by us - a root-only EFI system
+    partition, a 0700 /var/lib/aide - which crashed whatever asked.
+    """
+    try:
+        return Path(path).exists()
+    except PermissionError:
+        return None
+
+
 # ------------------------------------------------------ backups & history --
 #
 # Every module that edits an existing config file (sshd_config, GRUB
@@ -230,8 +331,8 @@ def backup_file(path: str) -> str | None:
     (nothing to back up, e.g. a config file being created for the first time).
     """
     src = Path(path)
-    if not src.exists():
-        return None
+    if path_exists(src) is False:
+        return None  # can't-tell (None) falls through to the privileged read below
 
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -240,11 +341,13 @@ def backup_file(path: str) -> str | None:
 
     try:
         content = src.read_bytes()
+    except FileNotFoundError:
+        return None  # gone since the check above
     except PermissionError:
         # Some config files (e.g. sshd host key related bits) may not be
         # user-readable; fall back to a privileged read rather than skipping
         # the backup silently.
-        result = run_privileged(["cat", str(src)])
+        result = run_privileged(["cat", "--", str(src)])
         if not result.ok:
             logger.warning("Backup failed for %s: %s", path, result.stderr.strip())
             return None
