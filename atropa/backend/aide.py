@@ -156,8 +156,8 @@ def run_check(on_line: Callable[[str], None]) -> CommandResult:
     the active database - can take minutes, hence streaming. AIDE's exit
     code is meaningful here (non-zero doesn't mean "the command failed"
     the way it does for most tools - AIDE returns specific non-zero codes
-    for added/removed/changed entries), so callers should parse
-    .stdout via parse_check_summary() rather than trusting .ok alone.
+    for added/removed/changed entries), so callers should pass .stdout and
+    .returncode to parse_check_summary() rather than trusting .ok alone.
     """
     return run_privileged_streaming(["aide", "--check"], on_line)
 
@@ -178,19 +178,27 @@ _SUMMARY_RE = re.compile(
     re.DOTALL,
 )
 
+# AIDE >= 0.16 / AIDE <= 0.15 wording of a clean run.
+_NO_DIFFERENCES_RE = re.compile(r"found NO differences between|All files match AIDE database")
 
-def parse_check_summary(output: str) -> CheckSummary | None:
+
+def parse_check_summary(output: str, returncode: int | None = None) -> CheckSummary | None:
     """
-    Parses aide --check's own "Summary:" block. Returns None if the output
-    doesn't match the expected shape (e.g. AIDE errored before producing a
-    summary) rather than guessing at zeros - a missing summary is a
-    different, worse situation than a genuinely clean 0/0/0 summary, and
-    the two must never look the same to a caller.
+    Parses aide --check's own "Summary:" block. AIDE only prints that block
+    when it found differences (see print_report_summary_plain in AIDE's
+    report_plain.c) - a clean run prints "AIDE found NO differences ...
+    Looks okay!!" and exits 0 instead, so either of those means 0/0/0.
+    Returns None if none of that is present (e.g. AIDE errored before
+    producing a report) rather than guessing at zeros - a missing summary
+    is a different, worse situation than a genuinely clean run, and the two
+    must never look the same to a caller.
     """
     match = _SUMMARY_RE.search(output)
-    if not match:
-        return None
-    return CheckSummary(added=int(match.group(1)), removed=int(match.group(2)), changed=int(match.group(3)))
+    if match:
+        return CheckSummary(added=int(match.group(1)), removed=int(match.group(2)), changed=int(match.group(3)))
+    if _NO_DIFFERENCES_RE.search(output) or returncode == 0:
+        return CheckSummary(added=0, removed=0, changed=0)
+    return None
 
 
 def enable_timer(unit: str) -> CommandResult:

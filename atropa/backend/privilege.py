@@ -25,13 +25,36 @@ from pathlib import Path
 from typing import Callable
 
 LOG_PATH = Path.home() / ".local" / "share" / "atropa" / "actions.log"
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 BACKUP_DIR = Path.home() / ".local" / "share" / "atropa" / "backups"
 BACKUP_MANIFEST = BACKUP_DIR / "manifest.jsonl"
 
+
+class _ActionLogHandler(logging.Handler):
+    """
+    Appends each record to whatever LOG_PATH is *when the record is
+    written*, not when this module was imported. A FileHandler opened at
+    import time pinned every log line to the real ~/.local/share/atropa
+    before anything could repoint LOG_PATH - which is how the test suite,
+    despite redirecting LOG_PATH into a temp dir, kept writing over a
+    thousand fake `pkexec cat /etc/shadow`-style entries into the
+    developer's real activity log. Opening the file per record is cheap at
+    this log's volume, and importing this module no longer creates
+    anything on disk.
+    """
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = self.format(record)
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:  # noqa: BLE001 - a logging failure must never break the command being logged
+            self.handleError(record)
+
+
 logger = logging.getLogger("atropa.privilege")
-_handler = logging.FileHandler(LOG_PATH)
+_handler = _ActionLogHandler()
 _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)

@@ -89,10 +89,17 @@ def _extra_checks() -> list:
 
     try:
         result = security.sudoers_check()
-        if "parsed ok" in result.lower():
-            checks.append(hardening.AuditCheck("Sudoers configuration", "pass", result.strip()))
+        output = (result.stdout or result.stderr).strip()
+        if result.ok:
+            checks.append(hardening.AuditCheck("Sudoers configuration", "pass", output or "Syntax OK"))
+        elif result.returncode in (126, 127):
+            # pkexec's own exit codes: authentication dismissed (126) or not
+            # obtained / couldn't run visudo (127). The check didn't happen,
+            # so it's info (unscored), not a finding about sudoers itself.
+            detail = f"Not checked - couldn't run visudo as root: {output[:150]}"
+            checks.append(hardening.AuditCheck("Sudoers configuration", "info", detail))
         else:
-            checks.append(hardening.AuditCheck("Sudoers configuration", "warn", result.strip()[:150]))
+            checks.append(hardening.AuditCheck("Sudoers configuration", "fail", output[:150] or "visudo reported a problem"))
     except Exception as exc:  # noqa: BLE001 - surfaced as an info row, not a crash
         checks.append(hardening.AuditCheck("Sudoers configuration", "info", str(exc)))
 

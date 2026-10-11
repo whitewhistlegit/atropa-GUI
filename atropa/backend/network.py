@@ -76,11 +76,18 @@ def connect_wifi(ssid: str, password: str | None = None) -> CommandResult:
     """
     Connecting to Wi-Fi requires modifying NetworkManager connection profiles,
     which is a privileged operation via nmcli.
+
+    The password goes to nmcli on stdin, never on its command line:
+    `nmcli ... password <pw>` is readable by every local user via `ps` /
+    /proc/<pid>/cmdline while nmcli runs, and Atropa's action log records
+    each command line - so it was also kept in plain text and shown on the
+    Activity page. With --ask, nmcli's own secret agent asks for the missing
+    secret when NetworkManager requests it and reads the reply from stdin
+    (the same mechanism set_password() relies on with chpasswd).
     """
-    argv = ["nmcli", "device", "wifi", "connect", ssid]
     if password:
-        argv += ["password", password]
-    return run_privileged(argv)
+        return run_privileged(["nmcli", "--ask", "device", "wifi", "connect", ssid], input_text=password + "\n")
+    return run_privileged(["nmcli", "device", "wifi", "connect", ssid])
 
 
 def disconnect(device: str) -> CommandResult:

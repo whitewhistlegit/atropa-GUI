@@ -72,6 +72,7 @@ def test_firewall_enable_ufw(fake_run, fake_which):
 
 def test_firewall_allow_port_firewalld_reloads_on_success(fake_run, fake_which):
     fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
     fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=0)
     security.firewall_allow_port("8080", "tcp")
     assert fake_run.call_containing("--reload") is not None
@@ -79,9 +80,38 @@ def test_firewall_allow_port_firewalld_reloads_on_success(fake_run, fake_which):
 
 def test_firewall_allow_port_firewalld_skips_reload_on_failure(fake_run, fake_which):
     fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
     fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=1)
     security.firewall_allow_port("8080", "tcp")
     assert fake_run.call_containing("--reload") is None
+
+
+def test_firewall_allow_port_firewalld_reports_failed_reload(fake_run, fake_which):
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
+    fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=0)
+    fake_run.set_response(["pkexec", "firewall-cmd", "--reload"], returncode=1, stderr="reload failed")
+    result = security.firewall_allow_port("8080", "tcp")
+    assert not result.ok
+    assert "reload failed" in result.stderr
+
+
+def test_firewall_allow_port_firewalld_stopped_uses_offline_cmd(fake_run, fake_which):
+    # firewall-cmd fails outright while the daemon is stopped, so the rule
+    # has to go into the permanent config via firewall-offline-cmd.
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+    result = security.firewall_allow_port("2222", "tcp")
+    assert result.ok
+    assert fake_run.last_call() == ["pkexec", "firewall-offline-cmd", "--add-port=2222/tcp"]
+    assert fake_run.call_containing("firewall-cmd") is None
+
+
+def test_firewall_deny_port_firewalld_stopped_uses_offline_cmd(fake_run, fake_which):
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+    security.firewall_deny_port("8080", "udp")
+    assert fake_run.last_call() == ["pkexec", "firewall-offline-cmd", "--remove-port=8080/udp"]
 
 
 # --------------------------------------------------------------- ssh_status --
@@ -116,7 +146,41 @@ def test_ssh_status_defaults_when_config_missing(fake_run, fake_which, monkeypat
     fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
     status = security.ssh_status()
     assert status.port == "22"
+    assert status.port_explicit is False
     assert status.root_login == "unknown"
+
+
+def test_ssh_status_port_explicit_only_for_uncommented_port_line(fake_run, fake_which, monkeypatch, tmp_path):
+    conf = tmp_path / "sshd_config"
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+
+    conf.write_text("#Port 22\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    assert security.ssh_status().port_explicit is False
+
+    conf.write_text("Port 2222\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    assert security.ssh_status().port_explicit is True
+
+
+def test_set_ssh_permit_root_login_writes_exact_value(fake_run, fake_which, privilege_paths, monkeypatch, tmp_path):
+    conf = tmp_path / "sshd_config"
+    conf.write_text("PermitRootLogin yes\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
+
+    assert security.set_ssh_permit_root_login("Prohibit-Password").ok
+
+    sed_call = fake_run.call_containing("sed")
+    assert sed_call is not None and "PermitRootLogin prohibit-password" in sed_call[4]
+
+
+@pytest.mark.parametrize("value", ["unknown", "", "maybe", "yes/e;touch /tmp/pwned;#"])
+def test_set_ssh_permit_root_login_rejects_anything_sshd_does_not_accept(fake_run, fake_which, value):
+    # The value ends up inside a sed expression - only sshd's own keywords may get there.
+    with pytest.raises(ValueError):
+        security.set_ssh_permit_root_login(value)
+    assert fake_run.calls == []
 
 
 # --------------------------------------------------------------- _set_sshd_option --
@@ -218,9 +282,20 @@ def test_set_sshd_option_stops_early_if_edit_command_fails(
     assert fake_run.call_containing("sshd") is None
 
 
-def test_sudoers_check_prefers_stdout(fake_run):
-    fake_run.set_response(["visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
-    assert "parsed OK" in security.sudoers_check()
+def test_sudoers_check_runs_visudo_as_root(fake_run, fake_which):
+    # sudoers is 0440 root:root - unprivileged visudo can only report "Permission denied".
+    fake_run.set_response(["pkexec", "visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
+    result = security.sudoers_check()
+    assert result.ok
+    assert "parsed OK" in result.stdout
+    assert fake_run.last_call() == ["pkexec", "visudo", "-cf", "/etc/sudoers"]
+
+
+def test_sudoers_check_reports_visudo_failure_via_exit_status(fake_run, fake_which):
+    fake_run.set_response(
+        ["pkexec", "visudo", "-cf", "/etc/sudoers"], returncode=1, stderr=">>> /etc/sudoers: syntax error near line 9 <<<\n"
+    )
+    assert not security.sudoers_check().ok
 
 
 # --------------------------------------------------------------- extended SSH status (CIS depth) --

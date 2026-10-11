@@ -11,8 +11,11 @@ Fixtures:
     fake_run     -- registers canned CompletedProcess-like responses keyed
                      by an argv prefix; records every call made.
     fake_which   -- controls which command-line tools "exist" (shutil.which).
-    privilege_paths -- redirects backup/log paths under tmp_path so tests
-                        never touch the real ~/.local/share/atropa.
+    privilege_paths -- AUTOUSE: redirects HOME and every per-user data path
+                        (action log, backups, SELinux review artifacts, the
+                        legacy ArchYaST dir) under tmp_path, so no test can
+                        touch the real ~/.local/share/atropa - even one that
+                        never asks for this fixture by name.
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atropa.backend import privilege
+from atropa.backend import migration, privilege, selinux
 
 
 @dataclass
@@ -39,6 +42,7 @@ class FakeRun:
     def __init__(self):
         self._responses: dict[tuple, _FakeResult] = {}
         self.calls: list[list[str]] = []
+        self.inputs: list[str | None] = []  # stdin text passed with each call, parallel to `calls`
 
     def set_response(self, argv_prefix, stdout="", stderr="", returncode=0):
         """Any call whose argv starts with argv_prefix gets this response.
@@ -47,6 +51,7 @@ class FakeRun:
 
     def __call__(self, argv, input=None, capture_output=True, text=True, timeout=None):
         self.calls.append(list(argv))
+        self.inputs.append(input)
         best_match = None
         for prefix, resp in self._responses.items():
             if tuple(argv[: len(prefix)]) == prefix:
@@ -84,13 +89,34 @@ def fake_which(monkeypatch):
     return available
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def privilege_paths(monkeypatch, tmp_path):
-    """Redirects privilege.py's backup/log locations into tmp_path."""
+    """
+    Redirects every path Atropa writes per-user data to into tmp_path, for
+    every test. Autouse on purpose: when this was opt-in, tests that forgot
+    it (AppArmor rule toggles, SELinux Setup Mode) wrote real backups and
+    manifest entries into the developer's own ~/.local/share/atropa, which
+    then showed up as restorable "backups" in the real Activity page.
+    Tests that need the paths can still request this fixture by name.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
     backup_dir = tmp_path / "backups"
     manifest = backup_dir / "manifest.jsonl"
     log_path = tmp_path / "actions.log"
     monkeypatch.setattr(privilege, "BACKUP_DIR", backup_dir)
     monkeypatch.setattr(privilege, "BACKUP_MANIFEST", manifest)
     monkeypatch.setattr(privilege, "LOG_PATH", log_path)
-    return SimpleNamespace(backup_dir=backup_dir, manifest=manifest, log_path=log_path)
+
+    review_base = tmp_path / "selinux-review"
+    monkeypatch.setattr(selinux, "REVIEW_BASE_DIR", review_base)
+    monkeypatch.setattr(selinux, "REVIEW_MODULES_DIR", review_base / "modules")
+    monkeypatch.setattr(selinux, "APPROVED_MODULES_DIR", review_base / "approved")
+    monkeypatch.setattr(selinux, "SETUP_MODE_STATE_FILE", review_base / "setup_mode_state.json")
+    monkeypatch.setattr(selinux, "LAST_REVIEW_FILE", review_base / "last_review.json")
+
+    monkeypatch.setattr(migration, "OLD_USER_DATA_DIR", tmp_path / "archyast")
+
+    return SimpleNamespace(backup_dir=backup_dir, manifest=manifest, log_path=log_path, home=home)

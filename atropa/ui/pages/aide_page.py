@@ -137,7 +137,7 @@ class AidePage(BasePage):
             return False
 
         self._last_check_output = result.stdout if result is not None else ""
-        summary = aide.parse_check_summary(self._last_check_output)
+        summary = aide.parse_check_summary(self._last_check_output, result.returncode if result is not None else None)
 
         if self.update_baseline_row is not None:
             self.check_group.remove(self.update_baseline_row)
