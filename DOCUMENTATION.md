@@ -75,9 +75,29 @@ run_privileged(argv, input_text=None, timeout=600)     # via pkexec (falls back 
 
 `run_privileged` prepends `pkexec` to the argv and shells out — this pops a
 **native polkit auth dialog** scoped to that one command; there's no
-persistent root session and no setuid binary. `resources/org.atropa.pkexec.policy`
-customizes the prompt text and sets `allow_active = auth_admin_keep`, so
-consecutive privileged actions in a short window don't re-prompt every time.
+persistent root session and no setuid binary.
+
+**⚠️ The shipped polkit policy currently has no effect.**
+`resources/org.atropa.pkexec.policy` (installed by `install.sh`) defines
+`org.atropa.pkexec.run` with `allow_active = auth_admin_keep`, but per
+pkexec(1) ("ACTION AND AUTHORIZATIONS"), pkexec only uses a non-default
+action when that action carries an `org.freedesktop.policykit.exec.path`
+annotation matching the full path of the program being run. This one has
+none, so every `pkexec` call falls back to `org.freedesktop.policykit.exec`
+— `auth_admin`, **no retention**: one password prompt per privileged
+command, with polkit's generic "run a program as another user" text. That
+is why batching (e.g. one `semodule -i` for many modules) and lazy page
+loading matter so much for prompt count. Two more pkexec facts the code
+relies on: the program runs with a minimal, fixed environment (`PATH`
+included), and in **root's home directory** unless `--keep-cwd` is passed
+— which is why a relative path handed to a privileged command resolves
+under `/root` (see the restorecon bug in section 6).
+
+Simply annotating per-program actions (`tee`, `sed`, `systemctl`, ...) with
+`auth_admin_keep` is **not** a safe fix: pkexec doesn't validate arguments,
+and the man page warns that retaining authorization for a program that
+trusts its arguments "could be a security hole" — a kept `tee` is a kept
+write-anything-as-root. See the "Still open" list for the proper fix.
 
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
@@ -945,11 +965,12 @@ exactly one definition.
   them in exactly one privileged call - one prompt total, regardless of
   count. Before landing on that as the actual fix, checked whether
   Atropa's own polkit policy was the real culprit (`auth_admin` prompting
-  every time vs `auth_admin_keep` caching a recent auth) - it turned out
-  `allow_active` was already set to `auth_admin_keep`, so that wasn't
-  the bug; worth having checked rather than assumed, since the batch
-  fix is deterministic regardless of how polkit's own caching behaves
-  in practice, where the policy tweak would only have been a maybe.
+  every time vs `auth_admin_keep` caching a recent auth) - it looked fine
+  because `allow_active` was already `auth_admin_keep`. **Correction
+  (later audit):** the policy has no `exec.path` annotation, so pkexec
+  never uses it at all and every call is plain `auth_admin` - the policy
+  *was* part of the problem. The batch fix was still the right call,
+  since it's deterministic regardless of polkit configuration.
 
 - ✅ **CIS DIL Benchmark, Phase 1** (`security.py` SSH depth,
   `hardening.py` password complexity, new `backend/audit_rules.py`) — a
@@ -1555,6 +1576,14 @@ exactly one definition.
   falls back to the filename stem if that line isn't present.
 
 **Still open:**
+- **Make the polkit policy actually apply, safely.** Current state: the
+  shipped policy is inert (see section 1), so every privileged command
+  prompts. The safe fix is a single root-side helper
+  (e.g. `/usr/lib/atropa/atropa-helper`) that the policy annotates via
+  `exec.path`, which accepts only a fixed set of named, argument-validated
+  operations (not arbitrary argv) - only then is `auth_admin_keep` safe to
+  enable. Large change: every `run_privileged` call site would route
+  through it.
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
   since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
   Phase 1 already declined to automate; a natural pairing for whenever
