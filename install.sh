@@ -41,9 +41,15 @@ echo "==> Installing Atropa via pipx (an isolated venv, not the system Python)..
 pipx install --system-site-packages --force .
 pipx ensurepath --force >/dev/null 2>&1 || true
 
-echo "==> Installing desktop launcher..."
+echo "==> Installing desktop launcher and icon..."
 mkdir -p "$HOME/.local/share/applications"
 cp atropa/resources/atropa.desktop "$HOME/.local/share/applications/"
+# The launcher's Icon= is a theme name, so the logo goes into the user's
+# hicolor tree. Touching the tree afterwards makes desktops that cache it
+# notice the new files.
+mkdir -p "$HOME/.local/share/icons"
+cp -r atropa/resources/icons/hicolor "$HOME/.local/share/icons/"
+touch "$HOME/.local/share/icons/hicolor"
 
 echo "==> Installing polkit policy for smoother authentication prompts..."
 sudo cp atropa/resources/org.atropa.pkexec.policy /usr/share/polkit-1/actions/

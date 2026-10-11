@@ -22,6 +22,9 @@ atropa = "atropa.main:main"
 [tool.setuptools.packages.find]
 include = ["atropa*"]
 
+[tool.setuptools.package-data]
+atropa = ["resources/icons/hicolor/*/apps/*.png"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -42,10 +42,12 @@ atropa/
                                  all GTK-free, pure subprocess wrappers
   resources/
     atropa.desktop            app launcher
+    icons/hicolor/<N>x<N>/apps/org.atropa.Atropa.png
+                              the logo as the app icon, 16 to 256 px
     org.atropa.pkexec.policy  polkit policy for nicer auth prompts
 tests/                          pytest suite, one test_<module>.py per backend module
 examples/plugins/example-plugin/manifest.toml   reference plugin manifest (parsed by a test)
-install.sh                      Arch installer (pacman deps + pipx + launcher + polkit policy)
+install.sh                      Arch installer (pacman deps + pipx + launcher + icon + polkit policy)
 .github/workflows/ci.yml        py_compile + ruff + pytest on Python 3.11/3.12
 ```
 
@@ -613,6 +615,12 @@ artifacts and the legacy ArchYaST dir into `tmp_path`) — which is enough to un
 parsing/logic across every module, since they all funnel through
 `privilege.run_privileged`/`run_unprivileged`. CI (`.github/workflows/ci.yml`)
 runs `py_compile` + `ruff check` + the full suite on push/PR.
+
+`tests/test_resources.py` is the one file that isn't about a backend module.
+The app icon is wired by name in three places - `APP_ID` in `main.py` (the
+window icon), `Icon=` in `atropa.desktop` (the launcher) and the file names
+under `resources/icons/` - and a mismatch just shows a generic icon with no
+error, so the test checks they agree and that every size is packaged.
 
 Before this pass, verification was manual, every turn:
 1. `python3 -m py_compile` on every file, every turn (catches syntax errors immediately)
