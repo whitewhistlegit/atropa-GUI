@@ -80,12 +80,28 @@ def list_services(pattern: str = "*.service") -> list[Service]:
         desc = parts[4] if len(parts) > 4 else ""
         services.append(Service(unit=unit, load=load, active=active, sub=sub, description=desc))
 
-    # Enrich with enabled/disabled state
+    states = _unit_file_states([svc.unit for svc in services])
     for svc in services:
-        enabled = run_unprivileged(["systemctl", "is-enabled", svc.unit])
-        svc.enabled = enabled.stdout.strip() or "unknown"
+        svc.enabled = states.get(svc.unit) or "unknown"
 
     return services
+
+
+def _unit_file_states(units: list[str]) -> dict[str, str]:
+    """
+    {unit: enabled/disabled/static/...} for every unit in one `systemctl
+    show` call. It used to be one `systemctl is-enabled` per service:
+    hundreds of commands per refresh, each one a line in the Activity log.
+    """
+    if not units:
+        return {}
+    result = run_unprivileged(["systemctl", "show", "--property=Id,UnitFileState", "--", *units])
+    states = {}
+    for block in result.stdout.split("\n\n"):  # one block per unit, blank-line separated
+        props = dict(line.split("=", 1) for line in block.splitlines() if "=" in line)
+        if props.get("Id"):
+            states[props["Id"]] = props.get("UnitFileState", "")
+    return states
 
 
 def stop_impact(unit: str) -> str:

@@ -215,6 +215,7 @@ def _import_selinux_booleans(booleans: dict, on_line: Callable[[str], None]) -> 
 
     current = {b.name: b.active for b in selinux.list_booleans()}
     applied, unchanged, skipped, failed = 0, 0, 0, 0
+    changes: dict[str, bool] = {}
     for name, value in booleans.items():
         if name not in current:
             on_line(f"Skipping {name} (not present on this machine)")
@@ -229,13 +230,18 @@ def _import_selinux_booleans(booleans: dict, on_line: Callable[[str], None]) -> 
         if current[name] == value:
             unchanged += 1
             continue
-        on_line(f"Setting {name} to {'on' if value else 'off'}...")
-        result = selinux.set_boolean(name, value)
+        changes[name] = value
+
+    if changes:
+        # One setsebool for all of them - one prompt and one policy rebuild,
+        # instead of one each.
+        on_line("Setting " + ", ".join(f"{name}={'on' if value else 'off'}" for name, value in changes.items()) + "...")
+        result = selinux.set_booleans(changes)
         if result.ok:
-            applied += 1
+            applied = len(changes)
         else:
             on_line(f"Failed: {result.stderr.strip()}")
-            failed += 1
+            failed = len(changes)
 
     on_line(f"SELinux booleans: {applied} applied, {unchanged} already set, {skipped} skipped, {failed} failed.")
     return CommandResult(
