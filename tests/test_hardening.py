@@ -402,6 +402,24 @@ def test_set_faillock_policy_updates_both_options(fake_run, fake_which, privileg
     assert len(sed_calls) == 2  # deny, then unlock_time
 
 
+def _appended(fake_run, path):
+    return [text for call, text in zip(fake_run.calls, fake_run.inputs) if call == ["pkexec", "tee", "-a", str(path)]]
+
+
+def test_set_faillock_policy_appends_missing_options_without_a_shell(
+    fake_run, fake_which, privilege_paths, monkeypatch, tmp_path
+):
+    # Missing keys used to be appended through `bash -c "echo '...' >> file"` as root.
+    conf_file = tmp_path / "faillock.conf"
+    conf_file.write_text("# faillock settings\n")
+    monkeypatch.setattr(hardening, "FAILLOCK_CONF", conf_file)
+    fake_run.set_response(["grep", "-E"], stdout="")
+
+    assert hardening.set_faillock_policy(deny=5, unlock_time=900).ok
+    assert _appended(fake_run, conf_file) == ["deny = 5\n", "unlock_time = 900\n"]
+    assert not any(shell in call for call in fake_run.calls for shell in ("bash", "sh"))
+
+
 def test_set_faillock_policy_stops_after_first_failure(fake_run, fake_which, privilege_paths, monkeypatch, tmp_path):
     conf_file = tmp_path / "faillock.conf"
     conf_file.write_text("deny = 3\n")
@@ -504,12 +522,12 @@ def test_set_password_complexity_policy_uses_cis_defaults(fake_run, fake_which, 
     conf_file.write_text("")
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="")
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
 
     hardening.set_password_complexity_policy()
-    calls_text = " ".join(arg for call in fake_run.calls for arg in call)
-    assert "minlen = 14" in calls_text
-    assert "dcredit = -1" in calls_text
+    appended = _appended(fake_run, conf_file)
+    assert "minlen = 14\n" in appended
+    assert "dcredit = -1\n" in appended
+    assert not any(shell in call for call in fake_run.calls for shell in ("bash", "sh"))
 
 
 def test_set_password_complexity_policy_rejects_invalid_minlen():
