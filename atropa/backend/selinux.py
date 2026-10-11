@@ -522,9 +522,12 @@ def reinstall_all_approved_modules() -> CommandResult:
 # ------------------------------------------------- per-application review --
 #
 # Ported from a shell workflow: instead of reviewing one AVC line at a time,
-# group denials by the program that triggered them (comm=) and generate one
-# .te per program - audit2allow produces a much more sensible policy when it
-# sees all of a program's related denials together rather than one at a time.
+# group denials by the program that triggered them and generate one .te per
+# program - audit2allow produces a much more sensible policy when it sees all
+# of a program's related denials together rather than one at a time. A
+# "program" is its comm= name AND its source domain: comm= is whatever name
+# the process gave itself, so the same name in two domains gets two reviews
+# rather than one module granting both domains' rules.
 
 _SKIP_PROGRAMS_RE = re.compile(r"^(systemd|kernel|audit|kworker|swapper)")
 
@@ -539,10 +542,27 @@ class ProgramPolicyReview:
     why_text: str = ""
     pp_path: str | None = None
     error: str | None = None
+    domain: str = "?"  # the denials' source type (scontext), "?" if it couldn't be parsed
+
+    @property
+    def label(self) -> str:
+        return f"{self.program} ({self.domain})" if self.domain != "?" else self.program
 
 
 def _sanitize_program_name(prog: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", prog) or "unknown"
+
+
+def _review_module_name(program: str, domain: str) -> str:
+    """
+    atropa_<program>_<domain>. Without the prefix a program called ssh,
+    mount or sudo produced a module named exactly that - and installing
+    it replaces the policy's own module of the same name.
+    """
+    parts = ["atropa", _sanitize_program_name(program)]
+    if domain != "?":
+        parts.append(_sanitize_program_name(domain))
+    return "_".join(parts)[:64]  # _validate_module_name()'s limit
 
 
 # Distinguishes "the caller didn't pass `since` at all" from "the caller
@@ -588,7 +608,7 @@ def build_policy_review(
     else:
         lines = list_avc_denials_from_audit_log(denial_limit) if source == "audit_log" else list_avc_denials(denial_limit)
 
-    groups: dict[str, list[str]] = {}
+    groups: dict[tuple[str, str], list[str]] = {}
     for line in lines:
         if _UNDEFINED_PERM_RE.search(line) or _UNDEFINED_CLASS_RE.search(line):
             # audit2allow can't do anything useful with these - they have no
@@ -599,14 +619,15 @@ def build_policy_review(
         prog = m.group(1) if m else "unknown"
         if _SKIP_PROGRAMS_RE.match(prog):
             continue
-        groups.setdefault(prog, []).append(line)
+        groups.setdefault((prog, _extract_context_type(line, "scontext")), []).append(line)
 
     reviews: list[ProgramPolicyReview] = []
-    for prog, denials in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-        safe_name = _sanitize_program_name(prog)
+    for (prog, domain), denials in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        safe_name = _review_module_name(prog, domain)
         joined = "\n".join(denials)
         review = ProgramPolicyReview(
-            program=prog, safe_name=safe_name, denial_count=len(denials), sample_denials=denials[:sample_size]
+            program=prog, safe_name=safe_name, denial_count=len(denials), sample_denials=denials[:sample_size],
+            domain=domain,
         )
 
         try:

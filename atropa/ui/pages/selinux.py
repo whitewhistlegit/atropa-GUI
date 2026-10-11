@@ -328,7 +328,7 @@ class SelinuxPage(BasePage):
             else:
                 subtitle = f"{review.denial_count} denial(s) · {review.error or 'not compiled'}"
 
-            row = Adw.ActionRow(title=esc(review.program), subtitle=esc(subtitle))
+            row = Adw.ActionRow(title=esc(review.label), subtitle=esc(subtitle))
 
             view_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER, css_classes=["flat"])
             view_btn.connect("clicked", self._on_view_review, review)
@@ -344,7 +344,7 @@ class SelinuxPage(BasePage):
         return False
 
     def _on_view_review(self, _btn: Gtk.Button, review) -> None:
-        sections = [f"=== {review.program} ({review.denial_count} denial(s)) ==="]
+        sections = [f"=== {review.label} ({review.denial_count} denial(s)) ==="]
         if review.sample_denials:
             sections.append("--- Sample denials ---")
             sections.extend(review.sample_denials)
@@ -365,7 +365,7 @@ class SelinuxPage(BasePage):
         scroller = Gtk.ScrolledWindow(min_content_height=320, min_content_width=480)
         scroller.set_child(text_view)
 
-        dialog = Adw.AlertDialog(heading=f"Review: {review.program}")
+        dialog = Adw.AlertDialog(heading=f"Review: {review.label}")
         dialog.set_extra_child(scroller)
         dialog.add_response("close", "Close")
         if self._load_page is not None and review.te_content:
@@ -382,7 +382,7 @@ class SelinuxPage(BasePage):
 
     def _on_install_review(self, _btn: Gtk.Button, review) -> None:
         self.confirm(
-            f"Install policy for {review.program}?",
+            f"Install policy for {review.label}?",
             f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i. "
             "Review the proposed rules first if you haven't already.",
             "Install",

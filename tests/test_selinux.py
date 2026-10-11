@@ -649,6 +649,45 @@ def test_build_policy_review_groups_by_program_and_skips_noise(fake_run, fake_wh
     assert reviews[0].program == "myapp"
 
 
+def test_review_modules_never_take_a_policy_modules_name(fake_run, fake_which, module_dirs):
+    # A program called "sudo" used to produce sudo.pp - installing it
+    # replaced the policy's own sudo module.
+    fake_which.update({"audit2allow", "audit2why", "checkmodule", "semodule_package"})
+    fake_run.set_response(
+        ["journalctl", "-k"],
+        stdout='avc:  denied  { read } for comm="sudo" scontext=user_u:user_r:sudo_t:s0 tcontext=x:y:z tclass=file\n',
+    )
+    fake_run.set_response(["audit2allow"], stdout="module atropa_sudo_sudo_t 1.0;\n")
+    [review] = selinux.build_policy_review(denial_limit=100)
+    assert review.safe_name == "atropa_sudo_sudo_t"
+    assert ["audit2allow", "-m", "atropa_sudo_sudo_t"] in fake_run.calls
+    assert review.label == "sudo (sudo_t)"
+
+
+def test_build_policy_review_splits_one_program_name_across_domains(fake_run, fake_which, module_dirs):
+    # comm= is whatever name a process gives itself: the same name running
+    # in two domains mustn't end up in one module granting both.
+    fake_which.update({"audit2allow", "audit2why", "checkmodule", "semodule_package"})
+    fake_run.set_response(
+        ["journalctl", "-k"],
+        stdout=(
+            'avc:  denied  { read } for comm="python3" scontext=system_u:system_r:foo_t tcontext=a:b:c tclass=file\n'
+            'avc:  denied  { read } for comm="python3" scontext=user_u:user_r:user_t tcontext=a:b:c tclass=file\n'
+        ),
+    )
+    reviews = selinux.build_policy_review(denial_limit=100)
+    assert sorted((r.domain, r.safe_name) for r in reviews) == [
+        ("foo_t", "atropa_python3_foo_t"),
+        ("user_t", "atropa_python3_user_t"),
+    ]
+
+
+def test_review_module_name_stays_valid_for_long_names():
+    name = selinux._review_module_name("a" * 15, "very_long_domain_name_that_goes_on_and_on_and_on_t")
+    selinux._validate_module_name(name)  # raises if over 64 characters
+    assert name.startswith("atropa_")
+
+
 def test_build_policy_review_records_error_when_generate_te_fails(fake_run, fake_which, module_dirs):
     # audit2allow not installed -> generate_te raises -> review.error set, batch continues
     fake_run.set_response(
