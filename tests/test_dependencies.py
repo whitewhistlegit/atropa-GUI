@@ -79,3 +79,20 @@ def test_summary_counts_updates_as_more_tools_appear(fake_which):
     fake_which.update({"pacman", "systemctl", "ufw"})
     counts = dependencies.summary_counts()
     assert counts["installed"] == 4  # pkexec + the three added above
+
+
+def test_selinux_tools_point_at_their_aur_packages_not_pacman():
+    # Arch has no official SELinux userspace: an Install button running
+    # `pacman -S policycoreutils` could only fail, and audit2allow/audit2why
+    # were mapped to "audit", which doesn't ship them.
+    by_name = {dep.name: dep for dep in dependencies.CATALOG}
+    for tool, package in {
+        "checkmodule": "checkpolicy",
+        "semodule_package": "semodule-utils",
+        "audit2allow": "selinux-python",
+        "audit2why": "selinux-python",
+        "sestatus": "policycoreutils",
+    }.items():
+        assert by_name[tool].package is None
+        assert f"'{package}'" in by_name[tool].note and "AUR" in by_name[tool].note
+    assert by_name["ausearch"].package == "audit"  # this one really is in the official repos

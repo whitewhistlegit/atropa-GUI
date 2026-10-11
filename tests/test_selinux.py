@@ -1361,3 +1361,10 @@ def test_check_policy_source_never_writes_anything(fake_run, fake_which, tmp_pat
     fake_run.set_response(["cat", str(tmp_path / "policy" / "flask" / "access_vectors")], stdout=_ACCESS_VECTORS_SAMPLE)
     selinux.check_policy_source_for_permission(str(tmp_path), "capability2", "bpf")
     assert fake_run.call_containing("pkexec") is None
+
+
+def test_missing_tool_errors_name_the_real_aur_package(fake_which):
+    with pytest.raises(RuntimeError, match="selinux-python.*AUR"):
+        selinux.generate_te("avc: denied", "atropa_x")
+    with pytest.raises(RuntimeError, match="selinux-python.*AUR"):
+        selinux.explain_denial("avc: denied")

@@ -16,8 +16,10 @@ echo "==> Optional hardening tools (skip any that fail, they're not required to 
 sudo pacman -S --needed --noconfirm arch-audit || true
 echo "    fail2ban, apparmor, usbguard, and audit are also supported if you install them:"
 echo "      sudo pacman -S fail2ban apparmor usbguard audit"
-echo "    SELinux denial review (Why?/Generate .te) and policy loading need:"
-echo "      pacman -S audit policycoreutils"
+echo "    SELinux denial review (Why?/Generate .te) and policy loading need audit from the"
+echo "    official repos, plus SELinux's userspace tools, which Arch only has in the AUR:"
+echo "      sudo pacman -S audit"
+echo "      paru -S policycoreutils checkpolicy semodule-utils selinux-python   # or another AUR helper"
 
 echo "==> Installing Atropa via pipx (an isolated venv, not the system Python)..."
 # `pip install --user --break-system-packages` used to be here - it works,
