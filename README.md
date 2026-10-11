@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="atropa/resources/icons/hicolor/256x256/apps/org.atropa.Atropa.png" alt="Atropa logo" width="180">
+</p>
+
 # Atropa
 
 A YaST-inspired system control center for Arch Linux, built with GTK4 and
@@ -60,14 +64,16 @@ cd atropa-GUI
 1. install system dependencies with `pacman` (needs `sudo`), plus `arch-audit` optionally;
 2. install Atropa with `pipx install --system-site-packages --force .` so it
    gets its own venv but reuses the system PyGObject;
-3. copy the desktop launcher to `~/.local/share/applications/`;
+3. copy the desktop launcher to `~/.local/share/applications/` and its icon
+   to `~/.local/share/icons/hicolor/`;
 4. install the polkit policy to `/usr/share/polkit-1/actions/`.
 
 Then launch **Atropa** from your app menu, or run `atropa` (open a new
 terminal first if `pipx ensurepath` just updated your `PATH`).
 
 To uninstall: `pipx uninstall atropa`, then remove
-`~/.local/share/applications/atropa.desktop` and
+`~/.local/share/applications/atropa.desktop`,
+`~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png` and
 `/usr/share/polkit-1/actions/org.atropa.pkexec.policy`.
 
 ### Run from source
