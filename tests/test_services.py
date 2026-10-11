@@ -85,6 +85,18 @@ def test_journal_tail_passes_line_count(fake_run):
     assert fake_run.last_call() == ["journalctl", "-u", "sshd", "-n", "50", "--no-pager"]
 
 
+def test_journal_tail_keeps_what_journalctl_says_on_stderr(fake_run):
+    # Without the hint, an empty result looks like a service that never logged anything.
+    fake_run.set_response(
+        ["journalctl", "-u", "sshd"],
+        stdout="-- No entries --\n",
+        stderr="Hint: You are currently not seeing messages from other users and the system.\n",
+    )
+    text = services.journal_tail("sshd")
+    assert text.startswith("-- No entries --")
+    assert "not seeing messages from other users" in text
+
+
 def test_stop_impact_names_what_breaks_for_critical_units():
     assert "password prompts" in services.stop_impact("polkit.service")
     assert "session" in services.stop_impact("user@1000.service")

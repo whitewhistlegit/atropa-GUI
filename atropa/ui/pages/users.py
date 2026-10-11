@@ -17,7 +17,10 @@ class UsersPage(BasePage):
     def __init__(self) -> None:
         super().__init__()
 
-        new_group = self.add_group("Add User")
+        new_group = self.add_group(
+            "Add User",
+            "A new account has no password, so nobody can log in to it until you set one in the list below.",
+        )
         self.username_row = Adw.EntryRow(title="Username")
         new_group.add(self.username_row)
         self.fullname_row = Adw.EntryRow(title="Full name (optional)")
@@ -32,6 +35,11 @@ class UsersPage(BasePage):
 
         self.users_group = self.add_group("Existing Users")
         self.groups_group = self.add_group("Groups")
+        self.new_group_row = Adw.EntryRow(title="New group name")
+        create_group_btn = Gtk.Button(label="Create", valign=Gtk.Align.CENTER, css_classes=["flat"])
+        create_group_btn.connect("clicked", self._on_create_group_clicked)
+        self.new_group_row.add_suffix(create_group_btn)
+        self.groups_group.add(self.new_group_row)
 
         self.refresh()
 
@@ -57,6 +65,18 @@ class UsersPage(BasePage):
                 title=esc(f"{user.username} (uid {user.uid})"),
                 subtitle=esc(f"{user.full_name or 'no full name set'} · groups: {', '.join(user.groups) or 'none'}"),
             )
+            password_btn = Gtk.Button(
+                icon_name="dialog-password-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"]
+            )
+            password_btn.set_tooltip_text("Set password")
+            password_btn.connect("clicked", self._on_password_clicked, user.username)
+            row.add_suffix(password_btn)
+
+            groups_btn = Gtk.Button(icon_name="system-users-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+            groups_btn.set_tooltip_text("Change groups")
+            groups_btn.connect("clicked", self._on_groups_clicked, user.username)
+            row.add_suffix(groups_btn)
+
             # Lock state lives in /etc/shadow, which needs root to read, so
             # both buttons are always offered rather than showing a guess.
             lock_btn = Gtk.Button(icon_name="changes-prevent-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
@@ -96,6 +116,12 @@ class UsersPage(BasePage):
                 title=esc(f"{group.name} (gid {group.gid})"),
                 subtitle=esc(f"members: {', '.join(group.members) or 'none'}"),
             )
+            del_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER, css_classes=["flat"])
+            refusal = users.group_delete_refusal(group.name)
+            del_btn.set_tooltip_text(refusal or "Delete group")
+            del_btn.set_sensitive(refusal is None)
+            del_btn.connect("clicked", self._on_delete_group_clicked, group.name, list(group.members))
+            row.add_suffix(del_btn)
             self.groups_group.add(row)
             self._group_rows.append(row)
         return False
@@ -112,6 +138,115 @@ class UsersPage(BasePage):
         self.run_action(
             lambda: users.create_user(username, full_name=full_name, extra_groups=extra_groups),
             self.handle_command_result,
+        )
+
+    def _on_password_clicked(self, _btn: Gtk.Button, username: str) -> None:
+        dialog = Adw.AlertDialog(
+            heading=f"Set a password for {username}",
+            body="This replaces the current password. If the password was locked, setting one unlocks it.",
+        )
+        dialog.set_heading_use_markup(False)
+        dialog.set_body_use_markup(False)
+        new_entry = Gtk.PasswordEntry(placeholder_text="New password", show_peek_icon=True, activates_default=True)
+        repeat_entry = Gtk.PasswordEntry(placeholder_text="Repeat it", show_peek_icon=True, activates_default=True)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.append(new_entry)
+        box.append(repeat_entry)
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("set", "Set password")
+        dialog.set_response_appearance("set", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("set")
+        dialog.set_close_response("cancel")
+        # Only offered once both boxes hold the same thing: a typo here locks
+        # the account's owner out just as well as a wrong password does.
+        dialog.set_response_enabled("set", False)
+
+        def on_changed(_entry: Gtk.PasswordEntry) -> None:
+            password = new_entry.get_text()
+            dialog.set_response_enabled("set", bool(password) and password == repeat_entry.get_text())
+
+        new_entry.connect("changed", on_changed)
+        repeat_entry.connect("changed", on_changed)
+
+        def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
+            if response == "set":
+                password = new_entry.get_text()
+                self.run_action(
+                    lambda: users.set_password(username, password),
+                    lambda result, error: self.handle_command_result(
+                        result, error, f"Password set for {username}", refresh=False
+                    ),
+                )
+
+        dialog.connect("response", on_response)
+        dialog.present(self.get_root())
+
+    def _on_groups_clicked(self, _btn: Gtk.Button, username: str) -> None:
+        current = users.supplementary_groups(username)
+        dialog = Adw.AlertDialog(
+            heading=f"Groups of {username}",
+            body="Comma separated. The account ends up in exactly these groups, next to its own primary group.",
+        )
+        dialog.set_heading_use_markup(False)
+        dialog.set_body_use_markup(False)
+        entry = Gtk.Entry(text=", ".join(current), activates_default=True)
+        dialog.set_extra_child(entry)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Change groups")
+        dialog.set_response_appearance("apply", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_default_response("apply")
+        dialog.set_close_response("cancel")
+
+        def on_response(_dlg: Adw.AlertDialog, response: str) -> None:
+            if response != "apply":
+                return
+            groups = sorted({name.strip() for name in entry.get_text().split(",") if name.strip()})
+            if groups == current:
+                self.notify("Nothing to change")
+                return
+
+            def apply() -> None:
+                self.run_action(
+                    lambda: users.set_groups(username, groups),
+                    lambda result, error: self.handle_command_result(result, error, f"Groups of {username} changed"),
+                )
+
+            warning = users.groups_warning(username, groups)
+            if warning:
+                self.confirm(f"Take {username} out of {users.ADMIN_GROUP}?", warning, "Change groups", apply)
+            else:
+                apply()
+
+        dialog.connect("response", on_response)
+        dialog.present(self.get_root())
+
+    def _on_create_group_clicked(self, _btn: Gtk.Button) -> None:
+        name = self.new_group_row.get_text().strip()
+        if not name:
+            self.notify("Group name is required")
+            return
+
+        def on_done(result, error) -> bool:
+            if error is None and getattr(result, "ok", False):
+                self.new_group_row.set_text("")
+            return self.handle_command_result(result, error, f"Created group {name}")
+
+        self.run_action(lambda: users.create_group(name), on_done)
+
+    def _on_delete_group_clicked(self, _btn: Gtk.Button, name: str, members: list[str]) -> None:
+        refusal = users.group_delete_refusal(name)
+        if refusal:
+            self.notify(refusal, is_error=True)
+            return
+        body = "Files that belong to this group keep its number, with no group name to go with it."
+        if members:
+            body = f"{', '.join(members)} will no longer be in it. {body}"
+        self.confirm(
+            f"Delete the group {name}?",
+            body,
+            "Delete",
+            lambda: self.run_action(lambda: users.delete_group(name), self.handle_command_result),
         )
 
     def _on_lock_clicked(self, _btn: Gtk.Button, username: str) -> None:

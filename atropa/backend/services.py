@@ -141,5 +141,12 @@ def disable(unit: str, now: bool = False) -> CommandResult:
 
 
 def journal_tail(unit: str, lines: int = 100) -> str:
+    """
+    The last `lines` journal lines of `unit`, read as the current user.
+    What journalctl says on stderr is kept: above all its hint that only
+    members of certain groups see system messages, without which an empty
+    result looks like a service that never logged anything.
+    """
     result = run_unprivileged(["journalctl", "-u", unit, "-n", str(lines), "--no-pager"])
-    return result.stdout
+    notes = result.stderr.strip()
+    return f"{result.stdout}\n{notes}\n" if notes else result.stdout

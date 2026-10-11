@@ -60,6 +60,16 @@ class PackagesPage(BasePage):
         self.search_results_group = self.add_group("Search Results")
         self.search_results_group.set_visible(False)
 
+        # --- Orphans -----------------------------------------------------------------
+        self.orphans_group = self.add_group(
+            "Orphaned Packages",
+            "Installed as a dependency of something that has since been removed. Nothing installed needs them.",
+        )
+        self.remove_orphans_btn = Gtk.Button(label="Remove all", valign=Gtk.Align.CENTER, visible=False)
+        self.remove_orphans_btn.connect("clicked", self._on_remove_orphans_clicked)
+        self.orphans_group.set_header_suffix(self.remove_orphans_btn)
+        self._orphan_names: list[str] = []
+
         # --- Installed packages ------------------------------------------------------
         self.installed_group = self.add_group("Explicitly Installed Packages")
 
@@ -72,6 +82,37 @@ class PackagesPage(BasePage):
         self.clear_rows(self.installed_group, getattr(self, "_installed_rows", []))
         self._installed_rows = [self.start_loading(self.installed_group, "Loading installed packages…")]
         self.run_async(pacman.list_explicit, self._on_installed_loaded)
+        self.clear_rows(self.orphans_group, getattr(self, "_orphan_rows", []))
+        self._orphan_rows = [self.start_loading(self.orphans_group, "Looking for orphaned packages…")]
+        self.remove_orphans_btn.set_visible(False)
+        self.run_async(pacman.list_orphans, self._on_orphans_loaded)
+
+    def _on_orphans_loaded(self, result, error) -> None:
+        for row in list(getattr(self, "_orphan_rows", [])):
+            self.orphans_group.remove(row)
+        self._orphan_rows = []
+        self._orphan_names = [] if error else [pkg.name for pkg in result]
+        self.remove_orphans_btn.set_visible(bool(self._orphan_names))
+
+        if error:
+            row = Adw.ActionRow(title="Couldn't look for orphaned packages", subtitle=esc(error))
+        elif not result:
+            row = Adw.ActionRow(title="No orphaned packages")
+        else:
+            row = None
+        if row is not None:
+            self.orphans_group.add(row)
+            self._orphan_rows.append(row)
+            return
+
+        for pkg in result:
+            row = Adw.ActionRow(title=esc(pkg.name), subtitle=esc(pkg.version))
+            remove_btn = Gtk.Button(icon_name="user-trash-symbolic", valign=Gtk.Align.CENTER)
+            remove_btn.add_css_class("flat")
+            remove_btn.connect("clicked", self._on_remove_clicked, pkg.name)
+            row.add_suffix(remove_btn)
+            self.orphans_group.add(row)
+            self._orphan_rows.append(row)
 
     def _load_updates(self) -> None:
         self.updates_row.set_title("Checking for updates…")
@@ -153,6 +194,23 @@ class PackagesPage(BasePage):
             "This uninstalls the package and any dependencies no longer needed by anything else.",
             "Remove",
             lambda: self.run_action(lambda: pacman.remove([package_name]), self.handle_command_result),
+        )
+
+    def _on_remove_orphans_clicked(self, _btn: Gtk.Button) -> None:
+        # The names shown are the names removed. If one of them has become
+        # needed since the list was loaded, pacman refuses the whole removal.
+        names = list(self._orphan_names)
+        if not names:
+            return
+        shown = ", ".join(names[:30]) + (f" and {len(names) - 30} more" if len(names) > 30 else "")
+        self.confirm(
+            f"Remove {len(names)} orphaned package{'s' if len(names) != 1 else ''}?",
+            f"This uninstalls {shown}, along with anything that only {'it' if len(names) == 1 else 'they'} needed.",
+            "Remove",
+            lambda: self.run_action(
+                lambda: pacman.remove(names),
+                lambda result, error: self.handle_command_result(result, error, "Orphaned packages removed"),
+            ),
         )
 
     def _on_search_clicked(self, _btn: Gtk.Button) -> None:
