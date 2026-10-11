@@ -227,8 +227,12 @@ def list_avc_denials(limit: int = 50) -> list[str]:
     """
     Reads recent 'avc:  denied' lines (and 'not defined in policy'
     messages - see _is_relevant_selinux_line) from the kernel log via
-    journalctl. Doesn't require root: these get printk'd to the kernel
-    ring buffer even when auditd is also logging separately.
+    journalctl. Doesn't require root, but only sees AVCs while auditd
+    isn't running: once it is, the kernel hands audit records to auditd
+    instead of printing them (apart from overflow when auditd falls
+    behind), so they're only in the audit log -
+    list_avc_denials_from_audit_log(). The 'not defined in policy'
+    messages are plain printk lines and stay in the kernel log either way.
     """
     result = run_unprivileged(
         ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "-n", str(limit * 3), "--output=cat"]
@@ -239,10 +243,10 @@ def list_avc_denials(limit: int = 50) -> list[str]:
 
 def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
     """
-    Fallback source via ausearch against /var/log/audit/audit.log, for
-    systems where AVCs don't reach the kernel ring buffer (e.g. dmesg
-    restricted or rate-limited). Requires root, so this is privileged and
-    only called when the user explicitly asks for it - not on every page load.
+    AVC denials since boot from /var/log/audit/audit.log via ausearch -
+    where they go while auditd runs (see list_avc_denials). Requires root,
+    so this is privileged and only called when the user explicitly asks
+    for it - not on every page load.
 
     Only covers real AVC audit records: 'not defined in policy' messages
     are raw kernel printk lines, not audit records, so ausearch never
@@ -251,7 +255,15 @@ def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
     """
     if not shutil.which("ausearch"):
         raise RuntimeError("ausearch isn't installed. Install it with: pacman -S audit")
-    result = run_privileged(["ausearch", "-m", "avc", "-ts", "recent"])
+    # Since boot, like the kernel-log source - "recent" was the last 10
+    # minutes only. --input-logs: read the log files even when our stdin is
+    # a pipe, instead of reading audit records from stdin.
+    result = run_privileged(["ausearch", "-m", "avc", "-ts", "boot", "--input-logs"])
+    if not result.ok and "<no matches>" not in result.stderr:
+        # A dismissed prompt or a broken log used to look like "no denials".
+        raise RuntimeError(
+            f"Couldn't read the audit log: {result.stderr.strip() or f'ausearch exited with {result.returncode}'}"
+        )
     lines = [l.strip() for l in result.stdout.strip().splitlines() if "avc:" in l.lower() and "denied" in l.lower()]
     return lines[-limit:]
 

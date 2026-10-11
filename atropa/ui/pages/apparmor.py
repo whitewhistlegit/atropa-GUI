@@ -30,11 +30,14 @@ class ApparmorPage(BasePage):
             "own fields, so review them before appending.",
         )
         self.denials_group = denials_group
-        refresh_row = Adw.ActionRow(title="Source: kernel log (journalctl -k)")
+        self.source_row = Adw.ActionRow(title="Source: kernel log (journalctl -k)")
         refresh_btn = Gtk.Button(label="Refresh", valign=Gtk.Align.CENTER)
         refresh_btn.connect("clicked", lambda _b: self._load_denials())
-        refresh_row.add_suffix(refresh_btn)
-        denials_group.add(refresh_row)
+        self.source_row.add_suffix(refresh_btn)
+        audit_log_btn = Gtk.Button(label="Check audit.log (needs auth)", valign=Gtk.Align.CENTER)
+        audit_log_btn.connect("clicked", lambda _b: self._load_denials(from_audit_log=True))
+        self.source_row.add_suffix(audit_log_btn)
+        denials_group.add(self.source_row)
 
         self.refresh()
 
@@ -44,10 +47,31 @@ class ApparmorPage(BasePage):
         self.run_async(apparmor.list_profiles, self._on_profiles_loaded)
         self._load_denials()
 
-    def _load_denials(self) -> None:
+    def _load_denials(self, from_audit_log: bool = False) -> None:
         self.clear_rows(self.denials_group, getattr(self, "_denial_rows", []))
         self._denial_rows = [self.start_loading(self.denials_group, "Loading denials…")]
-        self.run_async(apparmor.list_denials, self._on_denials_loaded)
+        if from_audit_log:
+            self.source_row.set_title("Source: audit log (ausearch)")
+            self.source_row.set_subtitle("")
+            self.run_async(apparmor.list_denials_from_audit_log, self._on_denials_loaded)
+            return
+        self.source_row.set_title("Source: kernel log (journalctl -k)")
+
+        def load():
+            return apparmor.list_denials(), apparmor.auditd_running()
+
+        self.run_async(load, self._on_kernel_denials_loaded)
+
+    def _on_kernel_denials_loaded(self, result, error) -> bool:
+        if error is None:
+            denials, auditd_running = result
+            # With auditd running the kernel log stops getting new denials.
+            self.source_row.set_subtitle(
+                "auditd is running, so new denials go to the audit log instead - check audit.log"
+                if auditd_running else ""
+            )
+            result = denials
+        return self._on_denials_loaded(result, error)
 
     # -- profiles -----------------------------------------------------
 
