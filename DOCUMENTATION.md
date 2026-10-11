@@ -1660,6 +1660,26 @@ exactly one definition.
   never surfaced as its own page)
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
+**Still open from the full-repo audit** (rough priority order):
+- UI for what the README promises but no page offers yet: setting a user's
+  password, managing groups, a service's journal, cleaning up orphan
+  packages (`pacman.list_orphans()` exists, nothing calls it), and
+  disabling USBGuard
+- CI: a GTK smoke test that builds every page under Xvfb (the backend
+  suite never imports GTK), Python 3.13/3.14 in the matrix next to
+  3.11/3.12, and tests that run the parsers against real config files
+  rather than hand-written snippets
+- Packaging and docs: bring this document up to date with the changes from
+  PRs #3 and #4 (UI confirmations and switch handling, no partial
+  upgrades, the AppArmor/SELinux/refpolicy fixes), and check the
+  packaging files against the current dependencies
+- The single privileged helper (see Architecture): one root helper per
+  operation instead of one pkexec prompt per command. Its design gets
+  agreed before any code. It is also where backups should move to
+  root-owned storage: `restore_file()` only writes to the files Atropa
+  backs up, but anything running as the user can still change a backup's
+  contents in `~/.local/share/atropa/backups`
+
 ---
 
 ## 7. Practical notes for continuing this project
