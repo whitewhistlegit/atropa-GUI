@@ -145,12 +145,16 @@ class BasePage(Gtk.Box):
         """
         if on_done is None:
             on_done = self.handle_command_result
+        if self._action_running:
+            self.notify("Still working on the previous change - try again when it finishes")
+            return
+        self._action_running = True
 
         dialog = Adw.Dialog()
         dialog.set_title(title)
         dialog.set_content_width(560)
         dialog.set_content_height(420)
-        dialog.set_can_close(False)  # don't let it be dismissed mid-operation
+        dialog.set_can_close(False)  # no accidental Escape mid-operation; "Hide" below closes it on purpose
 
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar()
@@ -170,7 +174,10 @@ class BasePage(Gtk.Box):
         spinner.start()
         status_row = Adw.ActionRow(title="Running…")
         status_row.add_prefix(spinner)
-        box.append(status_row)
+        # A row has to live in a list box - GTK asserts when focus lands on one that doesn't.
+        status_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        status_list.append(status_row)
+        box.append(status_list)
 
         buffer = Gtk.TextBuffer()
         text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True, cursor_visible=False)
@@ -183,10 +190,19 @@ class BasePage(Gtk.Box):
         scroller.set_min_content_height(260)
         box.append(scroller)
 
-        close_btn = Gtk.Button(label="Close")
-        close_btn.set_sensitive(False)
+        # "Hide" while running: a hung command used to leave this dialog -
+        # and so the whole window - stuck until it timed out. Hiding doesn't
+        # stop the command; on_done still reports how it ended.
+        finished = False
+        close_btn = Gtk.Button(label="Hide")
         close_btn.set_halign(Gtk.Align.END)
-        close_btn.connect("clicked", lambda _b: dialog.close())
+
+        def on_close_clicked(_btn: Gtk.Button) -> None:
+            if not finished:
+                self.notify(f"{title} is still running - you'll be told when it finishes")
+            dialog.force_close()
+
+        close_btn.connect("clicked", on_close_clicked)
         box.append(close_btn)
 
         toolbar.set_content(box)
@@ -202,10 +218,13 @@ class BasePage(Gtk.Box):
             GLib.idle_add(append_line, line)
 
         def finish(result: Any, error: Exception | None) -> bool:
+            nonlocal finished
+            finished = True
+            self._action_running = False
             spinner.stop()
             spinner.set_visible(False)
             dialog.set_can_close(True)
-            close_btn.set_sensitive(True)
+            close_btn.set_label("Close")
             if error:
                 status_row.set_title("Failed")
                 status_row.set_subtitle(esc(str(error)))

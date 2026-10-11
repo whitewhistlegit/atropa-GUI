@@ -221,3 +221,40 @@ def test_disable_timer(fake_run, fake_which):
     result = aide.disable_timer("aide.timer")
     assert result.ok
     assert fake_run.last_call() == ["pkexec", "systemctl", "disable", "--now", "aide.timer"]
+
+
+
+# --------------------------------------------------------------- root-only /var/lib/aide --
+
+def _db_dir_unsearchable(monkeypatch):
+    real_exists = aide.Path.exists
+
+    def exists(self, *args, **kwargs):
+        if str(self).startswith("/var/lib/aide/"):
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(aide.Path, "exists", exists)
+
+
+def test_baseline_initialized_is_unknown_when_the_db_dir_is_root_only(monkeypatch):
+    # Used to raise PermissionError on Python 3.11-3.13 (False on 3.14).
+    _db_dir_unsearchable(monkeypatch)
+    assert aide.baseline_initialized() is None
+
+
+def test_initialize_baseline_promotes_through_a_root_only_db_dir(monkeypatch, fake_which, fake_run):
+    # The new database can't be seen from here - root's cp is asked instead of
+    # calling a successful --init a failure.
+    _install_streaming(monkeypatch, ["aide --init finished"], returncode=0)
+    _db_dir_unsearchable(monkeypatch)
+    first, second = aide.DB_NEW_CANDIDATES
+    fake_run.set_response(["pkexec", "cp", first], returncode=1, stderr="cp: cannot stat: No such file or directory")
+    fake_run.set_response(["pkexec", "cp", second], returncode=0)
+
+    result = aide.initialize_baseline(lambda _line: None)
+    assert result.ok
+    assert [c for c in fake_run.calls if c[:2] == ["pkexec", "cp"]] == [
+        ["pkexec", "cp", first, first.replace(".new", "")],
+        ["pkexec", "cp", second, second.replace(".new", "")],
+    ]

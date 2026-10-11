@@ -73,6 +73,10 @@ class FakeRun:
 @pytest.fixture
 def fake_run(monkeypatch):
     fr = FakeRun()
+    # privilege._subprocess_run is the one place commands are started from
+    # (subprocess.run's interface, run through Popen); subprocess.run is
+    # patched too so nothing slips through to a real command.
+    monkeypatch.setattr(privilege, "_subprocess_run", fr)
     monkeypatch.setattr(subprocess, "run", fr)
     return fr
 

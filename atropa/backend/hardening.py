@@ -253,7 +253,12 @@ def usbguard_status() -> ServiceHardeningStatus:
     installed = shutil.which("usbguard") is not None
     active = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
     enabled = run_unprivileged(["systemctl", "is-enabled", "usbguard"]).stdout.strip() == "enabled"
-    has_policy = Path(USBGUARD_RULES).exists() and Path(USBGUARD_RULES).stat().st_size > 0
+    try:
+        has_policy: bool | None = Path(USBGUARD_RULES).stat().st_size > 0
+    except FileNotFoundError:
+        has_policy = False
+    except PermissionError:
+        has_policy = None  # /etc/usbguard isn't searchable by us
     return ServiceHardeningStatus(installed=installed, active=active, enabled=enabled, extra={"has_policy": has_policy})
 
 
