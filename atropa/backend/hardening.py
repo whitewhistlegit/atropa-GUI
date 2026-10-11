@@ -37,6 +37,7 @@ SYSCTL_HARDENING_FILE = "/etc/sysctl.d/99-atropa-hardening.conf"
 # flag - both world-readable, and both say what's actually running.
 LSM_LIST = Path("/sys/kernel/security/lsm")
 APPARMOR_ENABLED_PARAM = Path("/sys/module/apparmor/parameters/enabled")
+APPARMOR_SECURITYFS = Path("/sys/kernel/security/apparmor")
 # What the Arch wiki (AppArmor#Installation) adds to the kernel command line.
 APPARMOR_KERNEL_PARAMETER = "lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
 FAILLOCK_CONF = Path("/etc/security/faillock.conf")
@@ -222,7 +223,7 @@ def apparmor_kernel_enabled() -> bool:
 
 
 def apparmor_status() -> ServiceHardeningStatus:
-    installed = shutil.which("aa-status") is not None or Path("/sys/kernel/security/apparmor").exists()
+    installed = shutil.which("aa-status") is not None or APPARMOR_SECURITYFS.exists()
     active = run_unprivileged(["systemctl", "is-active", "apparmor"]).stdout.strip() == "active"
     kernel_enabled = apparmor_kernel_enabled()
 
