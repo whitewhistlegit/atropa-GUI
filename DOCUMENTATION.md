@@ -8,7 +8,7 @@ decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
 Current size: **~12,500 lines of Python across 23 backend modules and 22 UI
-pages, plus a 717-test pytest suite (~7,800 lines).** No GTK4/libadwaita is
+pages, plus a 727-test pytest suite (~7,800 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -296,11 +296,19 @@ confirmation it asks before stop and disable. The page renders at most
 `MAX_ROWS = 150` services and says when the list is cut short.
 
 ### Bootloader (`bootloader.py` / `pages/bootloader.py`)
-Auto-detects GRUB vs systemd-boot (`detect()`): systemd-boot when `bootctl`
-is installed and either its `LoaderInfo` EFI variable exists or an ESP is
-found; GRUB when `/etc/default/grub` exists and `grub-mkconfig` is installed.
-(An ESP is found on a UEFI machine that boots GRUB too - see the open items
-in section 6.) The ESP isn't assumed to be under `/boot`: `esp_path()` asks `bootctl
+Auto-detects GRUB vs systemd-boot (`detect()`). The loader that started this
+boot names itself in the `LoaderInfo` EFI variable (`_loader_info()`), and
+that settles it: "systemd-boot ..." with `bootctl` installed is
+systemd-boot, "GRUB ..." with `/etc/default/grub` and `grub-mkconfig` is
+GRUB. It goes by the name, not by the variable existing - GRUB sets it too
+since 2.12 (its `bli` module). When no loader says (a BIOS boot, an older
+GRUB), it goes by what's installed: GRUB first, since systemd-boot would
+have said, then systemd-boot when `bootctl` is installed and `loader/` on
+the ESP or XBOOTLDR has a `loader.conf` or an `entries` directory. An ESP
+by itself decides nothing - every UEFI machine has one, the ones that boot
+GRUB included.
+
+The ESP isn't assumed to be under `/boot`: `esp_path()` asks `bootctl
 --print-esp-path` and falls back to the first of `/efi`, `/boot`,
 `/boot/efi` that has a `loader/` directory. Entries are also read from
 XBOOTLDR (`bootctl --print-boot-path`), and a root-only ESP (`umask=0077`)
@@ -846,7 +854,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 717 tests across
+**There's a real pytest suite**: `tests/`, 727 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -960,7 +968,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (717 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (727 tests as of the latest pass, across all 23 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -1955,6 +1963,8 @@ exactly one definition.
   8. **USBGuard generation can't leave an empty policy** (which blocks
      every device, keyboards included), **systemd-boot is found wherever
      the ESP is mounted**, and timeout edits work on a commented-out line.
+     (Corrected later: the new detection matched every UEFI machine, the
+     ones that boot GRUB included - see the bootloader entry below.)
   9. **Timeouts hold** (section 1), **root-only directories don't crash**
      (`privilege.path_exists()`), and **the progress dialog can be hidden**.
   10. **One command where one will do** - one `auditctl -l` for all audit
@@ -1977,6 +1987,21 @@ exactly one definition.
   section 7). `test_apply_sysctl_hardening_requires_selection` ran real
   `sysctl` until it was given `fake_run` (section 4).
 
+- 🐛 **GRUB on a UEFI machine was reported as systemd-boot.** Since the
+  second batch, `bootloader.detect()` said systemd-boot whenever `bootctl`
+  was installed and either the `LoaderInfo` EFI variable existed or an ESP
+  was found. Both are true of a UEFI machine that boots GRUB: every UEFI
+  machine has an ESP, `bootctl` comes with systemd, and GRUB has set
+  `LoaderInfo` itself since 2.12. There the Bootloader page named the wrong
+  bootloader, "Apply" wrote the timeout to `loader/loader.conf` on the ESP
+  instead of `/etc/default/grub`, and "Regenerate" ran `bootctl update`.
+  Detection now reads what `LoaderInfo` says, and without it goes by what's
+  installed, GRUB first (the Bootloader summary in section 2). Found by
+  reading the code against this document and shown with simulated setups;
+  not yet checked on real GRUB/UEFI hardware. The tests had missed it
+  because none of them had `bootctl` and GRUB installed together, which is
+  every real GRUB machine.
+
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
   since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
@@ -1996,13 +2021,10 @@ exactly one definition.
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
 **Still open from the full-repo audit** (rough priority order):
-- `bootloader.detect()` answers systemd-boot whenever `bootctl` is installed
-  and finds an ESP - which is also true of a UEFI machine that boots GRUB.
-  It should need the `LoaderInfo` EFI variable or a `loader/` directory on
-  the ESP. Shown with a simulated GRUB-on-UEFI setup (bootctl reporting an
-  ESP, no `loader/`, `/etc/default/grub` present), not yet on a real one.
-  There the Bootloader page would name the wrong bootloader and write the
-  timeout to `<ESP>/loader/loader.conf` instead of `/etc/default/grub`
+- Check bootloader detection on a real UEFI machine that boots GRUB: the
+  fix above rests on GRUB 2.12 writing "GRUB ..." to `LoaderInfo` and on
+  `bootctl --print-esp-path` answering there, neither of which could be
+  run where it was written
 - UI for what the README promises but no page offers yet: setting a user's
   password, managing groups, a service's journal, cleaning up orphan
   packages (`pacman.list_orphans()` exists, nothing calls it), and
