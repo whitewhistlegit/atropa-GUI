@@ -42,6 +42,7 @@ class FakeRun:
     def __init__(self):
         self._responses: dict[tuple, _FakeResult] = {}
         self.calls: list[list[str]] = []
+        self.inputs: list[str | None] = []  # stdin text passed with each call, parallel to `calls`
 
     def set_response(self, argv_prefix, stdout="", stderr="", returncode=0):
         """Any call whose argv starts with argv_prefix gets this response.
@@ -50,6 +51,7 @@ class FakeRun:
 
     def __call__(self, argv, input=None, capture_output=True, text=True, timeout=None):
         self.calls.append(list(argv))
+        self.inputs.append(input)
         best_match = None
         for prefix, resp in self._responses.items():
             if tuple(argv[: len(prefix)]) == prefix:
