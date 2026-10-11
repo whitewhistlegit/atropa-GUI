@@ -39,6 +39,15 @@ class SshStatus:
     hostbased_authentication: str = "unknown"
     permit_empty_passwords: str = "unknown"
     permit_user_environment: str = "unknown"
+    # `port` falls back to "22" for display when sshd_config has no Port
+    # line; this says whether that value was actually configured, so a
+    # profile export doesn't record the default as if it were a setting.
+    port_explicit: bool = False
+
+
+# Every value sshd accepts for PermitRootLogin ("without-password" is the
+# deprecated spelling of "prohibit-password").
+SSH_PERMIT_ROOT_LOGIN_VALUES = ("yes", "no", "prohibit-password", "without-password", "forced-commands-only")
 
 
 def firewall_backend() -> str:
@@ -145,6 +154,7 @@ def ssh_status() -> SshStatus:
         "x11_forwarding": "unknown", "max_auth_tries": "unknown", "ignore_rhosts": "unknown",
         "hostbased_authentication": "unknown", "permit_empty_passwords": "unknown", "permit_user_environment": "unknown",
     }
+    port_explicit = False
     if SSHD_CONFIG.exists():
         text = run_unprivileged(["cat", str(SSHD_CONFIG)]).stdout
         for line in text.splitlines():
@@ -154,6 +164,7 @@ def ssh_status() -> SshStatus:
             lower = line.lower()
             if lower.startswith("port "):
                 fields["port"] = line.split(maxsplit=1)[1]
+                port_explicit = True
             elif lower.startswith("permitrootlogin"):
                 fields["root_login"] = line.split(maxsplit=1)[1]
             elif lower.startswith("passwordauthentication"):
@@ -173,7 +184,7 @@ def ssh_status() -> SshStatus:
             elif lower.startswith("permituserenvironment"):
                 fields["permit_user_environment"] = line.split(maxsplit=1)[1]
 
-    return SshStatus(installed=installed, running=running, **fields)
+    return SshStatus(installed=installed, running=running, port_explicit=port_explicit, **fields)
 
 
 def _set_sshd_option(key: str, value: str) -> CommandResult:
@@ -213,7 +224,22 @@ def _set_sshd_option(key: str, value: str) -> CommandResult:
 
 
 def set_ssh_root_login(allow: bool) -> CommandResult:
-    return _set_sshd_option("PermitRootLogin", "yes" if allow else "no")
+    return set_ssh_permit_root_login("yes" if allow else "no")
+
+
+def set_ssh_permit_root_login(value: str) -> CommandResult:
+    """
+    Sets PermitRootLogin to an exact value, for replaying a captured
+    profile faithfully - "prohibit-password" (key-only root login) is a
+    meaningfully different setting from "no", not a variant of it. Only
+    the fixed set of values sshd accepts ever reaches the config file: the
+    value comes from a profile file that may have been hand-edited or
+    shared, and it's interpolated into a sed expression below.
+    """
+    normalized = value.strip().lower()
+    if normalized not in SSH_PERMIT_ROOT_LOGIN_VALUES:
+        raise ValueError(f"Unsupported PermitRootLogin value: {value!r}")
+    return _set_sshd_option("PermitRootLogin", normalized)
 
 
 def set_ssh_password_auth(allow: bool) -> CommandResult:

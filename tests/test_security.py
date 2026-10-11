@@ -146,7 +146,41 @@ def test_ssh_status_defaults_when_config_missing(fake_run, fake_which, monkeypat
     fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
     status = security.ssh_status()
     assert status.port == "22"
+    assert status.port_explicit is False
     assert status.root_login == "unknown"
+
+
+def test_ssh_status_port_explicit_only_for_uncommented_port_line(fake_run, fake_which, monkeypatch, tmp_path):
+    conf = tmp_path / "sshd_config"
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+
+    conf.write_text("#Port 22\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    assert security.ssh_status().port_explicit is False
+
+    conf.write_text("Port 2222\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    assert security.ssh_status().port_explicit is True
+
+
+def test_set_ssh_permit_root_login_writes_exact_value(fake_run, fake_which, privilege_paths, monkeypatch, tmp_path):
+    conf = tmp_path / "sshd_config"
+    conf.write_text("PermitRootLogin yes\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
+
+    assert security.set_ssh_permit_root_login("Prohibit-Password").ok
+
+    sed_call = fake_run.call_containing("sed")
+    assert sed_call is not None and "PermitRootLogin prohibit-password" in sed_call[4]
+
+
+@pytest.mark.parametrize("value", ["unknown", "", "maybe", "yes/e;touch /tmp/pwned;#"])
+def test_set_ssh_permit_root_login_rejects_anything_sshd_does_not_accept(fake_run, fake_which, value):
+    # The value ends up inside a sed expression - only sshd's own keywords may get there.
+    with pytest.raises(ValueError):
+        security.set_ssh_permit_root_login(value)
+    assert fake_run.calls == []
 
 
 # --------------------------------------------------------------- _set_sshd_option --

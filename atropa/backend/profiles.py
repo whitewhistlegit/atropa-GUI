@@ -45,6 +45,13 @@ PROFILE_VERSION = 1
 
 SECTIONS = ["quicksetup", "apparmor_profiles", "selinux_booleans", "ssh"]
 
+# The aa-status modes apparmor.set_profile_mode() can actually apply.
+_SETTABLE_APPARMOR_MODES = ("enforce", "complain")
+
+# Hand-written profiles sometimes use true/false/on/off; exports use the
+# literal sshd value.
+_SSH_YES_NO = {"yes": "yes", "true": "yes", "on": "yes", "no": "no", "false": "no", "off": "no"}
+
 
 @dataclass
 class ProfileSummary:
@@ -96,10 +103,13 @@ def export_profile() -> dict:
     ssh_section: dict | None = None
     ssh_status = security.ssh_status()
     if ssh_status.installed:
+        # "unknown" = sshd_config never sets it (OpenSSH's compiled-in
+        # default applies); import leaves such settings alone, so the
+        # display-only default port must not be recorded as a real "22".
         ssh_section = {
             "root_login": ssh_status.root_login,
             "password_auth": ssh_status.password_auth,
-            "port": ssh_status.port,
+            "port": ssh_status.port if ssh_status.port_explicit else "unknown",
         }
 
     return {
@@ -157,27 +167,42 @@ def _import_apparmor_profiles(profiles: dict, on_line: Callable[[str], None]) ->
         return CommandResult(0, "skipped: apparmor unavailable", "")
 
     try:
-        current = {p.path for p in apparmor.list_profiles()}
+        current = {p.path: p.mode for p in apparmor.list_profiles()}
     except RuntimeError as exc:
         on_line(f"Couldn't list profiles: {exc}")
         return CommandResult(1, "", str(exc))
 
-    applied, skipped, failed = 0, 0, 0
+    applied, unchanged, skipped, failed = 0, 0, 0, 0
     for path, mode in profiles.items():
         if path not in current:
             on_line(f"Skipping {path} (not present on this machine)")
             skipped += 1
             continue
+        # aa-status also reports modes like "unconfined", "kill" and
+        # "prompt" (AppArmor 4), which set_profile_mode() can't apply -
+        # passing one through used to raise and abort the whole import.
+        if mode not in _SETTABLE_APPARMOR_MODES:
+            on_line(f"Skipping {path} - Atropa can only set enforce/complain, not {mode!r}")
+            skipped += 1
+            continue
+        if current[path] == mode:
+            unchanged += 1
+            continue
         on_line(f"Setting {path} to {mode}...")
-        result = apparmor.set_profile_mode(path, mode)
+        try:
+            result = apparmor.set_profile_mode(path, mode)
+        except (RuntimeError, ValueError) as exc:
+            result = CommandResult(1, "", str(exc))
         if result.ok:
             applied += 1
         else:
             on_line(f"Failed: {result.stderr.strip()}")
             failed += 1
 
-    on_line(f"AppArmor profiles: {applied} applied, {skipped} skipped, {failed} failed.")
-    return CommandResult(0 if failed == 0 else 1, f"applied={applied} skipped={skipped} failed={failed}", "")
+    on_line(f"AppArmor profiles: {applied} applied, {unchanged} already set, {skipped} skipped, {failed} failed.")
+    return CommandResult(
+        0 if failed == 0 else 1, f"applied={applied} unchanged={unchanged} skipped={skipped} failed={failed}", ""
+    )
 
 
 def _import_selinux_booleans(booleans: dict, on_line: Callable[[str], None]) -> CommandResult:
@@ -188,23 +213,34 @@ def _import_selinux_booleans(booleans: dict, on_line: Callable[[str], None]) -> 
         on_line("SELinux isn't available on this machine - skipping.")
         return CommandResult(0, "skipped: selinux unavailable", "")
 
-    current_names = {b.name for b in selinux.list_booleans()}
-    applied, skipped, failed = 0, 0, 0
+    current = {b.name: b.active for b in selinux.list_booleans()}
+    applied, unchanged, skipped, failed = 0, 0, 0, 0
     for name, value in booleans.items():
-        if name not in current_names:
+        if name not in current:
             on_line(f"Skipping {name} (not present on this machine)")
             skipped += 1
             continue
+        # Exports always write JSON true/false. Anything else came from a
+        # hand-edited file, and bool() would read a string like "off" as on.
+        if not isinstance(value, bool):
+            on_line(f"Skipping {name} - {value!r} isn't true/false")
+            skipped += 1
+            continue
+        if current[name] == value:
+            unchanged += 1
+            continue
         on_line(f"Setting {name} to {'on' if value else 'off'}...")
-        result = selinux.set_boolean(name, bool(value))
+        result = selinux.set_boolean(name, value)
         if result.ok:
             applied += 1
         else:
             on_line(f"Failed: {result.stderr.strip()}")
             failed += 1
 
-    on_line(f"SELinux booleans: {applied} applied, {skipped} skipped, {failed} failed.")
-    return CommandResult(0 if failed == 0 else 1, f"applied={applied} skipped={skipped} failed={failed}", "")
+    on_line(f"SELinux booleans: {applied} applied, {unchanged} already set, {skipped} skipped, {failed} failed.")
+    return CommandResult(
+        0 if failed == 0 else 1, f"applied={applied} unchanged={unchanged} skipped={skipped} failed={failed}", ""
+    )
 
 
 def _import_ssh(ssh_section: dict, on_line: Callable[[str], None]) -> CommandResult:
@@ -214,34 +250,71 @@ def _import_ssh(ssh_section: dict, on_line: Callable[[str], None]) -> CommandRes
         "VALID config that still doesn't fit this machine (e.g. disabling password "
         "auth without a key already set up here) won't be caught by that check."
     )
-    last_result = CommandResult(0, "no ssh settings applied", "")
+    # Only explicit, recognized values are applied. Anything else - above
+    # all "unknown", which is what an export records when sshd_config never
+    # sets the key and OpenSSH's own default applies - is left alone. Mapping
+    # "anything but yes" to "no" used to turn a profile exported from a
+    # default config into PermitRootLogin no + PasswordAuthentication no on
+    # the importing machine: a lockout for anyone relying on passwords there.
+    changes: list[tuple[str, Callable[[], CommandResult]]] = []
+    skipped = 0
+
+    def leave_unchanged(setting: str, raw: object) -> None:
+        nonlocal skipped
+        skipped += 1
+        if str(raw).strip().lower() == "unknown":
+            on_line(f"Leaving {setting} unchanged - the exporting machine didn't set it explicitly.")
+        else:
+            on_line(f"Leaving {setting} unchanged - {raw!r} isn't a value Atropa can apply.")
 
     if "root_login" in ssh_section:
-        allow = str(ssh_section["root_login"]).strip().lower() in ("yes", "true", "on")
-        on_line(f"Setting PermitRootLogin to {ssh_section['root_login']}...")
-        last_result = security.set_ssh_root_login(allow)
-        if not last_result.ok:
-            on_line(f"Failed: {last_result.stderr.strip()}")
+        raw = str(ssh_section["root_login"]).strip().lower()
+        value = _SSH_YES_NO.get(raw, raw)
+        if value in security.SSH_PERMIT_ROOT_LOGIN_VALUES:
+            changes.append((f"PermitRootLogin to {value}", lambda v=value: security.set_ssh_permit_root_login(v)))
+        else:
+            leave_unchanged("PermitRootLogin", ssh_section["root_login"])
 
     if "password_auth" in ssh_section:
-        allow = str(ssh_section["password_auth"]).strip().lower() in ("yes", "true", "on")
-        on_line(f"Setting PasswordAuthentication to {ssh_section['password_auth']}...")
-        last_result = security.set_ssh_password_auth(allow)
-        if not last_result.ok:
-            on_line(f"Failed: {last_result.stderr.strip()}")
+        value = _SSH_YES_NO.get(str(ssh_section["password_auth"]).strip().lower())
+        if value is not None:
+            changes.append(
+                (f"PasswordAuthentication to {value}", lambda v=value: security.set_ssh_password_auth(v == "yes"))
+            )
+        else:
+            leave_unchanged("PasswordAuthentication", ssh_section["password_auth"])
 
     if "port" in ssh_section:
-        try:
-            port = int(ssh_section["port"])
-        except (TypeError, ValueError):
-            on_line(f"Skipping port - '{ssh_section['port']}' isn't a valid number.")
+        raw_port = ssh_section["port"]
+        if str(raw_port).strip().lower() == "unknown":
+            leave_unchanged("the SSH port", raw_port)
         else:
-            on_line(f"Setting SSH port to {port}...")
-            last_result = security.set_ssh_port(port)
-            if not last_result.ok:
-                on_line(f"Failed: {last_result.stderr.strip()}")
+            try:
+                port = int(raw_port)
+            except (TypeError, ValueError):
+                on_line(f"Skipping port - '{raw_port}' isn't a valid number.")
+                skipped += 1
+            else:
+                if 1 <= port <= 65535:
+                    changes.append((f"SSH port to {port}", lambda p=port: security.set_ssh_port(p)))
+                else:
+                    on_line(f"Skipping port - {port} is outside 1-65535.")
+                    skipped += 1
 
-    return last_result
+    applied, failed = 0, 0
+    for label, apply in changes:
+        on_line(f"Setting {label}...")
+        try:
+            result = apply()
+        except (RuntimeError, ValueError) as exc:  # e.g. sshd -t rejected it (already rolled back)
+            result = CommandResult(1, "", str(exc))
+        if result.ok:
+            applied += 1
+        else:
+            on_line(f"Failed: {result.stderr.strip()}")
+            failed += 1
+
+    return CommandResult(0 if failed == 0 else 1, f"applied={applied} skipped={skipped} failed={failed}", "")
 
 
 def import_profile(profile: dict, sections: list[str], on_line: Callable[[str], None]) -> dict[str, CommandResult]:
@@ -252,33 +325,52 @@ def import_profile(profile: dict, sections: list[str], on_line: Callable[[str], 
     """
     results: dict[str, CommandResult] = {}
 
-    if "quicksetup" in sections:
-        keys = [key for key in profile.get("quicksetup_keys", []) if key in {item.key for item in quicksetup.CATALOG}]
-        on_line("=== Re-applying quick-setup modules from profile ===")
-        if keys:
-            results.update(quicksetup.apply_items(keys, on_line))
-        else:
-            on_line("Profile has no quick-setup modules to apply.")
+    def run_section(key: str, apply: Callable[[], None]) -> None:
+        # A profile file is untrusted input - a malformed section (or an
+        # unexpected error while applying it) is recorded against that
+        # section, and the remaining sections still run.
+        try:
+            apply()
+        except Exception as exc:  # noqa: BLE001 - reported per section, not swallowed
+            on_line(f"Failed: {exc}")
+            results[key] = CommandResult(1, "", str(exc))
         on_line("")
+
+    if "quicksetup" in sections:
+        def apply_quicksetup() -> None:
+            keys = [key for key in profile.get("quicksetup_keys", []) if key in {item.key for item in quicksetup.CATALOG}]
+            on_line("=== Re-applying quick-setup modules from profile ===")
+            if keys:
+                results.update(quicksetup.apply_items(keys, on_line))
+            else:
+                on_line("Profile has no quick-setup modules to apply.")
+
+        run_section("quicksetup", apply_quicksetup)
 
     if "apparmor_profiles" in sections:
-        on_line("=== AppArmor profile modes ===")
-        results["apparmor_profiles"] = _import_apparmor_profiles(profile.get("apparmor_profiles", {}) or {}, on_line)
-        on_line("")
+        def apply_apparmor() -> None:
+            on_line("=== AppArmor profile modes ===")
+            results["apparmor_profiles"] = _import_apparmor_profiles(profile.get("apparmor_profiles", {}) or {}, on_line)
+
+        run_section("apparmor_profiles", apply_apparmor)
 
     if "selinux_booleans" in sections:
-        on_line("=== SELinux booleans ===")
-        results["selinux_booleans"] = _import_selinux_booleans(profile.get("selinux_booleans", {}) or {}, on_line)
-        on_line("")
+        def apply_selinux() -> None:
+            on_line("=== SELinux booleans ===")
+            results["selinux_booleans"] = _import_selinux_booleans(profile.get("selinux_booleans", {}) or {}, on_line)
+
+        run_section("selinux_booleans", apply_selinux)
 
     if "ssh" in sections:
-        on_line("=== SSH hardening ===")
-        ssh_section = profile.get("ssh")
-        if ssh_section:
-            results["ssh"] = _import_ssh(ssh_section, on_line)
-        else:
-            on_line("Profile has no SSH section to apply.")
-            results["ssh"] = CommandResult(0, "nothing to apply", "")
-        on_line("")
+        def apply_ssh() -> None:
+            on_line("=== SSH hardening ===")
+            ssh_section = profile.get("ssh")
+            if ssh_section:
+                results["ssh"] = _import_ssh(ssh_section, on_line)
+            else:
+                on_line("Profile has no SSH section to apply.")
+                results["ssh"] = CommandResult(0, "nothing to apply", "")
+
+        run_section("ssh", apply_ssh)
 
     return results
