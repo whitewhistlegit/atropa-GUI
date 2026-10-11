@@ -103,6 +103,14 @@ def get_status() -> SelinuxStatus:
         m = re.search(rf"{re.escape(label)}:\s*(.+)", text)
         return m.group(1).strip() if m else ""
 
+    # Installed tools aren't an enabled SELinux: with SELinux off in the
+    # kernel, sestatus says "disabled" (and there's no selinuxfs). This used
+    # to come back available with mode "unknown", which sent Quick Setup to
+    # run setenforce on a disabled SELinux instead of saying it's a manual step.
+    selinux_status = field_value("SELinux status").lower()
+    if selinux_status == "disabled" or (not selinux_status and not Path("/sys/fs/selinux").exists()):
+        return SelinuxStatus(available=False, mode="disabled", raw=text.strip())
+
     return SelinuxStatus(
         available=True,
         mode=field_value("Current mode") or "unknown",
