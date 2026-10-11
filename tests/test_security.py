@@ -282,9 +282,20 @@ def test_set_sshd_option_stops_early_if_edit_command_fails(
     assert fake_run.call_containing("sshd") is None
 
 
-def test_sudoers_check_prefers_stdout(fake_run):
-    fake_run.set_response(["visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
-    assert "parsed OK" in security.sudoers_check()
+def test_sudoers_check_runs_visudo_as_root(fake_run, fake_which):
+    # sudoers is 0440 root:root - unprivileged visudo can only report "Permission denied".
+    fake_run.set_response(["pkexec", "visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
+    result = security.sudoers_check()
+    assert result.ok
+    assert "parsed OK" in result.stdout
+    assert fake_run.last_call() == ["pkexec", "visudo", "-cf", "/etc/sudoers"]
+
+
+def test_sudoers_check_reports_visudo_failure_via_exit_status(fake_run, fake_which):
+    fake_run.set_response(
+        ["pkexec", "visudo", "-cf", "/etc/sudoers"], returncode=1, stderr=">>> /etc/sudoers: syntax error near line 9 <<<\n"
+    )
+    assert not security.sudoers_check().ok
 
 
 # --------------------------------------------------------------- extended SSH status (CIS depth) --

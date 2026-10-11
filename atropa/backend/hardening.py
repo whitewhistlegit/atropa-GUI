@@ -35,6 +35,7 @@ from .privilege import CommandResult, backup_file, run_privileged, run_unprivile
 SYSCTL_HARDENING_FILE = "/etc/sysctl.d/99-atropa-hardening.conf"
 FAILLOCK_CONF = Path("/etc/security/faillock.conf")
 PAM_SYSTEM_LOGIN = Path("/etc/pam.d/system-login")
+PAM_PASSWD = Path("/etc/pam.d/passwd")
 
 # (key, recommended value, human-readable description)
 SYSCTL_RECOMMENDATIONS: list[tuple[str, str, str]] = [
@@ -248,17 +249,61 @@ def vulnerability_scan() -> list[str]:
         raise RuntimeError("arch-audit isn't installed. Install it with: pacman -S arch-audit")
 
     result = run_unprivileged(["arch-audit"])
+    if not result.ok:
+        # arch-audit exits 0 whether or not anything is affected and only
+        # fails on errors - typically, the advisory feed couldn't be
+        # downloaded. Its empty output used to read as "no known
+        # vulnerabilities": a pass for a scan that never happened.
+        raise RuntimeError(f"arch-audit failed: {result.stderr.strip() or f'exit code {result.returncode}'}")
     lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
     return lines
+
+
+# ----------------------------------------------------------- PAM wiring --
+
+_PAM_TYPES = ("auth", "account", "password", "session")
+
+
+def _pam_stack_references(service_file: Path, module: str, _seen: set[str] | None = None) -> bool:
+    """
+    True if `module` (e.g. "pam_faillock.so") is loaded by an active line
+    of `service_file`, or of any service it pulls in via `include` /
+    `substack` (or Debian-style `@include`). Following includes matters on
+    Arch: /etc/pam.d/system-login never names pam_faillock itself - it does
+    `auth include system-auth`, and system-auth is where pambase wires
+    faillock in - so checking only the one file reported "not wired" on
+    every stock install. Comments are ignored, so a commented-out line no
+    longer counts as wired either.
+    """
+    seen = _seen if _seen is not None else set()
+    if str(service_file) in seen or not service_file.exists():
+        return False
+    seen.add(str(service_file))
+
+    text = run_unprivileged(["cat", str(service_file)]).stdout
+    for raw_line in text.splitlines():
+        tokens = raw_line.split("#", 1)[0].split()  # pam.d(5): '#' starts a comment to end of line
+        if not tokens:
+            continue
+        if tokens[0] == "@include" and len(tokens) > 1:
+            if _pam_stack_references(service_file.parent / tokens[1], module, seen):
+                return True
+            continue
+        if tokens[0].lstrip("-").lower() not in _PAM_TYPES or len(tokens) < 3:
+            continue
+        if tokens[1] in ("include", "substack"):
+            if _pam_stack_references(service_file.parent / tokens[2], module, seen):
+                return True
+        elif any(token.rsplit("/", 1)[-1] == module for token in tokens[2:]):
+            return True
+    return False
 
 
 # -------------------------------------------------------------- faillock --
 
 def faillock_wired_into_pam() -> bool:
-    """True if /etc/pam.d/system-login already references pam_faillock."""
-    if not PAM_SYSTEM_LOGIN.exists():
-        return False
-    return "pam_faillock.so" in run_unprivileged(["cat", str(PAM_SYSTEM_LOGIN)]).stdout
+    """True if the login PAM stack (system-login, following its includes) loads pam_faillock."""
+    return _pam_stack_references(PAM_SYSTEM_LOGIN, "pam_faillock.so")
 
 
 def faillock_status() -> dict:
@@ -310,10 +355,13 @@ PWQUALITY_CONF = Path("/etc/security/pwquality.conf")
 
 
 def pwquality_wired_into_pam() -> bool:
-    """True if /etc/pam.d/system-login already references pam_pwquality."""
-    if not PAM_SYSTEM_LOGIN.exists():
-        return False
-    return "pam_pwquality.so" in run_unprivileged(["cat", str(PAM_SYSTEM_LOGIN)]).stdout
+    """
+    True if password changes go through pam_pwquality: checked in the
+    passwd service's stack (where the Arch wiki says to add it) and in
+    system-login's, which pulls in system-auth's password section - both
+    following includes.
+    """
+    return any(_pam_stack_references(service, "pam_pwquality.so") for service in (PAM_PASSWD, PAM_SYSTEM_LOGIN))
 
 
 def pwquality_status() -> dict:

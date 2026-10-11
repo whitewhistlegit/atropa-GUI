@@ -151,7 +151,7 @@ def test_run_check_forwards_lines(monkeypatch, fake_which):
 
 # --------------------------------------------------------------- parse_check_summary --
 
-def test_parse_check_summary_clean():
+def test_parse_check_summary_zero_counts_in_summary_block():
     output = "Summary:\n  Total number of entries:\t100\n  Added entries:\t\t0\n  Removed entries:\t\t0\n  Changed entries:\t\t0\n"
     summary = aide.parse_check_summary(output)
     assert summary is not None
@@ -159,6 +159,32 @@ def test_parse_check_summary_clean():
     assert summary.removed == 0
     assert summary.changed == 0
     assert summary.clean is True
+
+
+def test_parse_check_summary_real_clean_run_has_no_summary_block():
+    # What AIDE actually prints when nothing changed (report_plain.c only
+    # emits "Summary:" when there are differences) - used to parse as None,
+    # i.e. "no summary could be parsed", for the best possible outcome.
+    output = (
+        "Start timestamp: 2026-10-11 05:00:00 +0000 (AIDE 0.18.8)\n"
+        "AIDE found NO differences between database and filesystem. Looks okay!!\n"
+        "\n"
+        "Number of entries:\t48211\n"
+    )
+    assert aide.parse_check_summary(output) == aide.CheckSummary(added=0, removed=0, changed=0)
+
+
+def test_parse_check_summary_old_aide_clean_wording():
+    assert aide.parse_check_summary("### All files match AIDE database. Looks okay!\n").clean is True
+
+
+def test_parse_check_summary_exit_status_zero_means_clean():
+    # aide --check exits 0 only when there are no differences.
+    assert aide.parse_check_summary("", returncode=0).clean is True
+
+
+def test_parse_check_summary_error_exit_without_report_is_none():
+    assert aide.parse_check_summary("aide: couldn't open config file\n", returncode=17) is None
 
 
 def test_parse_check_summary_with_changes():

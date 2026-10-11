@@ -287,7 +287,12 @@ def set_ssh_permit_user_environment(allow: bool) -> CommandResult:
     return _set_sshd_option("PermitUserEnvironment", "yes" if allow else "no")
 
 
-def sudoers_check() -> str:
-    """Run visudo's syntax checker (read-only, safe) against /etc/sudoers."""
-    result = run_unprivileged(["visudo", "-cf", "/etc/sudoers"])
-    return result.stdout or result.stderr
+def sudoers_check() -> CommandResult:
+    """
+    Runs visudo's syntax checker (read-only) against /etc/sudoers and the
+    files it includes. Needs root: sudoers is root-only (0440) on Arch, and
+    an unprivileged visudo can only print "unable to open /etc/sudoers:
+    Permission denied" - which is what this used to report as the result.
+    Callers should go by .ok (visudo's exit status), not the output text.
+    """
+    return run_privileged(["visudo", "-cf", "/etc/sudoers"])

@@ -251,6 +251,10 @@ class SecurityPage(BasePage):
     def _on_sudo_check_done(self, result, error) -> bool:
         if error:
             self.sudo_row.set_subtitle(esc(f"Error: {error}"))
+            return False
+        output = (result.stdout or result.stderr).strip()
+        if result.ok:
+            self.sudo_row.set_subtitle(esc(output or "OK"))
         else:
-            self.sudo_row.set_subtitle(esc(result.strip() or "OK"))
+            self.sudo_row.set_subtitle(esc(f"Problem: {output or f'visudo exited with {result.returncode}'}"))
         return False
