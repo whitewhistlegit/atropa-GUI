@@ -21,6 +21,31 @@ from .privilege import CommandResult, backup_file, run_privileged, run_privilege
 
 SELINUX_CONFIG = Path("/etc/selinux/config")
 
+# Which package ships each SELinux tool Atropa runs. All of them are
+# AUR-only on Arch - "pacman -S policycoreutils" just says "target not
+# found" - and audit2allow/audit2why aren't in "audit", whatever its
+# name suggests.
+SELINUX_TOOL_PACKAGES = {
+    "sestatus": "policycoreutils",
+    "setsebool": "policycoreutils",
+    "restorecon": "policycoreutils",
+    "semodule": "policycoreutils",
+    "getsebool": "libselinux",
+    "checkmodule": "checkpolicy",
+    "semodule_package": "semodule-utils",
+    "audit2allow": "selinux-python",
+    "audit2why": "selinux-python",
+    "semanage": "selinux-python",
+}
+
+
+def missing_tool_error(tool: str) -> RuntimeError:
+    package = SELINUX_TOOL_PACKAGES.get(tool, "policycoreutils")
+    return RuntimeError(
+        f"'{tool}' isn't installed. It's in the {package} package, which Arch only has in the AUR - "
+        f"install it with your AUR helper (e.g. paru -S {package})."
+    )
+
 # Persistent home for compiled review artifacts (.te/.mod/.pp) and Setup
 # Mode state - kept around deliberately, as a paper trail of what was
 # proposed and when, rather than scrubbed after use.
@@ -286,7 +311,7 @@ def list_avc_denials_from_audit_log(limit: int = 50) -> list[str]:
 def explain_denial(raw_avc_line: str) -> str:
     """Runs audit2why on a single AVC line to explain *why* it was denied."""
     if not shutil.which("audit2why"):
-        raise RuntimeError("audit2why isn't installed. Install it with: pacman -S audit")
+        raise missing_tool_error("audit2why")
     result = run_unprivileged(["audit2why"], input_text=raw_avc_line.strip() + "\n")
     output = (result.stdout or result.stderr).strip()
     if not output:
@@ -297,7 +322,7 @@ def explain_denial(raw_avc_line: str) -> str:
 def generate_te(raw_avc_line: str, module_name: str) -> str:
     """Runs audit2allow on a single AVC line and returns the suggested .te module text."""
     if not shutil.which("audit2allow"):
-        raise RuntimeError("audit2allow isn't installed. Install it with: pacman -S audit")
+        raise missing_tool_error("audit2allow")
     _validate_module_name(module_name)
     result = run_unprivileged(["audit2allow", "-m", module_name], input_text=raw_avc_line.strip() + "\n")
     if not result.stdout.strip():
@@ -342,7 +367,7 @@ def _compile_te(te_content: str, module_name: str, workdir: Path) -> str:
     _validate_module_name(module_name)
     for tool in ("checkmodule", "semodule_package"):
         if not shutil.which(tool):
-            raise RuntimeError(f"'{tool}' isn't installed. Install it with: pacman -S policycoreutils")
+            raise missing_tool_error(tool)
 
     workdir.mkdir(parents=True, exist_ok=True)
     te_path = workdir / f"{module_name}.te"
@@ -379,7 +404,7 @@ def compile_and_load_te(te_content: str, module_name: str) -> CommandResult:
     compiled files move from modules/ to approved/.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     pp_path = _compile_te(te_content, module_name, REVIEW_MODULES_DIR)
     result = run_privileged(["semodule", "-i", pp_path])
     if result.ok:
@@ -432,10 +457,9 @@ def import_te_files(paths: list[str]) -> list[ImportedTeFile]:
     - a single typo'd file, or one whose module name collides with
     something already pending, shouldn't block importing the rest.
     """
-    if not shutil.which("checkmodule") or not shutil.which("semodule_package"):
-        raise RuntimeError(
-            "'checkmodule'/'semodule_package' aren't installed. Install them with: pacman -S policycoreutils"
-        )
+    for tool in ("checkmodule", "semodule_package"):
+        if not shutil.which(tool):
+            raise missing_tool_error(tool)
 
     results: list[ImportedTeFile] = []
     for path_str in paths:
@@ -463,7 +487,7 @@ def install_pp_file(pp_path: str) -> CommandResult:
     files move to approved/ on success.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     path = Path(pp_path)
     if not path.exists():
         raise RuntimeError(f"{pp_path} no longer exists")
@@ -526,7 +550,7 @@ def reinstall_all_approved_modules() -> CommandResult:
     nothing to do with any single module being untrustworthy.
     """
     if not shutil.which("semodule"):
-        raise RuntimeError("'semodule' isn't installed. Install it with: pacman -S policycoreutils")
+        raise missing_tool_error("semodule")
     inactive = [m for m in list_approved_modules() if not m["active"]]
     if not inactive:
         return CommandResult(0, "nothing to reinstall", "")

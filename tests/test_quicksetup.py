@@ -278,21 +278,27 @@ def test_apply_usbguard_installs_generates_and_enables(fake_run, fake_which):
 
 # --------------------------------------------------------------- selinux (never auto-enforce) --
 
-def test_apply_selinux_installs_tools_when_missing(fake_run, fake_which):
-    # is_available() is False here (sestatus not in fake_which, and the
-    # sandbox's real /sys/fs/selinux is neutralized by the autouse fixture
-    # above) - so after installing tools, the function should stop and
-    # report that kernel enablement is still a manual step, not proceed to
-    # call sestatus at all.
-    fake_run.set_response(
-        ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "policycoreutils", "checkpolicy", "audit"], returncode=0
-    )
-
+def test_apply_selinux_never_tries_to_pacman_install_the_aur_only_tools(fake_run, fake_which):
+    # `pacman -S policycoreutils checkpolicy` can only fail: SELinux's
+    # userspace isn't in Arch's official repos. audit (ausearch) is.
     lines = []
     result = quicksetup._apply_selinux(lines.append)
     assert result.ok
-    assert "not automated" in result.stdout or "manual step" in result.stdout
+    assert "manual step" in result.stdout
+    assert ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "audit"] in fake_run.calls
+    assert not any("policycoreutils" in call for call in fake_run.calls)
+    assert any("AUR" in line and "policycoreutils" in line for line in lines)
     assert fake_run.call_containing("sestatus") is None
+
+
+def test_apply_selinux_reports_kernel_enablement_as_manual_once_tools_exist(fake_run, fake_which):
+    # is_available() is False here (no /sys/fs/selinux in the sandbox), so
+    # with the tools present the step stops at the kernel-level note.
+    fake_which.update({"sestatus", "ausearch"})
+    fake_run.set_response(["sestatus"], stdout="SELinux status:                 disabled\n")
+    result = quicksetup._apply_selinux(lambda _l: None)
+    assert result.ok
+    assert "manual step" in result.stdout
 
 
 def test_apply_selinux_never_sets_enforcing(fake_run, fake_which):

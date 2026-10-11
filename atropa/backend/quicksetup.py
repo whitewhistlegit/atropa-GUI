@@ -79,9 +79,11 @@ CATALOG: list[SetupItem] = [
     ),
     SetupItem(
         "selinux", "SELinux",
-        "Installs SELinux userspace tools (policycoreutils, checkpolicy, audit). Enabling "
-        "enforcement also needs a policy package (e.g. refpolicy-arch from the AUR), a "
-        "kernel parameter, and a reboot - not automated here.",
+        "Installs audit (for reviewing denials) and puts an enabled SELinux into permissive "
+        "mode. SELinux's own tools and a policy are AUR-only on Arch (policycoreutils, "
+        "checkpolicy, semodule-utils, selinux-python, and e.g. refpolicy-arch) - install those "
+        "with your AUR helper first. Enabling enforcement also needs a kernel parameter and a "
+        "reboot - not automated here.",
     ),
 ]
 
@@ -225,19 +227,30 @@ def _apply_usbguard(on_line: Callable[[str], None]) -> CommandResult:
 
 def _apply_selinux(on_line: Callable[[str], None]) -> CommandResult:
     on_line("=== SELinux ===")
-    if shutil.which("sestatus") is None:
-        on_line("Installing SELinux userspace tools (policycoreutils, checkpolicy, audit)...")
-        result = pacman.install(["policycoreutils", "checkpolicy", "audit"])
+    if shutil.which("ausearch") is None:
+        on_line("Installing audit (ausearch, for reviewing denials)...")
+        result = pacman.install(["audit"])
         if not result.ok:
-            on_line(f"Failed to install SELinux tools: {result.stderr.strip()}")
+            on_line(f"Failed to install audit: {result.stderr.strip()}")
             return result
+
+    if shutil.which("sestatus") is None:
+        # The old `pacman -S policycoreutils checkpolicy audit` could only
+        # fail: the SELinux userspace isn't in Arch's official repositories.
+        packages = sorted(set(selinux.SELINUX_TOOL_PACKAGES.values()))
+        on_line(
+            "SELinux's userspace tools aren't in Arch's official repositories - install them from the "
+            f"AUR ({', '.join(packages)}) with your AUR helper, along with a policy package (e.g. "
+            "refpolicy-arch), then run this step again."
+        )
+        return CommandResult(0, "skipped: SELinux userspace tools are AUR-only - a manual step", "")
 
     status = selinux.get_status()
     if not status.available:
         on_line(
             "SELinux isn't enabled at the kernel level. That needs a policy package (e.g. "
             "refpolicy-arch from the AUR), a kernel parameter, and a reboot - none of which "
-            "is automated here. Tools are installed and ready for when you do this manually."
+            "is automated here. The tools are installed and ready for when you do this manually."
         )
         return CommandResult(0, "tools installed; kernel enablement is a manual step", "")
 
