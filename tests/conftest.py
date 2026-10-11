@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atropa.backend import hardening, migration, privilege, selinux
+from atropa.backend import apparmor, hardening, migration, privilege, selinux
 
 
 @dataclass
@@ -130,13 +130,19 @@ def privilege_paths(monkeypatch, tmp_path):
 def kernel_state(monkeypatch, tmp_path):
     """
     Points the checks that read live kernel state (the active LSM list,
-    AppArmor's enabled flag) at files under tmp_path that don't exist
-    unless a test writes them, so no result depends on the kernel the
-    tests happen to run on.
+    AppArmor's enabled flag and securityfs directory) at paths under
+    tmp_path that don't exist unless a test creates them, so no result
+    depends on the kernel the tests happen to run on. GitHub's Ubuntu
+    runners have AppArmor on, which is how "AppArmor isn't available"
+    tests passed locally and failed in CI.
     """
     kernel = tmp_path / "kernel"
     kernel.mkdir()
-    state = SimpleNamespace(lsm=kernel / "lsm", apparmor_enabled=kernel / "apparmor-enabled")
+    state = SimpleNamespace(
+        lsm=kernel / "lsm", apparmor_enabled=kernel / "apparmor-enabled", apparmor_securityfs=kernel / "apparmor"
+    )
     monkeypatch.setattr(hardening, "LSM_LIST", state.lsm)
     monkeypatch.setattr(hardening, "APPARMOR_ENABLED_PARAM", state.apparmor_enabled)
+    monkeypatch.setattr(hardening, "APPARMOR_SECURITYFS", state.apparmor_securityfs)
+    monkeypatch.setattr(apparmor, "SECURITYFS_DIR", state.apparmor_securityfs)
     return state
