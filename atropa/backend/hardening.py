@@ -246,11 +246,14 @@ def apparmor_enable_service() -> CommandResult:
 
 # -------------------------------------------------------------- USBGuard --
 
+USBGUARD_RULES = "/etc/usbguard/rules.conf"
+
+
 def usbguard_status() -> ServiceHardeningStatus:
     installed = shutil.which("usbguard") is not None
     active = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
     enabled = run_unprivileged(["systemctl", "is-enabled", "usbguard"]).stdout.strip() == "enabled"
-    has_policy = Path("/etc/usbguard/rules.conf").exists() and Path("/etc/usbguard/rules.conf").stat().st_size > 0
+    has_policy = Path(USBGUARD_RULES).exists() and Path(USBGUARD_RULES).stat().st_size > 0
     return ServiceHardeningStatus(installed=installed, active=active, enabled=enabled, extra={"has_policy": has_policy})
 
 
@@ -259,11 +262,32 @@ def usbguard_generate_and_enable() -> CommandResult:
     Generates an allow-list policy from devices plugged in RIGHT NOW, then
     enables enforcement. Anything plugged in later will need approval via
     `usbguard allow-device` (or a GUI applet) - that's the point of the tool.
+
+    The policy is generated first and only written once it's in hand: the
+    old `generate-policy > rules.conf` emptied the file before
+    generate-policy ran, with no backup, so a failure left an empty
+    policy - which blocks every device, keyboards included, the next time
+    the daemon starts. It's written with mode 0600 because usbguard-daemon
+    refuses a rules file with any other mode, which a freshly created one
+    (0644 from root's umask) had.
     """
-    generate = run_privileged(["bash", "-c", "usbguard generate-policy > /etc/usbguard/rules.conf"])
+    generate = run_privileged(["usbguard", "generate-policy"])
     if not generate.ok:
         return generate
-    return run_privileged(["systemctl", "enable", "--now", "usbguard"])
+    policy = generate.stdout
+    if not any(line.split(" ", 1)[0] in ("allow", "block", "reject") for line in policy.splitlines()):
+        return CommandResult(1, "", "usbguard generate-policy returned no rules - the current policy was left as it is")
+
+    backup_file(USBGUARD_RULES)
+    write = run_privileged(["install", "-m", "0600", "/dev/stdin", USBGUARD_RULES], input_text=policy)
+    if not write.ok:
+        return write
+    was_running = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
+    result = run_privileged(["systemctl", "enable", "--now", "usbguard"])
+    if result.ok and was_running:
+        # enable --now leaves a running daemon on the policy it loaded at start.
+        result = run_privileged(["systemctl", "restart", "usbguard"])
+    return result
 
 
 def usbguard_disable() -> CommandResult:

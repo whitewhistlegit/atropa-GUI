@@ -269,7 +269,7 @@ def test_apply_auditd_installs_and_enables(fake_run, fake_which):
 
 def test_apply_usbguard_installs_generates_and_enables(fake_run, fake_which):
     fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "usbguard"], returncode=0)
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout="allow id 1d6b:0002\n")
     fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
 
     result = quicksetup._apply_usbguard(lambda _l: None)

@@ -218,18 +218,41 @@ def test_usbguard_status_with_policy(fake_run, fake_which, monkeypatch, tmp_path
     assert status.extra["has_policy"] is True
 
 
+GENERATED_POLICY = 'allow id 1d6b:0002 serial "0000:00:14.0" name "xHCI Host Controller"\n'
+
+
 def test_usbguard_generate_and_enable_stops_if_generation_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=1, stderr="no devices")
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], returncode=1, stderr="no devices")
     result = hardening.usbguard_generate_and_enable()
     assert not result.ok
     assert fake_run.call_containing("enable") is None
+    # the old `> rules.conf` redirect emptied the policy before generate-policy even ran
+    assert fake_run.call_containing(hardening.USBGUARD_RULES) is None
 
 
-def test_usbguard_generate_and_enable_enables_on_success(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
-    fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
+def test_usbguard_generate_and_enable_keeps_the_policy_when_nothing_was_generated(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout="\n")
+    result = hardening.usbguard_generate_and_enable()
+    assert not result.ok and "left as it is" in result.stderr
+    assert fake_run.call_containing(hardening.USBGUARD_RULES) is None
+
+
+def test_usbguard_generate_and_enable_writes_a_0600_policy_then_enables(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout=GENERATED_POLICY)
     result = hardening.usbguard_generate_and_enable()
     assert result.ok
+    write = ["pkexec", "install", "-m", "0600", "/dev/stdin", hardening.USBGUARD_RULES]
+    assert write in fake_run.calls
+    assert fake_run.inputs[fake_run.calls.index(write)] == GENERATED_POLICY
+    assert ["pkexec", "systemctl", "enable", "--now", "usbguard"] in fake_run.calls
+    assert fake_run.call_containing("restart") is None  # wasn't running: enable --now loads it
+
+
+def test_usbguard_regenerating_restarts_a_running_daemon(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout=GENERATED_POLICY)
+    fake_run.set_response(["systemctl", "is-active", "usbguard"], stdout="active\n")
+    assert hardening.usbguard_generate_and_enable().ok
+    assert fake_run.last_call() == ["pkexec", "systemctl", "restart", "usbguard"]
 
 
 # --------------------------------------------------------------- auditd --
