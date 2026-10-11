@@ -25,6 +25,8 @@ from pathlib import Path
 from .privilege import CommandResult, backup_file, run_privileged, run_unprivileged
 
 PROFILES_DIR = Path("/etc/apparmor.d")
+# Present when the kernel runs AppArmor (securityfs).
+SECURITYFS_DIR = Path("/sys/kernel/security/apparmor")
 
 # Common capability and network rule types worth exposing as direct toggles.
 # Each maps to an exact, single-line AppArmor rule - not a category that
@@ -56,7 +58,7 @@ class AppArmorProfile:
 
 
 def is_available() -> bool:
-    return shutil.which("aa-status") is not None or Path("/sys/kernel/security/apparmor").exists()
+    return shutil.which("aa-status") is not None or SECURITYFS_DIR.exists()
 
 
 def list_profiles() -> list[AppArmorProfile]:

@@ -134,7 +134,14 @@ class SelinuxPage(BasePage):
             self.mode_toggle.set_sensitive(False)
         elif not result.available:
             self.status_row.set_title("SELinux is not available on this system")
-            self.status_row.set_subtitle("No /sys/fs/selinux and no sestatus tool found")
+            if result.raw:
+                # The tools are installed; the kernel isn't running SELinux.
+                self.status_row.set_subtitle(
+                    "sestatus reports SELinux as disabled - turning it on needs a policy, kernel parameters "
+                    "and a reboot"
+                )
+            else:
+                self.status_row.set_subtitle("No /sys/fs/selinux and no sestatus tool found")
             self._mode_toggleable = False
             self.mode_lock_btn.set_sensitive(False)
             self.mode_toggle.set_sensitive(False)
