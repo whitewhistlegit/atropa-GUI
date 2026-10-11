@@ -86,7 +86,8 @@ def test_audit_sysctl_check_passes_when_settings_are_live_without_atropas_file(f
     assert check.status == "pass"
 
 
-def test_apply_sysctl_hardening_requires_selection():
+def test_apply_sysctl_hardening_requires_selection(fake_run):
+    # fake_run isn't referenced, but without it the status check runs a real `sysctl -n` for every key.
     with pytest.raises(ValueError):
         hardening.apply_sysctl_hardening([])
 
