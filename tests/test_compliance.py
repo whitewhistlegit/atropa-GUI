@@ -67,7 +67,7 @@ def _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path):
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", pam_file)
     fake_run.set_response(["cat", str(pam_file)], stdout=pam_file.read_text())
 
-    fake_run.set_response(["visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
+    fake_run.set_response(["pkexec", "visudo", "-cf", "/etc/sudoers"], stdout="/etc/sudoers: parsed OK\n")
 
     sysctl_file = tmp_path / "99-atropa-hardening.conf"
     sysctl_file.write_text("kernel.kptr_restrict = 2\n")
@@ -127,6 +127,34 @@ def test_extra_checks_include_faillock_and_sudoers(fake_run, fake_which):
     names = [c.name for c in compliance._extra_checks()]
     assert "Login lockout (faillock)" in names
     assert "Sudoers configuration" in names
+
+
+def _sudoers_check_status(fake_run, **response) -> str:
+    fake_run.set_response(["pkexec", "visudo", "-cf", "/etc/sudoers"], **response)
+    return next(c for c in compliance._extra_checks() if c.name == "Sudoers configuration").status
+
+
+def test_sudoers_check_passes_on_clean_visudo_run(fake_run, fake_which):
+    assert _sudoers_check_status(fake_run, stdout="/etc/sudoers: parsed OK\n") == "pass"
+
+
+def test_sudoers_check_fails_on_error_even_if_main_file_parsed(fake_run, fake_which):
+    # The old substring test passed this: the main file says "parsed OK",
+    # but an included file is broken and visudo exits 1.
+    status = _sudoers_check_status(
+        fake_run,
+        returncode=1,
+        stdout="/etc/sudoers: parsed OK\n",
+        stderr="/etc/sudoers.d/broken:2:5: syntax error\n",
+    )
+    assert status == "fail"
+
+
+def test_sudoers_check_dismissed_authentication_is_unscored_info(fake_run, fake_which):
+    status = _sudoers_check_status(
+        fake_run, returncode=126, stderr="Error executing command as another user: Request dismissed\n"
+    )
+    assert status == "info"
 
 
 # --------------------------------------------------------------- scoring --

@@ -1,6 +1,9 @@
 """Tests for atropa.backend.selinux."""
 from __future__ import annotations
 
+import os
+import time
+
 import pytest
 
 from atropa.backend import selinux
@@ -797,7 +800,7 @@ def test_list_all_denials_journal_only(fake_run, fake_which):
 
 def test_list_all_denials_applies_since_to_journalctl(fake_run, fake_which):
     fake_run.set_response(
-        ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "--output=cat", "--since", "2026-01-15 10:00:00"],
+        ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "--output=cat", "--since", "@1768471200"],
         stdout='avc:  denied  { read } comm="foo"\n',
     )
     lines = selinux.list_all_denials(since="2026-01-15T10:00:00+00:00", source="journal")
@@ -817,6 +820,75 @@ def test_list_all_denials_audit_log_uses_boot_when_no_since(fake_run, fake_which
 def test_list_all_denials_audit_log_skipped_when_ausearch_missing(fake_run, fake_which):
     lines = selinux.list_all_denials(source="audit_log")
     assert lines == []
+
+
+@pytest.fixture
+def utc_minus_5():
+    """Run with a local timezone west of UTC (POSIX TZ string - no tzdata needed)."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "EST5"
+    time.tzset()
+    yield
+    if old is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = old
+    time.tzset()
+
+
+def test_journalctl_since_is_an_absolute_instant_not_local_wall_clock(utc_minus_5):
+    # Setup Mode started 14:00 UTC (09:00 local). The old "2026-10-11 14:00:00"
+    # string was read by journalctl as 14:00 *local*, five hours too late.
+    assert selinux._to_journalctl_since("2026-10-11T14:00:00+00:00") == "@1791727200"
+
+
+def test_list_all_denials_audit_log_since_filters_on_record_timestamps(fake_run, fake_which):
+    """ausearch -ts can't be given a locale-proof start time (its date
+    format follows the user's locale, and the old single "date time"
+    argument was rejected outright) - so nothing is passed to -ts and the
+    records' own msg=audit(<epoch>) stamps decide."""
+    fake_which.add("ausearch")
+    since_epoch = 1791727200
+    fake_run.set_response(
+        ["pkexec", "ausearch", "-m", "avc"],
+        stdout=(
+            f"type=AVC msg=audit({since_epoch - 60}.101:41): avc:  denied  {{ read }} comm=\"before\"\n"
+            f"type=AVC msg=audit({since_epoch + 60}.202:42): avc:  denied  {{ write }} comm=\"after\"\n"
+        ),
+    )
+    lines = selinux.list_all_denials(since="2026-10-11T14:00:00+00:00", source="audit_log")
+
+    assert len(lines) == 1 and 'comm="after"' in lines[0]
+    ausearch_call = fake_run.call_containing("ausearch")
+    assert "-ts" not in ausearch_call
+    assert "--input-logs" in ausearch_call  # never read records from a piped stdin
+
+
+def test_list_all_denials_audit_log_no_matches_is_empty_not_an_error(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(["pkexec", "ausearch", "-m", "avc"], returncode=1, stderr="<no matches>\n")
+    assert selinux.list_all_denials(source="audit_log") == []
+
+
+def test_list_all_denials_audit_log_failure_raises_when_requested(fake_run, fake_which):
+    # e.g. Setup Mode's old -ts argument: ausearch failed and the review
+    # silently showed zero denials.
+    fake_which.add("ausearch")
+    fake_run.set_response(
+        ["pkexec", "ausearch", "-m", "avc"], returncode=1, stderr="Invalid start time (10/11/2026 14:00:00).\n"
+    )
+    with pytest.raises(RuntimeError, match="Couldn't read the audit log"):
+        selinux.list_all_denials(since="2026-10-11T14:00:00+00:00", source="audit_log")
+
+
+def test_list_all_denials_both_keeps_journal_results_if_audit_log_fails(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(
+        ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "--output=cat"],
+        stdout='avc:  denied  { read } comm="foo"\n',
+    )
+    fake_run.set_response(["pkexec", "ausearch", "-m", "avc"], returncode=126, stderr="Request dismissed\n")
+    assert selinux.list_all_denials(source="both") == ['avc:  denied  { read } comm="foo"']
 
 
 def test_list_all_denials_both_sources_combined(fake_run, fake_which):
@@ -1016,7 +1088,7 @@ def test_review_all_denials_scopes_to_setup_mode_start_by_default(fake_run, fake
     state_file.parent.mkdir(parents=True, exist_ok=True)
     state_file.write_text('{"started_at": "2026-01-01T00:00:00+00:00"}')
     fake_run.set_response(
-        ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "--output=cat", "--since", "2026-01-01 00:00:00"],
+        ["journalctl", "-k", "--no-pager", "-g", "avc:|not defined in policy", "--output=cat", "--since", "@1767225600"],
         stdout=f"{_DENIAL_A}\n",
     )
 

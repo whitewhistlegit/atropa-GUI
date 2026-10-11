@@ -39,6 +39,15 @@ class SshStatus:
     hostbased_authentication: str = "unknown"
     permit_empty_passwords: str = "unknown"
     permit_user_environment: str = "unknown"
+    # `port` falls back to "22" for display when sshd_config has no Port
+    # line; this says whether that value was actually configured, so a
+    # profile export doesn't record the default as if it were a setting.
+    port_explicit: bool = False
+
+
+# Every value sshd accepts for PermitRootLogin ("without-password" is the
+# deprecated spelling of "prohibit-password").
+SSH_PERMIT_ROOT_LOGIN_VALUES = ("yes", "no", "prohibit-password", "without-password", "forced-commands-only")
 
 
 def firewall_backend() -> str:
@@ -93,15 +102,36 @@ def firewall_disable() -> CommandResult:
     raise RuntimeError("No firewall backend installed")
 
 
+def _firewalld_change_port(flag: str, port: str, protocol: str) -> CommandResult:
+    """
+    Applies a permanent firewalld port change (`flag` is "--add-port" or
+    "--remove-port"). firewall-cmd talks to the running daemon and fails
+    outright ("FirewallD is not running") when it's stopped - which is
+    exactly the state Quick Setup is in when it pre-allows SSH before
+    enabling the firewall for the first time. A stopped firewalld gets the
+    same change via firewall-offline-cmd instead, which edits the permanent
+    config directly and is picked up when the daemon starts.
+    """
+    spec = f"{port}/{protocol}"
+    if run_unprivileged(["systemctl", "is-active", "firewalld"]).stdout.strip() != "active":
+        return run_privileged(["firewall-offline-cmd", f"{flag}={spec}"])
+
+    result = run_privileged(["firewall-cmd", "--permanent", flag, spec])
+    if not result.ok:
+        return result
+    # The permanent rule is written either way, but the running firewall
+    # doesn't have it until a reload succeeds - report that as the failure
+    # rather than a success that isn't in effect yet.
+    reload_result = run_privileged(["firewall-cmd", "--reload"])
+    return result if reload_result.ok else reload_result
+
+
 def firewall_allow_port(port: str, protocol: str = "tcp") -> CommandResult:
     backend = firewall_backend()
     if backend == "ufw":
         return run_privileged(["ufw", "allow", f"{port}/{protocol}"])
     if backend == "firewalld":
-        result = run_privileged(["firewall-cmd", "--permanent", "--add-port", f"{port}/{protocol}"])
-        if result.ok:
-            run_privileged(["firewall-cmd", "--reload"])
-        return result
+        return _firewalld_change_port("--add-port", port, protocol)
     raise RuntimeError("No firewall backend installed")
 
 
@@ -110,10 +140,7 @@ def firewall_deny_port(port: str, protocol: str = "tcp") -> CommandResult:
     if backend == "ufw":
         return run_privileged(["ufw", "deny", f"{port}/{protocol}"])
     if backend == "firewalld":
-        result = run_privileged(["firewall-cmd", "--permanent", "--remove-port", f"{port}/{protocol}"])
-        if result.ok:
-            run_privileged(["firewall-cmd", "--reload"])
-        return result
+        return _firewalld_change_port("--remove-port", port, protocol)
     raise RuntimeError("No firewall backend installed")
 
 
@@ -127,6 +154,7 @@ def ssh_status() -> SshStatus:
         "x11_forwarding": "unknown", "max_auth_tries": "unknown", "ignore_rhosts": "unknown",
         "hostbased_authentication": "unknown", "permit_empty_passwords": "unknown", "permit_user_environment": "unknown",
     }
+    port_explicit = False
     if SSHD_CONFIG.exists():
         text = run_unprivileged(["cat", str(SSHD_CONFIG)]).stdout
         for line in text.splitlines():
@@ -136,6 +164,7 @@ def ssh_status() -> SshStatus:
             lower = line.lower()
             if lower.startswith("port "):
                 fields["port"] = line.split(maxsplit=1)[1]
+                port_explicit = True
             elif lower.startswith("permitrootlogin"):
                 fields["root_login"] = line.split(maxsplit=1)[1]
             elif lower.startswith("passwordauthentication"):
@@ -155,7 +184,7 @@ def ssh_status() -> SshStatus:
             elif lower.startswith("permituserenvironment"):
                 fields["permit_user_environment"] = line.split(maxsplit=1)[1]
 
-    return SshStatus(installed=installed, running=running, **fields)
+    return SshStatus(installed=installed, running=running, port_explicit=port_explicit, **fields)
 
 
 def _set_sshd_option(key: str, value: str) -> CommandResult:
@@ -195,7 +224,22 @@ def _set_sshd_option(key: str, value: str) -> CommandResult:
 
 
 def set_ssh_root_login(allow: bool) -> CommandResult:
-    return _set_sshd_option("PermitRootLogin", "yes" if allow else "no")
+    return set_ssh_permit_root_login("yes" if allow else "no")
+
+
+def set_ssh_permit_root_login(value: str) -> CommandResult:
+    """
+    Sets PermitRootLogin to an exact value, for replaying a captured
+    profile faithfully - "prohibit-password" (key-only root login) is a
+    meaningfully different setting from "no", not a variant of it. Only
+    the fixed set of values sshd accepts ever reaches the config file: the
+    value comes from a profile file that may have been hand-edited or
+    shared, and it's interpolated into a sed expression below.
+    """
+    normalized = value.strip().lower()
+    if normalized not in SSH_PERMIT_ROOT_LOGIN_VALUES:
+        raise ValueError(f"Unsupported PermitRootLogin value: {value!r}")
+    return _set_sshd_option("PermitRootLogin", normalized)
 
 
 def set_ssh_password_auth(allow: bool) -> CommandResult:
@@ -243,7 +287,12 @@ def set_ssh_permit_user_environment(allow: bool) -> CommandResult:
     return _set_sshd_option("PermitUserEnvironment", "yes" if allow else "no")
 
 
-def sudoers_check() -> str:
-    """Run visudo's syntax checker (read-only, safe) against /etc/sudoers."""
-    result = run_unprivileged(["visudo", "-cf", "/etc/sudoers"])
-    return result.stdout or result.stderr
+def sudoers_check() -> CommandResult:
+    """
+    Runs visudo's syntax checker (read-only) against /etc/sudoers and the
+    files it includes. Needs root: sudoers is root-only (0440) on Arch, and
+    an unprivileged visudo can only print "unable to open /etc/sudoers:
+    Permission denied" - which is what this used to report as the result.
+    Callers should go by .ok (visudo's exit status), not the output text.
+    """
+    return run_privileged(["visudo", "-cf", "/etc/sudoers"])

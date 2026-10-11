@@ -223,6 +223,22 @@ def test_vulnerability_scan_empty_when_no_advisories(fake_run, fake_which):
     assert hardening.vulnerability_scan() == []
 
 
+def test_vulnerability_scan_raises_when_arch_audit_fails(fake_run, fake_which):
+    # e.g. offline: arch-audit exits 1 with empty stdout, which used to read
+    # as "no known vulnerabilities".
+    fake_which.add("arch-audit")
+    fake_run.set_response(["arch-audit"], returncode=1, stderr="Error: failed to get AVG json\n")
+    with pytest.raises(RuntimeError, match="failed to get AVG json"):
+        hardening.vulnerability_scan()
+
+
+def test_run_audit_failed_cve_scan_is_info_not_pass(fake_run, fake_which):
+    fake_which.add("arch-audit")
+    fake_run.set_response(["arch-audit"], returncode=1, stderr="Error: failed to get AVG json\n")
+    check = next(c for c in hardening.run_audit() if c.name == "Known CVEs (arch-audit)")
+    assert check.status == "info"
+
+
 # --------------------------------------------------------------- faillock --
 
 def test_faillock_wired_into_pam_false_when_file_missing(monkeypatch, tmp_path):
@@ -236,6 +252,49 @@ def test_faillock_wired_into_pam_true_when_referenced(monkeypatch, tmp_path, fak
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", pam_file)
     fake_run.set_response(["cat", str(pam_file)], stdout=pam_file.read_text())
     assert hardening.faillock_wired_into_pam() is True
+
+
+# The relevant lines of Arch's stock pambase files: system-login never names
+# pam_faillock itself, it pulls in system-auth, which does.
+_ARCH_SYSTEM_LOGIN = """#%PAM-1.0
+
+auth       required   pam_shells.so
+auth       requisite  pam_nologin.so
+auth       include    system-auth
+
+password   include    system-auth
+session    include    system-auth
+"""
+_ARCH_SYSTEM_AUTH = """#%PAM-1.0
+
+auth       required                    pam_faillock.so      preauth
+-auth      [success=2 default=ignore]  pam_systemd_home.so
+auth       [success=1 default=bad]     pam_unix.so          try_first_pass nullok
+auth       [default=die]               pam_faillock.so      authfail
+auth       optional                    pam_permit.so
+password   required                    pam_unix.so          try_first_pass nullok shadow
+"""
+
+
+def test_faillock_wired_into_pam_follows_include_like_stock_arch(monkeypatch, tmp_path):
+    (tmp_path / "system-login").write_text(_ARCH_SYSTEM_LOGIN)
+    (tmp_path / "system-auth").write_text(_ARCH_SYSTEM_AUTH)
+    monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "system-login")
+    assert hardening.faillock_wired_into_pam() is True
+
+
+def test_faillock_wired_into_pam_ignores_commented_out_lines(monkeypatch, tmp_path):
+    (tmp_path / "system-login").write_text("#auth required pam_faillock.so preauth\nauth include system-auth\n")
+    (tmp_path / "system-auth").write_text("#auth required pam_faillock.so preauth\nauth required pam_unix.so  # not pam_faillock.so\n")
+    monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "system-login")
+    assert hardening.faillock_wired_into_pam() is False
+
+
+def test_faillock_wired_into_pam_survives_include_loops(monkeypatch, tmp_path):
+    (tmp_path / "system-login").write_text("auth include other\n")
+    (tmp_path / "other").write_text("auth substack system-login\n")
+    monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "system-login")
+    assert hardening.faillock_wired_into_pam() is False
 
 
 def test_faillock_status_parses_deny_and_unlock_time(monkeypatch, tmp_path, fake_run):
@@ -284,6 +343,7 @@ def test_set_faillock_policy_stops_after_first_failure(fake_run, fake_which, pri
 
 def test_pwquality_wired_into_pam_false_when_file_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "nonexistent")
+    monkeypatch.setattr(hardening, "PAM_PASSWD", tmp_path / "nonexistent-passwd")
     assert hardening.pwquality_wired_into_pam() is False
 
 
@@ -291,7 +351,20 @@ def test_pwquality_wired_into_pam_true_when_referenced(monkeypatch, tmp_path, fa
     pam_file = tmp_path / "system-login"
     pam_file.write_text("password requisite pam_pwquality.so retry=3\n")
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", pam_file)
+    monkeypatch.setattr(hardening, "PAM_PASSWD", tmp_path / "nonexistent-passwd")
     fake_run.set_response(["cat", str(pam_file)], stdout=pam_file.read_text())
+    assert hardening.pwquality_wired_into_pam() is True
+
+
+def test_pwquality_wired_into_pam_checks_the_passwd_service(monkeypatch, tmp_path):
+    # Where the Arch wiki says to add it - not reachable from system-login.
+    (tmp_path / "system-login").write_text(_ARCH_SYSTEM_LOGIN)
+    (tmp_path / "system-auth").write_text(_ARCH_SYSTEM_AUTH)
+    (tmp_path / "passwd").write_text(
+        "#%PAM-1.0\npassword required pam_pwquality.so retry=2 minlen=10\npassword include system-auth\n"
+    )
+    monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "system-login")
+    monkeypatch.setattr(hardening, "PAM_PASSWD", tmp_path / "passwd")
     assert hardening.pwquality_wired_into_pam() is True
 
 
@@ -301,6 +374,7 @@ def test_pwquality_status_parses_all_settings(monkeypatch, tmp_path, fake_run):
     conf_file = tmp_path / "pwquality.conf"
     conf_file.write_text("minlen = 14\ndcredit = -1\nucredit = -1\nlcredit = -1\nocredit = -1\nretry = 3\n")
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", pam_file)
+    monkeypatch.setattr(hardening, "PAM_PASSWD", tmp_path / "nonexistent-passwd")
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", conf_file)
     fake_run.set_response(["cat", str(pam_file)], stdout=pam_file.read_text())
     fake_run.set_response(["cat", str(conf_file)], stdout=conf_file.read_text())
@@ -318,6 +392,7 @@ def test_pwquality_status_parses_all_settings(monkeypatch, tmp_path, fake_run):
 def test_pwquality_status_defaults_unknown_when_conf_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", tmp_path / "nonexistent")
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "also-nonexistent")
+    monkeypatch.setattr(hardening, "PAM_PASSWD", tmp_path / "nonexistent-passwd")
     status = hardening.pwquality_status()
     assert status["minlen"] == "unknown"
 

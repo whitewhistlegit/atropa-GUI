@@ -108,7 +108,15 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
     ssh = security.ssh_status()
     port = ssh.port if ssh.installed else "22"
     on_line(f"Allowing SSH (port {port}) before enabling the firewall, so this doesn't lock you out...")
-    security.firewall_allow_port(port)
+    allow_result = security.firewall_allow_port(port)
+    if not allow_result.ok:
+        # Enabling deny-by-default without the SSH rule in place is exactly
+        # the remote lockout this ordering exists to prevent - stop here.
+        on_line(
+            f"Couldn't allow SSH port {port}: {allow_result.stderr.strip() or 'unknown error'}. "
+            "Not enabling the firewall, so SSH access isn't cut off."
+        )
+        return allow_result
 
     on_line("Enabling firewall...")
     result = security.firewall_enable()

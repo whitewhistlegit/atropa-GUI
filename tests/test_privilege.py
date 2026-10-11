@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -187,6 +189,34 @@ def test_get_recent_actions_most_recent_first_and_limited(privilege_paths):
     privilege_paths.log_path.write_text("line1\nline2\nline3\n")
     actions = privilege.get_recent_actions(limit=2)
     assert actions == ["line3", "line2"]
+
+
+# --------------------------------------------------------------- action-log isolation --
+
+def test_action_log_follows_current_log_path(privilege_paths, fake_run):
+    # The handler must resolve LOG_PATH at write time - a handler bound at
+    # import time ignored the redirect and wrote into the real home dir.
+    privilege.run_unprivileged(["true"])
+    assert "RUN: true" in privilege_paths.log_path.read_text()
+
+
+def test_user_data_paths_are_isolated_without_requesting_the_fixture(tmp_path):
+    # privilege_paths is autouse, so even a test that never names it can't
+    # reach the real ~/.local/share/atropa.
+    for path in (privilege.LOG_PATH, privilege.BACKUP_DIR, privilege.BACKUP_MANIFEST):
+        assert tmp_path in path.parents
+
+
+def test_importing_privilege_creates_nothing_on_disk(tmp_path):
+    home = tmp_path / "fresh-home"
+    home.mkdir()
+    repo_root = Path(privilege.__file__).resolve().parents[2]
+    subprocess.run(
+        [sys.executable, "-c", "import atropa.backend.privilege"],
+        env={"HOME": str(home), "PYTHONPATH": str(repo_root)},
+        check=True,
+    )
+    assert list(home.rglob("*")) == []
 
 
 # --------------------------------------------------------------- run_privileged_streaming --
