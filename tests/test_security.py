@@ -72,6 +72,7 @@ def test_firewall_enable_ufw(fake_run, fake_which):
 
 def test_firewall_allow_port_firewalld_reloads_on_success(fake_run, fake_which):
     fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
     fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=0)
     security.firewall_allow_port("8080", "tcp")
     assert fake_run.call_containing("--reload") is not None
@@ -79,9 +80,38 @@ def test_firewall_allow_port_firewalld_reloads_on_success(fake_run, fake_which):
 
 def test_firewall_allow_port_firewalld_skips_reload_on_failure(fake_run, fake_which):
     fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
     fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=1)
     security.firewall_allow_port("8080", "tcp")
     assert fake_run.call_containing("--reload") is None
+
+
+def test_firewall_allow_port_firewalld_reports_failed_reload(fake_run, fake_which):
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="active\n")
+    fake_run.set_response(["pkexec", "firewall-cmd", "--permanent", "--add-port"], returncode=0)
+    fake_run.set_response(["pkexec", "firewall-cmd", "--reload"], returncode=1, stderr="reload failed")
+    result = security.firewall_allow_port("8080", "tcp")
+    assert not result.ok
+    assert "reload failed" in result.stderr
+
+
+def test_firewall_allow_port_firewalld_stopped_uses_offline_cmd(fake_run, fake_which):
+    # firewall-cmd fails outright while the daemon is stopped, so the rule
+    # has to go into the permanent config via firewall-offline-cmd.
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+    result = security.firewall_allow_port("2222", "tcp")
+    assert result.ok
+    assert fake_run.last_call() == ["pkexec", "firewall-offline-cmd", "--add-port=2222/tcp"]
+    assert fake_run.call_containing("firewall-cmd") is None
+
+
+def test_firewall_deny_port_firewalld_stopped_uses_offline_cmd(fake_run, fake_which):
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+    security.firewall_deny_port("8080", "udp")
+    assert fake_run.last_call() == ["pkexec", "firewall-offline-cmd", "--remove-port=8080/udp"]
 
 
 # --------------------------------------------------------------- ssh_status --
