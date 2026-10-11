@@ -24,7 +24,7 @@ jobs:
       - name: Install dev dependencies
         # Deliberately NOT installing the atropa package/PyGObject itself:
         # backend/ has zero GTK dependencies by design (see DOCUMENTATION.md
-        # section 3), and pulling in PyGObject would need system GTK4/libadwaita
+        # section 1), and pulling in PyGObject would need system GTK4/libadwaita
         # dev packages just to lint and test pure-Python subprocess wrappers.
         run: pip install pytest ruff
 

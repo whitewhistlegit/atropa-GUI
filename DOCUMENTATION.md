@@ -82,11 +82,20 @@ consecutive privileged actions in a short window don't re-prompt every time.
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
 user-supplied (package names, hostnames, usernames, etc.) ending up
-interpreted by a shell.
+interpreted by a shell. Known exceptions that do pass a string to
+`["bash", "-c", ...]` (needed for `>`/`>>` redirection as root):
+`hardening.usbguard_generate_and_enable()` (fixed string), and the
+append-if-missing branch of `security._set_sshd_option()`,
+`hardening._set_faillock_option()` and `hardening._set_pwquality_option()`.
+The interpolated values there are code-controlled (ints, `yes`/`no`, or a
+validated enum such as SSH `LogLevel`), never free text — keep it that way,
+or switch them to `tee -a` with `input_text`.
 
-**Every privileged command is logged** to `~/.local/share/atropa/actions.log`
-(via Python's `logging`, one line per `RUN:`/`FAILED:` entry) — browsable in
-the Activity & Backups page.
+**Every command is logged** — privileged *and* unprivileged — to
+`~/.local/share/atropa/actions.log` by `privilege._run()` (Python
+`logging`: `RUN: <argv>`, `RUN (streaming, privileged|unprivileged): ...`,
+`FAILED (<rc>): <stderr>`, plus backup/restore events). Browsable in the
+Activity & Backups page.
 
 ### Backup-before-edit mechanism (added in the hardening pass)
 Any function that edits an **existing** config file calls
@@ -191,17 +200,26 @@ NetworkManager (`nmcli`) only — systemd-networkd is detected
 Reads `/etc/passwd`/`/etc/group` directly via `pwd`/`grp` modules (unprivileged,
 always accurate); writes via `useradd`/`usermod`/`userdel`/`groupadd`/`groupdel`.
 `DEFAULT_MIN_UID = 1000` filters out system accounts by default.
+- `list_users(include_system=False)` / `list_groups(include_system=False)`
+  (root/UID 0 is always included), `create_user`, `modify_user` (full name,
+  shell, extra groups, lock/unlock), `delete_user(remove_home=False)`,
+  `create_group`, `delete_group`
 - `set_password` pipes `user:pass` to `chpasswd` via **stdin**, never argv
   (argv would leak into `ps` output)
 
 ### Services (`services.py` / `pages/services.py`)
 Straightforward `systemctl`/`journalctl` wraps: `list_services(pattern="*.service")`,
-`status`, `start`, `stop`, `restart`, `enable(unit, now=False)`, `disable`, `journal_tail`
+`status`, `start`, `stop`, `restart`, `enable(unit, now=False)`,
+`disable(unit, now=False)`, `journal_tail(unit, lines=100)`
 
 ### Bootloader (`bootloader.py` / `pages/bootloader.py`)
-Auto-detects GRUB vs systemd-boot (`detect()`). `set_timeout` edits the
-relevant config (backed up first) and, for GRUB, regenerates
-`/boot/grub/grub.cfg`. **`reinstall()` deliberately refuses to automate GRUB
+Auto-detects GRUB vs systemd-boot (`detect()`; GRUB needs `grub-mkconfig`,
+systemd-boot needs `bootctl` + `/boot/loader/loader.conf`). `get_info()`
+returns a `BootloaderInfo(kind, entries, default_timeout)`. `set_timeout`
+edits the relevant config (backed up first) and, for GRUB, regenerates
+`/boot/grub/grub.cfg` — if `grub-mkconfig` fails, `/etc/default/grub` is
+restored from the backup automatically. `regenerate_config()` runs
+`grub-mkconfig -o /boot/grub/grub.cfg` or `bootctl update`. **`reinstall()` deliberately refuses to automate GRUB
 reinstall** — picking the wrong disk/EFI target is destructive; it raises
 `RuntimeError` pointing at manual `grub-install` instead. systemd-boot reinstall
 (`bootctl install`) is safe enough to automate since there's no disk target
@@ -210,9 +228,15 @@ ambiguity.
 ### Security (`security.py` / `pages/security.py`)
 Firewall abstraction over `ufw` **or** `firewalld` (whichever is installed;
 `firewall_backend()` returns `"ufw" | "firewalld" | "none"`). SSH hardening
-(`set_ssh_root_login`, `set_ssh_password_auth`, `set_ssh_port` — all route
-through `_set_sshd_option`, which has the backup+`sshd -t`-validate+rollback
-logic described above). `sudoers_check()` runs `visudo -cf` (read-only,
+(`set_ssh_root_login`, `set_ssh_password_auth`, `set_ssh_port`, plus the
+CIS settings `set_ssh_log_level` (INFO/VERBOSE only), `set_ssh_x11_forwarding`,
+`set_ssh_max_auth_tries`, `set_ssh_ignore_rhosts`,
+`set_ssh_hostbased_authentication`, `set_ssh_permit_empty_passwords`,
+`set_ssh_permit_user_environment` — all route through `_set_sshd_option`,
+which has the backup+`sshd -t`-validate+rollback logic described above).
+`firewall_status()` reads `ufw status verbose` / `firewall-cmd --list-all`
+**privileged** (both silently return empty output without root);
+`firewall_allow_port`/`firewall_deny_port(port, protocol="tcp")`. `sudoers_check()` runs `visudo -cf` (read-only,
 syntax-check only).
 
 ### Hardening (`hardening.py` / `pages/hardening.py`)
@@ -360,14 +384,36 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   attempt rather than trusting its own last-dragged position — see the
   Phase-adjacent bug-fix write-up in section 6 for why (a real cancel-
   doesn't-revert bug got fixed in the same pass).
-- `list_booleans`/`set_boolean` — `getsebool -a` / `setsebool -P`
+- `list_booleans(filter_text="")` / `set_boolean(name, value, persistent=True)`
+  — `getsebool -a` / `setsebool` (`-P` when persistent)
+- `restorecon(path, recursive=True)`, `restorecon_streaming(...)`,
+  `relabel_filesystem()` (schedules a full relabel on next boot)
+- **Setup Mode**: `start_setup_mode()` (`set_mode(enforcing=False,
+  persistent=True)` — runtime *and* `/etc/selinux/config` — + records a start
+  timestamp in `~/.local/share/atropa/selinux-review/setup_mode_state.json`),
+  `get_setup_mode_started_at()`, `is_in_setup_mode()`, `clear_setup_mode()`
+- **Denial Review page backend**: `list_all_denials(since=None, source="both")`
+  → `group_denials()` → `classify_denials()` (`new` / `already_allowed` /
+  `undefined_in_policy`), wrapped by `review_all_denials(source="both",
+  since_setup_mode=True) -> ExtensiveDenialReview` which also diffs against
+  `last_review.json` to produce `resolved`. Details in section 6.
+- `list_semodules()` — `semodule -l`, **privileged** (unprivileged it
+  silently returns nothing)
+- `compile_and_load_te(te_content, module_name)` — the single-file
+  paste/Compile-&-Load flow (compile unprivileged, then `semodule -i`)
+- `install_pp_file`, `remove_semodule`, `list_pending_modules`,
+  `list_approved_modules`, `reinstall_all_approved_modules()` (all inactive
+  approved modules in **one** `semodule -i` call = one auth prompt)
+- `check_policy_source_for_permission(policy_src_dir, tclass, permission="")`
+  — read-only search of a refpolicy source tree's `access_vectors`
 - **Denial review**: `list_avc_denials()` (unprivileged, `journalctl -k`,
   works even without root since AVCs get printk'd to the kernel ring buffer)
   with `list_avc_denials_from_audit_log()` as a privileged (`ausearch`)
   fallback for systems where they don't reach the ring buffer. Per-denial:
   `explain_denial()` runs `audit2why`, `generate_te(raw_line, module_name)`
   runs `audit2allow -m <name>`
-- **Per-application batch review** (`build_policy_review`) — ported from a
+- **Per-application batch review** (`build_policy_review(source="journal",
+  denial_limit=500, sample_size=5, since=<unset>)`) — ported from a
   user-supplied shell script. Groups denials by `comm=`, skips kernel noise
   (`^(systemd|kernel|audit|kworker|swapper)`), and for each program: generates
   a `.te`, an `audit2why` explanation, and compiles (but does **not**
@@ -405,10 +451,63 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   which is what these files typically already are), falling back to the
   filename stem.
 
-### Activity & Backups (`pages/activity.py`, backed by `privilege.py`)
+### System (`system_config.py` / `pages/system_config.py`)
+Built on `hostnamectl` / `timedatectl` / `localectl`:
+`get_hostname_status`/`set_hostname`, `get_time_status`/`list_timezones`/
+`set_timezone`/`set_ntp`, `get_locale_status`/`list_generated_locales`/
+`set_locale`, `list_locale_gen_entries`/`set_locale_gen_enabled(locale,
+charmap, enabled)` (the one raw-file edit: `cat` → edit in Python → `tee`,
+backed up, then `locale-gen`), `list_keymaps`/`set_keymap`,
+`list_x11_layouts`/`set_x11_layout`. Filter lists render at most 40 matches
+(`_MAX_RENDERED_MATCHES`).
+
+### Security Quick Setup (`quicksetup.py` / `pages/quicksetup.py`)
+`CATALOG` of `SetupItem(key, title, description, default_selected, risk_note)`
+for firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard
+(`default_selected=False`) and SELinux (permissive only). `status_summary()`,
+`apply_single(key, on_line)`, `apply_items(keys, on_line) -> dict[str,
+CommandResult]` — checklist and wizard share these. The firewall step
+allows the configured SSH port before enabling deny-by-default.
+
+### Security Profiles (`profiles.py` / `pages/profiles.py`)
+`export_profile() -> dict`, `save_profile_to_file`, `load_profile_from_file`,
+`summarize_profile -> ProfileSummary`, `import_profile(profile, sections,
+on_line) -> dict[str, CommandResult]`. Quick-setup modules are replayed via
+`quicksetup.apply_items()`; AppArmor modes and SELinux booleans value-for-
+value; the `ssh` section is unchecked by default on import (UI).
+
+### Dependencies (`dependencies.py` / `pages/dependencies.py`)
+A static catalog of `Dependency(name, module, description, package,
+required, note)`; `check_all() -> list[DependencyStatus]`,
+`missing_required()`, `summary_counts()`. AUR-only tools (paru/yay, aide)
+have `package=None` and a note instead of an Install button.
+
+### Add-ons / plugins (`plugins.py` + `plugin_registry.py` / `pages/addons.py`, `pages/plugin_page.py`)
+- `plugin_registry.REGISTRY` — the only actions a manifest may reference:
+  `pacman.{check_updates,list_explicit,sync_database,clean_cache}`,
+  `services.{list_services,start,stop,restart,enable,disable}`,
+  `network.list_devices`, `hardening.run_audit`,
+  `compliance.generate_report`, `dependencies.check_all`.
+  `get_action(key)`, `describe_call(key, params)` (shown in every mutating
+  action's confirm dialog).
+- `plugins.discover_plugins()` scans `/etc/atropa/plugins/<id>/manifest.toml`
+  (folder name must equal `id`); `enabled_plugins()` (valid + enabled per
+  `/etc/atropa/plugins-enabled.json`); `set_plugin_enabled(id, enabled)`
+  writes via pkexec; `run_plugin_action(action_key, params)`.
+- Manifest fields: `id`, `title`, `description`, `icon` (default
+  `puzzle-piece-symbolic`), `author`, `version`, `[[groups]]` with `title`,
+  `description`, `[[groups.rows]]` with `title`, `action`, `button_label`,
+  plus any parameter names the registry action declares.
+
+### Activity & Backups (`pages/activity.py`, backed by `privilege.py` + `migration.py`)
 Browses `list_backups()` (view raw content, restore with confirm) and
-`get_recent_actions()` (read-only tail). No dedicated backend module — pulls
-directly from `privilege.py`.
+`get_recent_actions()` (read-only tail). When old ArchYaST data exists, a
+migration section appears, backed by `migration.py`:
+`detect_legacy_data() -> LegacyDataStatus`, `migrate_user_data(on_line)`
+(`~/.local/share/archyast` → `atropa`, non-destructive, logs prepended),
+`migrate_plugin_data(on_line)` (`/etc/archyast` → `/etc/atropa`,
+privileged, `cp -n`), and separate confirm-gated
+`remove_legacy_user_data()` / `remove_legacy_plugin_data()`.
 
 ---
 
