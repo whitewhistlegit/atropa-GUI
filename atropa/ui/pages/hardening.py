@@ -82,8 +82,9 @@ class HardeningPage(BasePage):
         aa_group.add(self.aa_row)
         aa_note = Adw.ActionRow(
             title="Kernel parameter required",
-            subtitle="Add apparmor=1 security=apparmor to your bootloader kernel parameters, then reboot. "
-            "Atropa doesn't edit boot parameters automatically to avoid an unbootable system.",
+            subtitle=f"Add {hardening.APPARMOR_KERNEL_PARAMETER} to your bootloader kernel parameters "
+            "(Arch wiki: AppArmor), then reboot. Atropa doesn't edit boot parameters automatically to "
+            "avoid an unbootable system.",
         )
         aa_group.add(aa_note)
 
@@ -268,7 +269,7 @@ class HardeningPage(BasePage):
             self.aa_row.set_title("AppArmor not installed")
             self.aa_row.set_subtitle("pacman -S apparmor")
         else:
-            kernel = "enforcing" if result.extra.get("kernel_enabled") else "kernel param not set"
+            kernel = "enabled in the kernel" if result.extra.get("kernel_enabled") else "not enabled in the kernel"
             self.aa_row.set_title(f"Service {'active' if result.active else 'inactive'}")
             self.aa_row.set_subtitle(kernel)
         return False
