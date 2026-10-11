@@ -23,9 +23,11 @@ from .privilege import CommandResult, backup_file, run_privileged, run_unprivile
 GRUB_DEFAULT_PATH = Path("/etc/default/grub")
 # Where bootctl looks for the ESP when it can't be asked, in its own order.
 ESP_CANDIDATES = (Path("/efi"), Path("/boot"), Path("/boot/efi"))
-# systemd-boot sets LoaderInfo on every boot; LoaderConfigTimeout holds a
-# timeout chosen in the boot menu (or with bootctl set-timeout), which
-# overrides loader.conf's.
+# The Boot Loader Interface's EFI variables. LoaderInfo names the loader
+# that started this boot: systemd-boot sets it, and so does GRUB since 2.12
+# (its bli module), so only what it says tells them apart.
+# LoaderConfigTimeout holds a timeout chosen in systemd-boot's menu (or
+# with bootctl set-timeout), which overrides loader.conf's.
 _SD_BOOT_VENDOR = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 EFIVARS_DIR = Path("/sys/firmware/efi/efivars")
 
@@ -54,6 +56,20 @@ def _exists(path: Path) -> bool:
 
 def _efivar_exists(name: str) -> bool:
     return _exists(EFIVARS_DIR / f"{name}-{_SD_BOOT_VENDOR}")
+
+
+def _loader_info() -> str:
+    """
+    What the loader that started this boot calls itself - "systemd-boot
+    257.5-2-arch", "GRUB 2.12" - from the LoaderInfo EFI variable. "" when
+    it isn't set (a BIOS boot, a loader that doesn't say) or can't be read.
+    """
+    try:
+        raw = (EFIVARS_DIR / f"LoaderInfo-{_SD_BOOT_VENDOR}").read_bytes()
+    except OSError:
+        return ""
+    # efivarfs puts 4 bytes of attributes before the value, a UTF-16 string here.
+    return raw[4:].decode("utf-16-le", errors="replace").strip("\x00 \t\r\n")
 
 
 def _bootctl_path(flag: str) -> Path | None:
@@ -107,11 +123,37 @@ def _read_loader_dir(loader_dir: Path) -> dict[str, str]:
     return {path: "\n".join(text) + "\n" for path, text in sorted(lines.items())}
 
 
+def _grub_manageable() -> bool:
+    return _exists(GRUB_DEFAULT_PATH) and shutil.which("grub-mkconfig") is not None
+
+
+def _systemd_boot_on_disk() -> bool:
+    """loader.conf or an entries directory under loader/, on the ESP or XBOOTLDR - what `bootctl install` leaves."""
+    return any(_exists(d / "loader.conf") or _exists(d / "entries") for d in _loader_dirs())
+
+
 def detect() -> str:
-    if shutil.which("bootctl") and (_efivar_exists("LoaderInfo") or esp_path() is not None):
-        return "systemd-boot"
-    if _exists(GRUB_DEFAULT_PATH) and shutil.which("grub-mkconfig"):
+    """
+    "systemd-boot", "grub" or "unknown".
+
+    The loader that started this boot names itself in LoaderInfo, and that
+    settles it - by name: GRUB sets the variable too, so its existing
+    doesn't mean systemd-boot. When no loader says (a BIOS boot, a GRUB
+    before 2.12), go by what's installed, GRUB first, since systemd-boot
+    would have said. An ESP by itself decides nothing: every UEFI machine
+    has one, the ones that boot GRUB included - this used to report all of
+    those as systemd-boot.
+    """
+    loader = _loader_info().lower()
+    has_bootctl = shutil.which("bootctl") is not None
+    if loader.startswith("systemd-boot"):
+        return "systemd-boot" if has_bootctl else "unknown"
+    if loader.startswith("grub"):
+        return "grub" if _grub_manageable() else "unknown"
+    if _grub_manageable():
         return "grub"
+    if has_bootctl and _systemd_boot_on_disk():
+        return "systemd-boot"
     return "unknown"
 
 

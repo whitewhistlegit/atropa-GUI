@@ -31,9 +31,16 @@ def make_esp(root: Path, loader_conf: str | None = "timeout 5\n", entries: dict[
     return root
 
 
-def set_efivar(env, name: str) -> None:
+def set_efivar(env, name: str, value: str = "") -> None:
+    """An EFI variable the way efivarfs shows it: 4 attribute bytes, then a NUL-terminated UTF-16 string."""
     env.efivars.mkdir(exist_ok=True)
-    (env.efivars / f"{name}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").write_bytes(b"\x06\x00\x00\x00")
+    data = (value + "\0").encode("utf-16-le") if value else b""
+    (env.efivars / f"{name}-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").write_bytes(b"\x06\x00\x00\x00" + data)
+
+
+def make_grub(env, fake_which) -> None:
+    fake_which.add("grub-mkconfig")
+    env.grub.write_text("GRUB_TIMEOUT=5\n")
 
 
 def written(fake_run, path: Path) -> list[str]:
@@ -52,18 +59,86 @@ def test_detect_systemd_boot_on_an_esp_at_efi(boot_env, fake_which, fake_run):
 def test_detect_systemd_boot_from_its_efi_variable(boot_env, fake_which, fake_run):
     # A root-only ESP can't even be looked into - systemd-boot's LoaderInfo still says it booted us.
     fake_which.add("bootctl")
-    set_efivar(boot_env, "LoaderInfo")
+    set_efivar(boot_env, "LoaderInfo", "systemd-boot 257.5-2-arch")
     assert bootloader.detect() == "systemd-boot"
 
 
 def test_detect_grub(boot_env, fake_which, fake_run):
-    fake_which.add("grub-mkconfig")
-    boot_env.grub.write_text("GRUB_TIMEOUT=5\n")
+    make_grub(boot_env, fake_which)
     assert bootloader.detect() == "grub"
+
+
+def test_detect_grub_on_a_uefi_machine(boot_env, fake_which, fake_run):
+    # Every UEFI machine has an ESP and bootctl comes with systemd, so
+    # neither says systemd-boot: this one boots GRUB from /boot/efi.
+    fake_which.add("bootctl")
+    make_grub(boot_env, fake_which)
+    (boot_env.boot_efi / "EFI" / "GRUB").mkdir(parents=True)
+    fake_run.set_response(["bootctl", "--print-esp-path"], stdout=f"{boot_env.boot_efi}\n")
+    assert bootloader.detect() == "grub"
+
+
+def test_detect_grub_that_sets_loaderinfo_itself(boot_env, fake_which, fake_run):
+    # GRUB 2.12's bli module sets LoaderInfo too, so the variable existing
+    # doesn't mean systemd-boot - not even with its files left on the ESP.
+    fake_which.add("bootctl")
+    make_grub(boot_env, fake_which)
+    make_esp(boot_env.efi)
+    set_efivar(boot_env, "LoaderInfo", "GRUB 2.12")
+    assert bootloader.detect() == "grub"
+
+
+def test_detect_goes_by_the_loader_that_booted_when_both_are_installed(boot_env, fake_which, fake_run):
+    fake_which.add("bootctl")
+    make_grub(boot_env, fake_which)  # the grub package is still installed
+    make_esp(boot_env.efi)
+    set_efivar(boot_env, "LoaderInfo", "systemd-boot 257.5-2-arch")
+    assert bootloader.detect() == "systemd-boot"
+
+
+def test_detect_prefers_grub_when_no_loader_says(boot_env, fake_which, fake_run):
+    # systemd-boot always sets LoaderInfo, so without it GRUB is the likelier one.
+    fake_which.add("bootctl")
+    make_grub(boot_env, fake_which)
+    make_esp(boot_env.efi)
+    assert bootloader.detect() == "grub"
+
+
+def test_detect_unknown_when_the_loader_that_booted_cant_be_managed(boot_env, fake_which, fake_run):
+    # GRUB booted this machine but grub-mkconfig isn't there: systemd-boot's
+    # leftover files don't make it the bootloader.
+    fake_which.add("bootctl")
+    make_esp(boot_env.efi)
+    set_efivar(boot_env, "LoaderInfo", "GRUB 2.12")
+    assert bootloader.detect() == "unknown"
 
 
 def test_detect_unknown_when_neither(boot_env, fake_which, fake_run):
     assert bootloader.detect() == "unknown"
+
+
+def test_detect_unknown_for_a_bare_esp(boot_env, fake_which, fake_run):
+    fake_which.add("bootctl")
+    boot_env.efi.mkdir()
+    fake_run.set_response(["bootctl", "--print-esp-path"], stdout=f"{boot_env.efi}\n")
+    assert bootloader.detect() == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (b"\x06\x00\x00\x00" + "systemd-boot 257.5-2-arch\0".encode("utf-16-le"), "systemd-boot 257.5-2-arch"),
+        (b"\x06\x00\x00\x00" + "GRUB 2.12".encode("utf-16-le"), "GRUB 2.12"),  # no terminator
+        (b"\x06\x00\x00\x00", ""),  # set, but empty
+        (None, ""),  # not set at all: a BIOS boot, or a loader that doesn't say
+    ],
+    ids=["systemd-boot", "grub-unterminated", "empty", "not-set"],
+)
+def test_loader_info_reads_the_efi_variable(boot_env, raw, expected):
+    if raw is not None:
+        boot_env.efivars.mkdir()
+        (boot_env.efivars / "LoaderInfo-4a67b082-0a4c-41cf-b6c7-440b29bb8c4f").write_bytes(raw)
+    assert bootloader._loader_info() == expected
 
 
 def test_esp_path_asks_bootctl_first(boot_env, fake_which, fake_run, tmp_path):
