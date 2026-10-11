@@ -250,6 +250,22 @@ def test_list_avc_denials_from_audit_log_parses(fake_run, fake_which):
     )
     denials = selinux.list_avc_denials_from_audit_log()
     assert len(denials) == 1
+    call = fake_run.call_containing("ausearch")
+    # Since boot like the kernel log (not "recent" = 10 minutes), and from the log files even if stdin is a pipe.
+    assert call[call.index("-ts") + 1] == "boot" and "--input-logs" in call
+
+
+def test_list_avc_denials_from_audit_log_failure_is_an_error_not_no_denials(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(["pkexec", "ausearch"], returncode=126, stderr="Request dismissed")
+    with pytest.raises(RuntimeError, match="Request dismissed"):
+        selinux.list_avc_denials_from_audit_log()
+
+
+def test_list_avc_denials_from_audit_log_no_matches_is_empty(fake_run, fake_which):
+    fake_which.add("ausearch")
+    fake_run.set_response(["pkexec", "ausearch"], returncode=1, stderr="<no matches>\n")
+    assert selinux.list_avc_denials_from_audit_log() == []
 
 
 def test_explain_denial_requires_audit2why(fake_which):
