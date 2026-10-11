@@ -66,11 +66,18 @@ def test_list_wifi_rescan_triggers_extra_call(fake_run):
     assert fake_run.call_containing("rescan") is not None
 
 
-def test_connect_wifi_with_password(fake_run, fake_which):
+def test_connect_wifi_sends_password_on_stdin_not_argv(fake_run, fake_which):
     network.connect_wifi("HomeNet", "hunter2")
-    assert fake_run.last_call() == [
-        "pkexec", "nmcli", "device", "wifi", "connect", "HomeNet", "password", "hunter2",
-    ]
+    assert fake_run.last_call() == ["pkexec", "nmcli", "--ask", "device", "wifi", "connect", "HomeNet"]
+    assert fake_run.inputs[-1] == "hunter2\n"
+    assert not any("hunter2" in arg for call in fake_run.calls for arg in call)
+
+
+def test_connect_wifi_password_never_reaches_the_action_log(fake_run, fake_which, privilege_paths):
+    network.connect_wifi("HomeNet", "hunter2")
+    log = privilege_paths.log_path.read_text()
+    assert "nmcli --ask device wifi connect HomeNet" in log
+    assert "hunter2" not in log
 
 
 def test_connect_wifi_without_password(fake_run, fake_which):
