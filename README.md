@@ -16,10 +16,10 @@ Each sidebar entry is a module:
 
 | Module | What it does |
 |---|---|
-| **Package Management** | Pending updates, full system upgrade (live output), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
+| **Package Management** | Pending updates (checked without touching the package database), full system upgrade (live output), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
 | **System** | Hostname, timezone/NTP, locale (incl. `locale.gen`), console keymap and X11 layout |
 | **Network** | NetworkManager devices, Wi-Fi, static IP/DHCP (systemd-networkd is detected but read-only) |
-| **Users & Groups** | Create/modify/delete users and groups, set passwords |
+| **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
 | **Services** | systemd units: start/stop/restart/enable/disable, journal tail |
 | **Bootloader** | GRUB / systemd-boot detection, entries, timeout |
 | **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard |
@@ -34,22 +34,31 @@ Each sidebar entry is a module:
 | **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
 | **SELinux: Denial Review** | Setup Mode, grouped and classified denials, one-click `restorecon`, policy generation |
 | **SELinux: Build Policy** | Build/install/activate your own Reference Policy source tree (modular builds) |
-| **Dependencies** | Which external tools each module needs, with install buttons |
+| **Dependencies** | Which external tools each module needs, with install buttons for the ones `pacman` can install |
 | **Add-ons** | Enable/disable declarative TOML plugins (see below) |
 | **Activity & Backups** | Log of every privileged command, automatic config-file backups with restore, migration from old ArchYaST data |
 
 Every config file Atropa edits is backed up first to
 `~/.local/share/atropa/backups/`, and every privileged command is logged to
-`~/.local/share/atropa/actions.log`.
+`~/.local/share/atropa/actions.log`. Changes that can lock you out or end
+your session ask first and say what they affect: stopping a service like
+the display manager or sshd, locking a password, turning the firewall on,
+changing SSH logins.
 
 ## Requirements
 
 - Arch Linux (or a derivative with `pacman`)
 - Python ≥ 3.11
 - `python-gobject`, `gtk4`, `libadwaita`, `polkit`
-- Optional, per module: `networkmanager`, `ufw` or `firewalld`, `fail2ban`,
-  `apparmor`, `usbguard`, `audit`, `arch-audit`, `policycoreutils` and other
-  SELinux tools, `aide` (AUR). The **Dependencies** page shows what's missing.
+- Optional, per module: `networkmanager`, `ufw` or `firewalld`, `openssh`,
+  `fail2ban`, `apparmor`, `usbguard`, `audit`, `arch-audit`, and
+  `pacman-contrib` with `fakeroot` (to check for updates without touching
+  the package database).
+- Optional, from the AUR: SELinux's userspace tools (`policycoreutils`,
+  `checkpolicy`, `semodule-utils`, `selinux-python`) with a policy, and
+  `aide`.
+
+The **Dependencies** page shows what's missing.
 
 ## Install
 
