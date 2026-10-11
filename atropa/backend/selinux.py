@@ -699,14 +699,31 @@ def _extract_path(line: str) -> str | None:
     return None
 
 
+def _iso_to_epoch(iso_str: str) -> int:
+    """
+    Seconds since the epoch for an ISO timestamp (Setup Mode stores its
+    start time in UTC, with an explicit offset; a naive timestamp is taken
+    as local time). Both log backends are queried by this absolute instant
+    rather than by a formatted wall-clock string - see list_all_denials().
+    """
+    return int(datetime.fromisoformat(iso_str).timestamp())
+
+
 def _to_journalctl_since(iso_str: str) -> str:
-    dt = datetime.fromisoformat(iso_str)
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    # systemd.time(7): "@" followed by seconds since the epoch. A bare
+    # "YYYY-MM-DD HH:MM:SS" is read as *local* time, and formatting the
+    # stored UTC value that way shifted the window by the UTC offset - west
+    # of UTC, the first hours of Setup Mode fell outside its own review.
+    return f"@{_iso_to_epoch(iso_str)}"
 
 
-def _to_ausearch_since(iso_str: str) -> str:
-    dt = datetime.fromisoformat(iso_str)
-    return dt.strftime("%m/%d/%Y %H:%M:%S")
+_AUDIT_RECORD_EPOCH_RE = re.compile(r"audit\((\d+)(?:\.\d+)?:\d+\)")
+
+
+def _audit_record_not_before(line: str, since_epoch: int) -> bool:
+    """True if the record's own msg=audit(<epoch>...) stamp is at/after since_epoch (or it has none)."""
+    m = _AUDIT_RECORD_EPOCH_RE.search(line)
+    return m is None or int(m.group(1)) >= since_epoch
 
 
 def list_all_denials(since: str | None = None, source: str = "both") -> list[str]:
@@ -714,9 +731,20 @@ def list_all_denials(since: str | None = None, source: str = "both") -> list[str
     Fetches every AVC denial (and 'not defined in policy' message - see
     _is_relevant_selinux_line) still available on this machine - the
     kernel log, the audit log, or both. 'since' is an ISO timestamp
-    (typically Setup Mode's start time) translated into each tool's own
-    --since/-ts format. Without `since`, this is still bounded by what
-    journald/auditd have actually retained, not literal all-time history.
+    (typically Setup Mode's start time). Without `since`, this is still
+    bounded by what journald/auditd have actually retained, not literal
+    all-time history.
+
+    The audit log isn't time-filtered by ausearch itself: -ts takes date
+    and time as two separate arguments, parsed in the user's locale format
+    (ausearch calls setlocale), which isn't knowable from here - the old
+    single "MM/DD/YYYY HH:MM:SS" argument was rejected as an invalid time,
+    so Setup Mode reviews silently got nothing from the audit log. Records
+    are fetched and filtered on their own epoch timestamps instead.
+
+    A failed audit-log read (anything but ausearch's "<no matches>") raises
+    when the audit log was the source asked for; with source="both" the
+    journal results are returned on their own.
     """
     lines: list[str] = []
 
@@ -728,9 +756,19 @@ def list_all_denials(since: str | None = None, source: str = "both") -> list[str
         lines += [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip() and _is_relevant_selinux_line(ln)]
 
     if source in ("audit_log", "both") and shutil.which("ausearch"):
-        argv = ["ausearch", "-m", "avc", "-ts", _to_ausearch_since(since) if since else "boot"]
-        result = run_privileged(argv)
-        lines += [ln.strip() for ln in result.stdout.strip().splitlines() if "avc:" in ln.lower() and "denied" in ln.lower()]
+        # --input-logs: read the configured log files even when our stdin is
+        # a pipe - otherwise ausearch reads audit records from stdin instead.
+        argv = ["ausearch", "-m", "avc"] if since else ["ausearch", "-m", "avc", "-ts", "boot"]
+        result = run_privileged(argv + ["--input-logs"])
+        if not result.ok and "<no matches>" not in result.stderr and source == "audit_log":
+            raise RuntimeError(
+                f"Couldn't read the audit log: {result.stderr.strip() or f'ausearch exited with {result.returncode}'}"
+            )
+        audit_lines = [ln.strip() for ln in result.stdout.strip().splitlines() if "avc:" in ln.lower() and "denied" in ln.lower()]
+        if since:
+            since_epoch = _iso_to_epoch(since)
+            audit_lines = [ln for ln in audit_lines if _audit_record_not_before(ln, since_epoch)]
+        lines += audit_lines
 
     return lines
 
