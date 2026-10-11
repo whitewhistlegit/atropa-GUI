@@ -60,7 +60,7 @@ class PluginPage(BasePage):
         row = Adw.ActionRow(title=esc(row_spec.title), subtitle=esc(subtitle))
 
         label = row_spec.button_label or "Run"
-        btn = Gtk.Button(label=esc(label), valign=Gtk.Align.CENTER)
+        btn = Gtk.Button(label=label, valign=Gtk.Align.CENTER)  # button labels are plain text, not markup
         if action is not None and action.mutating:
             btn.add_css_class("destructive-action" if "remove" in row_spec.action_key or "disable" in row_spec.action_key else "suggested-action")
         btn.connect("clicked", self._on_row_clicked, row_spec, row)

@@ -147,13 +147,29 @@ class ApparmorPage(BasePage):
         dialog.present(self.get_root())
         return False
 
-    def _on_toggle_capability(self, _switch: Gtk.Switch, state: bool, profile_file: str, capability: str) -> bool:
-        self.run_async(lambda: apparmor.set_capability_rule(profile_file, capability, state), self.handle_command_result)
-        return False
+    def _on_toggle_capability(self, switch: Gtk.Switch, state: bool, profile_file: str, capability: str) -> bool:
+        return self._apply_rule_toggle(
+            switch, state, profile_file, f"capability {capability},",
+            lambda: apparmor.set_capability_rule(profile_file, capability, state),
+        )
 
-    def _on_toggle_network(self, _switch: Gtk.Switch, state: bool, profile_file: str, spec: str) -> bool:
-        self.run_async(lambda: apparmor.set_network_rule(profile_file, spec, state), self.handle_command_result)
-        return False
+    def _on_toggle_network(self, switch: Gtk.Switch, state: bool, profile_file: str, spec: str) -> bool:
+        return self._apply_rule_toggle(
+            switch, state, profile_file, f"network {spec},", lambda: apparmor.set_network_rule(profile_file, spec, state)
+        )
+
+    def _apply_rule_toggle(self, switch: Gtk.Switch, state: bool, profile_file: str, rule: str, work_fn) -> bool:
+        name = profile_file.rsplit("/", 1)[-1]
+        if state:
+            confirm = (f"Allow this for {name}?", f"Adds '{rule}' to {profile_file} and reloads the profile.", "Allow")
+        else:
+            confirm = (
+                f"Take this away from {name}?",
+                f"Removes '{rule}' from {profile_file} and reloads the profile. The program fails "
+                "wherever it still needs it.",
+                "Remove",
+            )
+        return self.apply_switch(switch, state, work_fn, confirm=confirm)
 
     # -- denials -----------------------------------------------------
 
@@ -207,7 +223,7 @@ class ApparmorPage(BasePage):
 
     def _on_why_result(self, result, error) -> bool:
         dialog = Adw.AlertDialog(heading="Why was this denied?")
-        dialog.set_body(esc(error) if error else esc(result))
+        dialog.set_body(str(error) if error else result)  # AlertDialog bodies are plain text, not markup
         dialog.add_response("close", "Close")
         dialog.present(self.get_root())
         return False

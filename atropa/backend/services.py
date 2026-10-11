@@ -6,9 +6,55 @@ Wraps systemctl for the Services module (start/stop/enable/disable/status).
 
 from __future__ import annotations
 
+import fnmatch
 from dataclasses import dataclass
 
 from .privilege import CommandResult, run_privileged, run_unprivileged
+
+_DBUS = "D-Bus carries the desktop's messages - without it your session ends, Atropa included."
+_DISPLAY_MANAGER = "This is the display manager - stopping it ends the graphical session, Atropa included."
+_NETWORK = "This machine can lose its network connection - including an SSH session you're using to reach it."
+_FIREWALL = "The firewall stops filtering incoming connections."
+
+# Units whose loss breaks Atropa itself, the desktop session, or the way
+# into this machine - spelled out before a one-click stop/disable does it.
+_IMPACTS = (
+    ("polkit.service", "polkit shows Atropa's password prompts - without it no privileged action works, "
+     "including starting it again from here."),
+    ("dbus.service", _DBUS),
+    ("dbus-broker.service", _DBUS),
+    ("systemd-logind.service", "logind manages logins and sessions - without it your session can end."),
+    ("user@*.service", "This is a user's service manager - stopping it ends that user's whole session."),
+    ("gdm.service", _DISPLAY_MANAGER),
+    ("sddm.service", _DISPLAY_MANAGER),
+    ("lightdm.service", _DISPLAY_MANAGER),
+    ("lxdm.service", _DISPLAY_MANAGER),
+    ("ly.service", _DISPLAY_MANAGER),
+    ("greetd.service", _DISPLAY_MANAGER),
+    ("NetworkManager.service", _NETWORK),
+    ("systemd-networkd.service", _NETWORK),
+    ("iwd.service", _NETWORK),
+    ("wpa_supplicant.service", _NETWORK),
+    ("dhcpcd.service", _NETWORK),
+    ("connman.service", _NETWORK),
+    ("sshd.service", "Nobody can log in over SSH without it - if that's how you reach this machine, "
+     "you lose the way back in."),
+    ("systemd-udevd.service", "udev sets up devices as they're plugged in - new keyboards, drives and "
+     "network adapters stop working."),
+    ("systemd-resolved.service", "If this machine uses systemd-resolved, name lookups (DNS) stop working."),
+    ("bluetooth.service", "Bluetooth keyboards, mice and headsets disconnect."),
+    ("firewalld.service", _FIREWALL),
+    ("ufw.service", _FIREWALL),
+    ("nftables.service", _FIREWALL),
+    ("iptables.service", _FIREWALL),
+    ("ip6tables.service", _FIREWALL),
+    ("auditd.service", "auditd stops recording audit events, including the SELinux/AppArmor denials "
+     "Atropa reviews."),
+    ("apparmor.service", "apparmor.service loads AppArmor's profiles at boot - without it programs run "
+     "unconfined after the next reboot."),
+    ("usbguard.service", "USBGuard stops deciding which USB devices are allowed."),
+    ("fail2ban.service", "fail2ban stops banning addresses that keep failing to log in."),
+)
 
 
 @dataclass
@@ -40,6 +86,11 @@ def list_services(pattern: str = "*.service") -> list[Service]:
         svc.enabled = enabled.stdout.strip() or "unknown"
 
     return services
+
+
+def stop_impact(unit: str) -> str:
+    """What stopping or disabling `unit` breaks, for a confirmation dialog ("" if nothing notable)."""
+    return next((impact for pattern, impact in _IMPACTS if fnmatch.fnmatchcase(unit, pattern)), "")
 
 
 def status(unit: str) -> str:

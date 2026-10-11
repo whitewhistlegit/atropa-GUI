@@ -137,3 +137,54 @@ def test_create_and_delete_group(fake_run, fake_which):
     assert fake_run.last_call() == ["pkexec", "groupadd", "developers"]
     users.delete_group("developers")
     assert fake_run.last_call() == ["pkexec", "groupdel", "developers"]
+
+
+# ------------------------------------------------------------ lock/delete guards --
+
+@pytest.fixture
+def signed_in_as(monkeypatch, fake_passwd_db):
+    """Pretend the GUI runs as the given uid (fake_passwd_db: root=0, alice=1000 in wheel, bob=1001)."""
+    def _set(uid: int):
+        monkeypatch.setattr(users.os, "getuid", lambda: uid)
+    return _set
+
+
+def test_locking_your_own_account_is_refused(signed_in_as):
+    signed_in_as(1000)
+    assert "signed in with" in users.lock_refusal("alice")
+    assert users.lock_refusal("bob") is None
+
+
+def test_deleting_your_own_account_or_root_is_refused(signed_in_as):
+    signed_in_as(1000)
+    assert "signed in with" in users.delete_refusal("alice")
+    assert "root" in users.delete_refusal("root")
+    assert users.delete_refusal("bob") is None
+
+
+def test_locking_root_is_allowed_while_someone_can_answer_prompts(signed_in_as):
+    signed_in_as(1001)  # bob isn't in wheel, but alice is - polkit asks for her password
+    assert users.lock_refusal("root") is None
+
+
+def test_locking_root_is_refused_when_nobody_is_in_wheel(signed_in_as, fake_passwd_db):
+    # polkit falls back to root's password when the admin group is empty.
+    _entries, groups = fake_passwd_db
+    groups[1] = groups[1]._replace(gr_mem=[])
+    signed_in_as(1001)
+    assert "wheel" in users.lock_refusal("root")
+
+
+def test_lock_warning_for_the_only_admin(signed_in_as):
+    signed_in_as(1001)
+    assert "only member" in users.lock_warning("alice")
+    assert users.lock_warning("bob") == ""
+
+
+def test_lock_warning_counts_primary_group_members_as_admins(signed_in_as, fake_passwd_db):
+    # Membership through the primary gid never shows up in gr_mem.
+    entries, _groups = fake_passwd_db
+    entries.append(FakePwEntry("carol", 1002, 10, "", "/home/carol", "/bin/bash"))
+    signed_in_as(1001)
+    assert "administrator" in users.lock_warning("alice")
+    assert "only member" not in users.lock_warning("alice")

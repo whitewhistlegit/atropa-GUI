@@ -12,6 +12,8 @@ from gi.repository import Adw, Gtk  # noqa: E402
 from atropa.backend import services
 from atropa.ui.pages import BasePage, esc
 
+MAX_ROWS = 150
+
 
 class ServicesPage(BasePage):
     def __init__(self) -> None:
@@ -43,7 +45,15 @@ class ServicesPage(BasePage):
             self.notify(f"Failed to list services: {error}", is_error=True)
             return False
 
-        for svc in result[:150]:
+        if len(result) > MAX_ROWS:
+            row = Adw.ActionRow(
+                title=f"Showing the first {MAX_ROWS} of {len(result)} services",
+                subtitle="Type part of a name in the filter above to find the rest",
+            )
+            self.services_group.add(row)
+            self._service_rows.append(row)
+
+        for svc in result[:MAX_ROWS]:
             subtitle = f"{svc.active}/{svc.sub} · {svc.enabled}"
             row = Adw.ActionRow(title=esc(svc.unit), subtitle=esc(subtitle))
 
@@ -68,13 +78,23 @@ class ServicesPage(BasePage):
         return False
 
     def _on_start_clicked(self, _btn: Gtk.Button, unit: str) -> None:
-        self.run_async(lambda: services.start(unit), self.handle_command_result)
+        self.run_action(lambda: services.start(unit), self.handle_command_result)
 
     def _on_stop_clicked(self, _btn: Gtk.Button, unit: str) -> None:
-        self.run_async(lambda: services.stop(unit), self.handle_command_result)
+        self._confirm_unit_change(unit, "Stop", f"{unit} stops right away.", services.stop)
 
     def _on_enable_clicked(self, _btn: Gtk.Button, unit: str) -> None:
-        self.run_async(lambda: services.enable(unit), self.handle_command_result)
+        self.run_action(lambda: services.enable(unit), self.handle_command_result)
 
     def _on_disable_clicked(self, _btn: Gtk.Button, unit: str) -> None:
-        self.run_async(lambda: services.disable(unit), self.handle_command_result)
+        self._confirm_unit_change(
+            unit, "Disable", f"{unit} keeps running for now but won't start at the next boot.", services.disable
+        )
+
+    def _confirm_unit_change(self, unit: str, verb: str, effect: str, action) -> None:
+        self.confirm(
+            f"{verb} {unit}?",
+            f"{effect} {services.stop_impact(unit)}".strip(),
+            verb,
+            lambda: self.run_action(lambda: action(unit), self.handle_command_result),
+        )

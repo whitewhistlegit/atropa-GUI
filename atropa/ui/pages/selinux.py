@@ -386,7 +386,7 @@ class SelinuxPage(BasePage):
             f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i. "
             "Review the proposed rules first if you haven't already.",
             "Install",
-            lambda: self.run_async(lambda: selinux.install_pp_file(review.pp_path), self.handle_command_result),
+            lambda: self.run_action(lambda: selinux.install_pp_file(review.pp_path), self.handle_command_result),
         )
 
     def _on_mode_lock_clicked(self, _btn: Gtk.Button) -> None:
@@ -455,7 +455,7 @@ class SelinuxPage(BasePage):
             "This can take a long time on a large disk and the system will be "
             "unusable until it finishes.",
             "Schedule",
-            lambda: self.run_async(selinux.relabel_filesystem, self.handle_command_result),
+            lambda: self.run_action(selinux.relabel_filesystem, self.handle_command_result),
         )
 
     def _on_restorecon(self, _btn: Gtk.Button) -> None:
@@ -473,6 +473,5 @@ class SelinuxPage(BasePage):
             ),
         )
 
-    def _on_boolean_toggle(self, _switch: Gtk.Switch, state: bool, name: str) -> bool:
-        self.run_async(lambda: selinux.set_boolean(name, state), self.handle_command_result)
-        return False
+    def _on_boolean_toggle(self, switch: Gtk.Switch, state: bool, name: str) -> bool:
+        return self.apply_switch(switch, state, lambda: selinux.set_boolean(name, state))
