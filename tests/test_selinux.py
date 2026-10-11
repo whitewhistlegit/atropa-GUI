@@ -81,6 +81,16 @@ def test_get_status_parses_fields(fake_run, fake_which):
     assert status.deny_unknown == "allowed"
 
 
+def test_get_status_installed_tools_but_disabled_in_the_kernel_is_not_available(fake_run, fake_which):
+    # Used to come back available=True with mode "unknown" just because sestatus exists.
+    fake_which.add("sestatus")
+    fake_run.set_response(["sestatus"], stdout="SELinux status:                 disabled\n")
+    status = selinux.get_status()
+    assert status.available is False
+    assert status.mode == "disabled"
+    assert "disabled" in status.raw
+
+
 def test_get_status_policy_falls_back_to_config_file_field(fake_run, fake_which):
     fake_which.add("sestatus")
     text = SESTATUS_OUTPUT.replace(
@@ -412,7 +422,7 @@ def test_module_name_from_te_falls_back_when_no_declaration():
 def test_import_te_files_missing_tools_raises(fake_which, tmp_path):
     te = tmp_path / "mymod.te"
     te.write_text("module mymod 1.0;")
-    with pytest.raises(RuntimeError, match="aren't installed"):
+    with pytest.raises(RuntimeError, match="'checkmodule' isn't installed.*checkpolicy.*AUR"):
         selinux.import_te_files([str(te)])
 
 
