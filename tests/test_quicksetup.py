@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from atropa.backend import quicksetup
+from atropa.backend.privilege import CommandResult
 
 # The sandbox container this runs in has a real /sys/fs/selinux mount (from
 # the host), even though SELinux itself isn't in use here - same issue
@@ -64,7 +65,7 @@ def test_apply_firewall_installs_when_backend_missing(fake_run, fake_which, monk
 
     monkeypatch.setattr(security, "firewall_backend", fake_backend)
 
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=0)
     fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
     fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "ufw", "allow"], returncode=0)
@@ -161,7 +162,7 @@ def test_apply_firewall_skips_when_already_active(fake_run, fake_which):
 
 
 def test_apply_firewall_stops_if_install_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=1, stderr="no network")
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=1, stderr="no network")
     result = quicksetup._apply_firewall(lambda _l: None)
     assert not result.ok
     assert fake_run.call_containing("enable") is None
@@ -170,7 +171,7 @@ def test_apply_firewall_stops_if_install_fails(fake_run, fake_which):
 # --------------------------------------------------------------- fail2ban --
 
 def test_apply_fail2ban_installs_enables_and_protects_ssh(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "fail2ban"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "fail2ban"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "fail2ban"], stdout="inactive\n")
     fake_run.set_response(["systemctl", "is-enabled", "fail2ban"], stdout="disabled\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "fail2ban", "--now"], returncode=0)
@@ -235,7 +236,7 @@ def test_apply_faillock_applies_when_wired_in(fake_run, fake_which, privilege_pa
 # --------------------------------------------------------------- apparmor --
 
 def test_apply_apparmor_installs_when_missing(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "apparmor"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "apparmor"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "apparmor"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "apparmor", "--now"], returncode=0)
 
@@ -256,7 +257,7 @@ def test_apply_apparmor_warns_when_kernel_not_enabled(fake_run, fake_which):
 # --------------------------------------------------------------- auditd --
 
 def test_apply_auditd_installs_and_enables(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "audit"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "audit"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "auditd"], stdout="inactive\n")
     fake_run.set_response(["pkexec", "systemctl", "enable", "auditd", "--now"], returncode=0)
 
@@ -267,7 +268,7 @@ def test_apply_auditd_installs_and_enables(fake_run, fake_which):
 # --------------------------------------------------------------- usbguard --
 
 def test_apply_usbguard_installs_generates_and_enables(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "usbguard"], returncode=0)
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "usbguard"], returncode=0)
     fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
     fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
 
@@ -284,7 +285,7 @@ def test_apply_selinux_installs_tools_when_missing(fake_run, fake_which):
     # report that kernel enablement is still a manual step, not proceed to
     # call sestatus at all.
     fake_run.set_response(
-        ["pkexec", "pacman", "-S", "--noconfirm", "policycoreutils", "checkpolicy", "audit"], returncode=0
+        ["pkexec", "pacman", "-S", "--needed", "--noconfirm", "policycoreutils", "checkpolicy", "audit"], returncode=0
     )
 
     lines = []
@@ -359,7 +360,7 @@ def test_apply_items_only_runs_requested_keys(fake_run, fake_which):
 def test_apply_items_continues_after_one_step_fails(fake_run, fake_which, privilege_paths):
     """One failing step (e.g. a package install error) must not prevent
     later steps in the batch from running."""
-    fake_run.set_response(["pkexec", "pacman", "-S", "--noconfirm", "ufw"], returncode=1, stderr="network error")
+    fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "ufw"], returncode=1, stderr="network error")
     fake_run.set_response(["sysctl", "-n"], stdout="0\n")
     fake_run.set_response(["pkexec", "tee"], returncode=0)
     fake_run.set_response(["pkexec", "sysctl", "--system"], returncode=0)
@@ -368,6 +369,20 @@ def test_apply_items_continues_after_one_step_fails(fake_run, fake_which, privil
 
     assert not results["firewall"].ok
     assert results["sysctl"].ok
+
+
+def test_apply_items_keeps_going_when_a_step_raises(monkeypatch):
+    def refused(_on_line):
+        raise quicksetup.pacman.PartialUpgradeError("database is ahead")
+
+    ran = []
+    monkeypatch.setitem(quicksetup._APPLIERS, "firewall", refused)
+    monkeypatch.setitem(quicksetup._APPLIERS, "sysctl", lambda _on_line: ran.append("sysctl") or CommandResult(0, "", ""))
+    lines: list[str] = []
+    results = quicksetup.apply_items(["firewall", "sysctl"], lines.append)
+    assert not results["firewall"].ok and "database is ahead" in results["firewall"].stderr
+    assert ran == ["sysctl"] and results["sysctl"].ok
+    assert "Failed: database is ahead" in lines
 
 
 def test_apply_single_runs_exactly_that_item(fake_run, fake_which):

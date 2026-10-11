@@ -48,6 +48,12 @@ CATALOG: list[Dependency] = [
         "yay", "Package Management", "Alternative AUR helper for searching/installing AUR packages", None,
         note="AUR-only - not installable via pacman -S; build it from the AUR or install another AUR helper first",
     ),
+    Dependency(
+        "checkupdates", "Package Management",
+        "Checks the mirrors for updates without root and without refreshing the real package database",
+        "pacman-contrib",
+    ),
+    Dependency("fakeroot", "Package Management", "checkupdates won't run without it", "fakeroot"),
     Dependency("systemctl", "Services", "Start/stop/enable/disable systemd services", "systemd", required=True),
     Dependency("nmcli", "Network", "Manage connections, Wi-Fi, static IP via NetworkManager", "networkmanager"),
     Dependency("networkctl", "Network", "Read-only status for systemd-networkd, if used instead of NetworkManager", "systemd"),
