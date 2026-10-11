@@ -196,6 +196,15 @@ def run_privileged(argv: list[str], input_text: str | None = None, timeout: int 
     return _run(full_argv, input_text=input_text, timeout=timeout)
 
 
+def authenticate() -> CommandResult:
+    """
+    Asks for the administrator password without changing anything - it
+    runs `true` as root. For unlocking a control that shouldn't be within
+    reach without one; not ok when the prompt is dismissed.
+    """
+    return run_privileged(["true"])
+
+
 def _run_streaming(argv: list[str], on_line: Callable[[str], None], input_text: str | None, timeout: int) -> CommandResult:
     """
     Shared Popen + live-line-streaming implementation. `argv` must already
@@ -369,7 +378,7 @@ def restorable(path: str) -> bool:
     this check, a planted entry made Restore write any file as root.
     """
     # Imported here: each of these modules imports this one.
-    from . import apparmor, bootloader, hardening, security, selinux, system_config
+    from . import apparmor, bootloader, hardening, pacman, security, selinux, system_config
 
     if not isinstance(path, str) or not path.startswith("/") or os.path.normpath(path) != path:
         return False  # relative, or "..", "." or "//" in it
@@ -379,7 +388,7 @@ def restorable(path: str) -> bool:
         for p in (
             hardening.SYSCTL_HARDENING_FILE, hardening.FAIL2BAN_SSHD_JAIL, hardening.USBGUARD_RULES,
             hardening.FAILLOCK_CONF, hardening.PWQUALITY_CONF, security.SSHD_CONFIG, selinux.SELINUX_CONFIG,
-            bootloader.GRUB_DEFAULT_PATH, system_config.LOCALE_GEN_PATH,
+            bootloader.GRUB_DEFAULT_PATH, system_config.LOCALE_GEN_PATH, pacman.PACMAN_CONF,
         )
     }
     if target in backed_up or Path(apparmor.PROFILES_DIR) in target.parents:

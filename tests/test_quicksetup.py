@@ -328,6 +328,86 @@ def test_apply_selinux_skips_when_already_permissive_or_enforcing(fake_run, fake
     assert fake_run.call_containing("setenforce") is None
 
 
+# --------------------------------------------------------------- SELinux package repository (locked) --
+
+def test_selinux_repo_is_locked_unselected_and_says_it_is_unsigned():
+    item = next(item for item in quicksetup.CATALOG if item.key == "selinux_repo")
+    assert item.locked
+    assert item.default_selected is False
+    assert "unsigned" in item.risk_note and "SigLevel = Never" in item.risk_note
+
+
+def test_selinux_repo_is_the_only_locked_item():
+    assert [item.key for item in quicksetup.CATALOG if item.locked] == ["selinux_repo"]
+
+
+def test_selinux_repo_runs_right_before_the_selinux_step_that_installs_from_it():
+    order = quicksetup._ORDER
+    assert order.index("selinux_repo") + 1 == order.index("selinux")
+
+
+def test_apply_selinux_repo_adds_the_repository(monkeypatch):
+    calls = []
+    monkeypatch.setattr(quicksetup.pacman, "selinux_repo_enabled", lambda: False)
+    monkeypatch.setattr(quicksetup.pacman, "enable_selinux_repo", lambda: calls.append("enable") or CommandResult(0, "", ""))
+    lines = []
+    assert quicksetup._apply_selinux_repo(lines.append).ok
+    assert calls == ["enable"]
+    assert any("SigLevel = Never" in line for line in lines)  # said out loud, not just done
+
+
+def test_apply_selinux_repo_does_nothing_when_already_enabled(monkeypatch):
+    monkeypatch.setattr(quicksetup.pacman, "selinux_repo_enabled", lambda: True)
+    monkeypatch.setattr(quicksetup.pacman, "enable_selinux_repo", lambda: pytest.fail("must not be called"))
+    assert "already" in quicksetup._apply_selinux_repo(lambda _l: None).stdout
+
+
+def test_apply_selinux_installs_its_tools_from_the_repository_once_enabled(fake_run, fake_which, monkeypatch):
+    fake_which.add("ausearch")
+    installed = []
+    monkeypatch.setattr(quicksetup.pacman, "selinux_repo_enabled", lambda: True)
+    monkeypatch.setattr(
+        quicksetup.pacman, "upgrade_and_install_streaming",
+        lambda names, on_line: installed.append(names) or CommandResult(0, "", ""),
+    )
+    result = quicksetup._apply_selinux(lambda _l: None)
+    # The tools only - nothing that replaces a core package.
+    assert installed == [["checkpolicy", "libselinux", "policycoreutils", "selinux-python", "semodule-utils"]]
+    assert result.ok and "manual step" in result.stdout  # the kernel side still isn't automated
+    assert not any(call[:3] == ["pkexec", "pacman", "-S"] for call in fake_run.calls)  # never a plain -S
+
+
+def test_apply_selinux_stops_when_installing_the_tools_fails(fake_run, fake_which, monkeypatch):
+    fake_which.add("ausearch")
+    monkeypatch.setattr(quicksetup.pacman, "selinux_repo_enabled", lambda: True)
+    monkeypatch.setattr(
+        quicksetup.pacman, "upgrade_and_install_streaming", lambda names, on_line: CommandResult(1, "error: ...", "")
+    )
+    assert not quicksetup._apply_selinux(lambda _l: None).ok
+    assert fake_run.call_containing("sestatus") is None
+
+
+def test_apply_items_refuses_a_locked_item_that_was_not_unlocked(fake_run, fake_which):
+    lines = []
+    results = quicksetup.apply_items(["selinux_repo"], lines.append)
+    assert not results["selinux_repo"].ok
+    assert "locked" in results["selinux_repo"].stderr
+    assert fake_run.calls == []  # nothing ran, pacman.conf wasn't even looked at
+
+
+def test_apply_items_runs_a_locked_item_once_it_is_unlocked(monkeypatch):
+    monkeypatch.setattr(quicksetup.pacman, "selinux_repo_enabled", lambda: False)
+    monkeypatch.setattr(quicksetup.pacman, "enable_selinux_repo", lambda: CommandResult(0, "", ""))
+    results = quicksetup.apply_items(["selinux_repo"], lambda _l: None, unlocked={"selinux_repo"})
+    assert results["selinux_repo"].ok
+
+
+def test_apply_single_refuses_a_locked_item_that_was_not_unlocked(fake_run, fake_which):
+    with pytest.raises(RuntimeError, match="locked"):
+        quicksetup.apply_single("selinux_repo", lambda _l: None)
+    assert fake_run.calls == []
+
+
 # --------------------------------------------------------------- apply_items orchestration --
 
 def test_apply_items_runs_in_fixed_safe_order_regardless_of_input_order(fake_run, fake_which, privilege_paths):
@@ -417,6 +497,29 @@ def test_status_summary_covers_every_catalog_key(fake_run, fake_which):
 
     summary = quicksetup.status_summary()
     assert set(summary.keys()) == {item.key for item in quicksetup.CATALOG}
+
+
+def test_status_summary_has_a_line_for_every_catalog_key():
+    assert set(quicksetup._STATUS_LINES) == {item.key for item in quicksetup.CATALOG}
+
+
+def test_status_summary_keeps_the_other_lines_when_one_check_fails(fake_run, fake_which, monkeypatch):
+    # SELinux in the kernel but no sestatus installed: get_status() raises.
+    # That used to lose every line and leave the page with an error toast.
+    def no_sestatus():
+        raise RuntimeError("Command not found: sestatus")
+
+    monkeypatch.setattr(quicksetup.selinux, "get_status", no_sestatus)
+    summary = quicksetup.status_summary()
+    assert summary["selinux"] == "Couldn't check: Command not found: sestatus"
+    assert summary["firewall"] == "Not installed"
+    assert summary["selinux_repo"] == "Not enabled"
+    assert set(summary) == {item.key for item in quicksetup.CATALOG}
+
+
+def test_status_summary_says_the_selinux_repository_is_unsigned_when_enabled(fake_run, fake_which):
+    fake_run.set_response(["pacman-conf", "--repo-list"], stdout="core\nextra\nselinux\n")
+    assert quicksetup.status_summary()["selinux_repo"] == "Enabled (unsigned)"
 
 
 def test_status_summary_faillock_reports_pam_wiring_state(monkeypatch, tmp_path, fake_run, fake_which):

@@ -36,6 +36,15 @@ class RefpolicyBuildPage(BasePage):
             "consequential one - it's what actually switches the system to boot into this policy.",
         )
 
+        fetch_row = Adw.ActionRow(
+            title="Atropa's reference policy",
+            subtitle=esc(f"A targeted-style refpolicy tree for Arch - {refpolicy_build.ATROPA_POLICY_URL}"),
+        )
+        fetch_btn = Gtk.Button(label="Get or update", valign=Gtk.Align.CENTER)
+        fetch_btn.connect("clicked", lambda _b: self._on_fetch_clicked())
+        fetch_row.add_suffix(fetch_btn)
+        intro_group.add(fetch_row)
+
         self.source_row = Adw.ActionRow(title="Source directory", subtitle="Not selected")
         pick_btn = Gtk.Button(label="Choose…", valign=Gtk.Align.CENTER)
         pick_btn.connect("clicked", lambda _b: self._on_pick_source_dir())
@@ -95,9 +104,38 @@ class RefpolicyBuildPage(BasePage):
         path = gfile.get_path() if gfile else None
         if not path:
             return
+        self._use_source_dir(path)
+
+    def _use_source_dir(self, path: str) -> None:
         self._source_dir = path
         self.source_row.set_subtitle(esc(path))
         self.build_btn.set_sensitive(True)
+        # Activate needs build.conf's NAME exactly - fill it in rather than leave it to be retyped.
+        name = refpolicy_build.policy_name_of(path)
+        if name and not self.policy_name_entry.get_text().strip():
+            self.policy_name_entry.set_text(name)
+
+    def _on_fetch_clicked(self) -> None:
+        self.confirm(
+            "Download Atropa's reference policy?",
+            f"Uses git to clone {refpolicy_build.ATROPA_POLICY_URL} into "
+            f"{refpolicy_build.ATROPA_POLICY_DIR}, or to bring the copy already there up to date. "
+            "Unprivileged, and nothing is built or installed: it only becomes the source directory "
+            "below. Build, Install and Activate stay separate steps, each with its own confirmation.\n\n"
+            "Its build.conf says TYPE = standard, but it is a targeted-style policy: logins are meant to "
+            "run in unconfined_t. Activate's default login mapping (unconfined_u) does that - leave it "
+            "as it is.",
+            "Download",
+            lambda: self.run_streaming_operation(
+                "Getting the policy source", refpolicy_build.fetch_atropa_policy, self._on_fetch_done
+            ),
+        )
+
+    def _on_fetch_done(self, result, error) -> bool:
+        handled = self.handle_command_result(result, error, success_message="Policy source is ready")
+        if not error and getattr(result, "ok", False):
+            self._use_source_dir(str(refpolicy_build.ATROPA_POLICY_DIR))
+        return handled
 
     # -- build (unprivileged) --------------------------------------------------
 
@@ -149,6 +187,15 @@ class RefpolicyBuildPage(BasePage):
         login_seuser = self.login_seuser_entry.get_text().strip() or "unconfined_u"
         if not policy_name:
             self.notify("Enter the policy name first (matches build.conf's NAME)", is_error=True)
+            return
+        if login_seuser.endswith(("_t", "_r")):
+            # Easy to mix up: the domain a session ends up in is unconfined_t,
+            # but the login mapping names the SELinux user that leads there.
+            self.notify(
+                f"'{login_seuser}' is a type or role - the login mapping takes a SELinux user, "
+                "e.g. unconfined_u (its sessions run in unconfined_t)",
+                is_error=True,
+            )
             return
 
         self.confirm(

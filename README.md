@@ -22,7 +22,7 @@ Each sidebar entry is a module:
 | **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
 | **Services** | systemd units: start/stop/restart/enable/disable, journal tail |
 | **Bootloader** | GRUB / systemd-boot detection, entries, timeout |
-| **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard |
+| **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard. Can also add the unsigned SELinux package repository, locked behind the administrator password |
 | **Security Profiles** | Export this machine's security posture to JSON and import it elsewhere, per-section |
 | **Security** | Firewall (ufw or firewalld), SSH hardening with validate-before-reload and automatic rollback, sudoers syntax check |
 | **Hardening** | Kernel sysctl hardening, fail2ban, USBGuard, auditd + CIS audit rule sets, login lockout, password complexity, `arch-audit` vulnerability scan, security audit score |
@@ -33,7 +33,7 @@ Each sidebar entry is a module:
 | **SELinux** | Status, enforcing/permissive (lock-gated), booleans, denial review, per-application policy drafts |
 | **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
 | **SELinux: Denial Review** | Setup Mode, grouped and classified denials, one-click `restorecon`, policy generation |
-| **SELinux: Build Policy** | Build/install/activate your own Reference Policy source tree (modular builds) |
+| **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
 | **Dependencies** | Which external tools each module needs, with install buttons for the ones `pacman` can install |
 | **Add-ons** | Enable/disable declarative TOML plugins (see below) |
 | **Activity & Backups** | Log of every privileged command, automatic config-file backups with restore, migration from old ArchYaST data |
@@ -54,9 +54,16 @@ changing SSH logins.
   `fail2ban`, `apparmor`, `usbguard`, `audit`, `arch-audit`, and
   `pacman-contrib` with `fakeroot` (to check for updates without touching
   the package database).
-- Optional, from the AUR: SELinux's userspace tools (`policycoreutils`,
-  `checkpolicy`, `semodule-utils`, `selinux-python`) with a policy, and
-  `aide`.
+- Optional, from the AUR: `aide`, and SELinux's userspace tools
+  (`policycoreutils`, `checkpolicy`, `semodule-utils`, `selinux-python`).
+  The SELinux tools can also come from the
+  [archlinuxhardened](https://github.com/archlinuxhardened/selinux) binary
+  repository, which Security Quick Setup can add for you. That repository
+  is unsigned, so pacman doesn't verify what it installs from it - which is
+  why Atropa keeps it locked until you unlock it with the administrator
+  password.
+- Optional: `git` and `make`, to fetch and build
+  [Atropa's SELinux policy](https://github.com/whitewhistlegit/refpolicy-atropa).
 
 The **Dependencies** page shows what's missing.
 

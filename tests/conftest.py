@@ -13,7 +13,8 @@ Fixtures:
     fake_which   -- controls which command-line tools "exist" (shutil.which).
     privilege_paths -- AUTOUSE: redirects HOME and every per-user data path
                         (action log, backups, SELinux review artifacts, the
-                        legacy ArchYaST dir) under tmp_path, so no test can
+                        downloaded policy source, the legacy ArchYaST dir)
+                        under tmp_path, so no test can
                         touch the real ~/.local/share/atropa - even one that
                         never asks for this fixture by name.
 """
@@ -26,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atropa.backend import apparmor, hardening, migration, privilege, selinux
+from atropa.backend import apparmor, hardening, migration, privilege, refpolicy_build, selinux
 
 
 @dataclass
@@ -122,6 +123,7 @@ def privilege_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(selinux, "LAST_REVIEW_FILE", review_base / "last_review.json")
 
     monkeypatch.setattr(migration, "OLD_USER_DATA_DIR", tmp_path / "archyast")
+    monkeypatch.setattr(refpolicy_build, "ATROPA_POLICY_DIR", tmp_path / "refpolicy-atropa")
 
     return SimpleNamespace(backup_dir=backup_dir, manifest=manifest, log_path=log_path, home=home)
 

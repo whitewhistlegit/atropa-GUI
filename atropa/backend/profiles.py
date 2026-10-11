@@ -344,8 +344,15 @@ def import_profile(profile: dict, sections: list[str], on_line: Callable[[str], 
 
     if "quicksetup" in sections:
         def apply_quicksetup() -> None:
-            keys = [key for key in profile.get("quicksetup_keys", []) if key in {item.key for item in quicksetup.CATALOG}]
+            catalog = {item.key: item for item in quicksetup.CATALOG}
+            requested = [key for key in profile.get("quicksetup_keys", []) if key in catalog]
+            keys = [key for key in requested if not catalog[key].locked]
             on_line("=== Re-applying quick-setup modules from profile ===")
+            # A locked item takes the administrator password, in person, to
+            # unlock. A profile file - hand-edited, or someone else's - doesn't.
+            for key in requested:
+                if catalog[key].locked:
+                    on_line(f"Skipping '{catalog[key].title}': it is locked, and a profile can't unlock it.")
             if keys:
                 results.update(quicksetup.apply_items(keys, on_line))
             else:

@@ -66,9 +66,48 @@ SELINUX_ROOT = Path("/etc/selinux")
 # SELINUXTYPE value - nothing else belongs in it.
 _POLICY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
+# Atropa's own reference policy for Arch: a complete modular refpolicy
+# tree (build.conf: NAME = atropa-refpolicy) that build() takes as it is.
+ATROPA_POLICY_URL = "https://github.com/whitewhistlegit/refpolicy-atropa"
+ATROPA_POLICY_DIR = Path.home() / ".local" / "share" / "atropa" / "refpolicy-atropa"
+
 
 def _make_available() -> bool:
     return shutil.which("make") is not None
+
+
+def fetch_atropa_policy(on_line: Callable[[str], None]) -> CommandResult:
+    """
+    Downloads Atropa's reference policy source into ATROPA_POLICY_DIR with
+    git: a shallow clone, or a fast-forward of the checkout already there.
+    Unprivileged, and nothing is built or installed - it only puts a source
+    tree where build() can be pointed at it. A checkout with local changes
+    that can't fast-forward is left as it is and the failure reported.
+    """
+    if shutil.which("git") is None:
+        raise RuntimeError("'git' isn't installed. Install it with: pacman -S git")
+    target = ATROPA_POLICY_DIR
+    if (target / ".git").is_dir():
+        return run_unprivileged_streaming(["git", "-C", str(target), "pull", "--ff-only"], on_line, timeout=1800)
+    if target.exists() and any(target.iterdir()):
+        raise RuntimeError(f"{target} exists and isn't a git checkout - move it out of the way first")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return run_unprivileged_streaming(
+        ["git", "clone", "--depth", "1", ATROPA_POLICY_URL, str(target)], on_line, timeout=1800
+    )
+
+
+def policy_name_of(source_dir: str) -> str | None:
+    """
+    NAME from the source tree's build.conf - the name install() puts the
+    policy under and activate() takes. None if there's no usable one.
+    """
+    try:
+        text = (Path(source_dir) / "build.conf").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"^\s*NAME\s*=\s*(\S+)\s*$", text, re.MULTILINE)
+    return match.group(1) if match and _POLICY_NAME_RE.match(match.group(1)) else None
 
 
 def _require_source_dir(source_dir: str) -> None:

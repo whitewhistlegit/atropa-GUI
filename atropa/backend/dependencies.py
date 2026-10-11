@@ -44,7 +44,10 @@ def _aur_selinux_tool(tool: str, description: str) -> Dependency:
     package = SELINUX_TOOL_PACKAGES[tool]
     return Dependency(
         tool, "SELinux", description, None,
-        note=f"AUR-only - install '{package}' with your AUR helper (Arch has no official SELinux packages)",
+        note=(
+            f"AUR-only - install '{package}' with your AUR helper, or enable the SELinux package repository "
+            "in Security Quick Setup (Arch has no official SELinux packages)"
+        ),
     )
 
 

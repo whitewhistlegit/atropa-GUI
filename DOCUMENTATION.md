@@ -7,8 +7,8 @@ internals reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~12,500 lines of Python across 23 backend modules and 22 UI
-pages, plus a 727-test pytest suite (~7,800 lines).** No GTK4/libadwaita is
+Current size: **~12,900 lines of Python across 23 backend modules and 22 UI
+pages, plus a 765-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -147,6 +147,7 @@ marks each entry `restorable`, and the page disables Restore for the rest.
 | `set_password_complexity_policy` | `hardening.py` | `/etc/security/pwquality.conf` |
 | `usbguard_generate_and_enable` | `hardening.py` | `/etc/usbguard/rules.conf` |
 | `set_timeout` | `bootloader.py` | `/etc/default/grub`, or systemd-boot's `loader/loader.conf` on the ESP |
+| `enable_selinux_repo` / `disable_selinux_repo` | `pacman.py` | `/etc/pacman.conf` |
 | `set_mode` | `selinux.py` | `/etc/selinux/config` |
 | `activate` | `refpolicy_build.py` | `/etc/selinux/config` (`SELINUXTYPE=`) |
 | `set_locale_gen_enabled` | `system_config.py` | `/etc/locale.gen` |
@@ -203,6 +204,7 @@ def esc(text: object) -> str:
 CommandResult(returncode, stdout, stderr)          # .ok property = returncode == 0
 run_unprivileged(argv, input_text=None, timeout=120) -> CommandResult
 run_privileged(argv, input_text=None, timeout=600)   -> CommandResult   # via pkexec, else sudo -A, else PrivilegeError
+authenticate() -> CommandResult                      # asks for the admin password, changes nothing (runs `true` as root)
 run_privileged_streaming(argv, on_line, input_text=None, timeout=1800)   -> CommandResult   # live line-by-line output
 run_unprivileged_streaming(argv, on_line, input_text=None, timeout=1800) -> CommandResult   # same, no escalation
 path_exists(path) -> bool | None                     # None = can't tell
@@ -252,6 +254,27 @@ privileged read" rather than crashing.
 - `remove(names, purge_config=False)`, `upgrade_system`, `clean_cache`,
   `list_installed`, `list_explicit`, `list_orphans` — straightforward pacman
   wraps (`list_orphans()` has no caller yet, see the open items in section 6)
+- **The SELinux package repository.** `enable_selinux_repo()` appends the
+  archlinuxhardened project's `[selinux]` repository to `/etc/pacman.conf`,
+  exactly as their README gives it, `SigLevel = Never` included: neither
+  the repository nor its packages are signed, so pacman can only use it
+  with verification off. That is the whole trade-off - pacman then installs
+  whatever that URL serves, as root, unverified - and why Quick Setup keeps
+  it behind a lock (below). The section goes at the end of the file, so the
+  official repositories keep precedence for any package both have.
+  `pacman.conf` is backed up first, and if `pacman-conf` can't read the new
+  file back the previous content is restored: a `pacman.conf` that doesn't
+  parse stops every install and upgrade. Nothing is synced or installed by
+  it. `disable_selinux_repo()` takes the section out again (packages already
+  installed from it stay). `configured_repos()` asks `pacman-conf
+  --repo-list`, which follows `Include`, and falls back to the section
+  names in the file; `selinux_repo_enabled()` goes by that.
+  Enabling the repository replaces nothing by itself. The tools Atropa runs
+  (`policycoreutils`, `checkpolicy`, `semodule-utils`, `selinux-python` and
+  their libraries) are plain additions; the SELinux builds of core packages
+  (`coreutils-selinux`, `pam-selinux`, `systemd-selinux`, `sudo-selinux`,
+  ... or `base-selinux` for all of them) conflict with the official ones
+  and only go in when someone installs them by name.
 
 ### Network (`network.py` / `pages/network.py`)
 NetworkManager (`nmcli`) only — systemd-networkd is detected
@@ -498,6 +521,25 @@ specific paths/contexts fixed upstream) - never an AUR package build,
 that stays the existing "install it yourself first" posture. Only
 handles `MONOLITHIC = n` (modular) source trees - detected from the
 target set used, not auto-sensed from `build.conf`.
+- `fetch_atropa_policy(on_line)` - gets Atropa's own reference policy for
+  Arch (`ATROPA_POLICY_URL`, a complete modular tree whose `build.conf` says
+  `NAME = atropa-refpolicy`) into `ATROPA_POLICY_DIR`
+  (`~/.local/share/atropa/refpolicy-atropa`) with git: a shallow clone, or
+  `git pull --ff-only` on the checkout already there, so local changes are
+  never merged over. Unprivileged; nothing is built or installed. The
+  page's "Get or update" button runs it and makes the result the source
+  directory. It is still a tree whose Makefile Install runs as root - the
+  same trust Install already asks for, now placed in that repository.
+  Its `build.conf` says `TYPE = standard` only because refpolicy has no
+  "targeted" type (standard/mcs/mls are the valid ones). In practice it is
+  a targeted-style policy - `modules.conf` has the `unconfined` module on -
+  so interactive logins have to be mapped to `unconfined_u` to run in
+  `unconfined_t`. That is `activate()`'s default; the page refuses a type
+  or role (`..._t`, `..._r`) typed into the login field, which takes the
+  SELinux user.
+- `policy_name_of(source_dir)` - `NAME` from the tree's `build.conf`. The
+  page fills the policy-name field from it when a source directory is
+  chosen, since Activate needs that name exactly.
 - `build(source_dir, on_line)` - `make conf all`, unprivileged, via the
   newly-added `run_unprivileged_streaming()` in `privilege.py`.
 - `install(source_dir, on_line)` - `make install load`, privileged. Plain
@@ -582,7 +624,8 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   Setup then ran `setenforce` on a disabled SELinux. The page says the
   tools are installed but SELinux is off.
 - `SELINUX_TOOL_PACKAGES` names the package behind each tool Atropa runs -
-  all AUR-only on Arch: `checkmodule` is in `checkpolicy`,
+  none of them in Arch's official repositories (they come from the AUR, or
+  from the unsigned repository `pacman.enable_selinux_repo()` adds): `checkmodule` is in `checkpolicy`,
   `semodule_package` in `semodule-utils`, `audit2allow`/`audit2why`/
   `semanage` in `selinux-python` (not `audit`), `getsebool` in
   `libselinux`, the rest in `policycoreutils`. `missing_tool_error(tool)`
@@ -691,10 +734,11 @@ backed up, then `locale-gen`), `list_keymaps`/`set_keymap`,
 (`_MAX_RENDERED_MATCHES`).
 
 ### Security Quick Setup (`quicksetup.py` / `pages/quicksetup.py`)
-`CATALOG` of `SetupItem(key, title, description, default_selected, risk_note)`
-for firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard
-(`default_selected=False`) and SELinux (permissive only). `status_summary()`,
-`apply_single(key, on_line)`, `apply_items(keys, on_line) -> dict[str,
+`CATALOG` of `SetupItem(key, title, description, default_selected, risk_note,
+locked)` for firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard
+(`default_selected=False`), the SELinux package repository (`locked`) and
+SELinux (permissive only). `status_summary()`, `apply_single(key, on_line,
+unlocked=())`, `apply_items(keys, on_line, unlocked=()) -> dict[str,
 CommandResult]` — checklist and wizard share these. The firewall step
 allows every port sshd listens on (`SshStatus.ports` - `Port` lines
 accumulate and `ListenAddress` can name its own) before enabling
@@ -703,10 +747,36 @@ deny-by-default, and doesn't enable the firewall at all if an allow fails.
 `pacman.install()`, say - as that step's failure and carries on with the
 next one instead of aborting the batch. The AppArmor step's guidance is the
 `lsm=` kernel parameter (`hardening.APPARMOR_KERNEL_PARAMETER`). The SELinux
-step installs `audit` and, since SELinux's userspace is AUR-only, points at
-the packages in `selinux.SELINUX_TOOL_PACKAGES` instead of running a
-`pacman -S` that could only fail; a SELinux that's disabled in the kernel is
-reported as a manual step.
+step installs `audit`. SELinux's own tools aren't in the official
+repositories, so without the SELinux repository it points at the packages
+in `selinux.SELINUX_TOOL_PACKAGES` instead of running a `pacman -S` that
+could only fail. With the repository enabled it installs them with
+`pacman.upgrade_and_install_streaming()` - a full upgrade, because that is
+the only supported way for pacman to read a repository it hasn't synced
+yet. A SELinux that's disabled in the kernel is reported as a manual step:
+the SELinux builds of the base packages, a policy (the Build Policy page
+can fetch Atropa's own), the kernel parameter and the reboot stay with the
+user.
+
+**The locked item.** "SELinux package repository" adds the unsigned
+`[selinux]` repository (see Packages) and is the one item that isn't part
+of the baseline. It is locked three ways:
+- On the page its checkbox can't be ticked until the lock button next to it
+  has been opened, and that takes the administrator password
+  (`privilege.authenticate()`). A dismissed prompt leaves it locked. The
+  confirmation before applying repeats its risk note, and every lock closes
+  again when a batch or the wizard finishes. A "Remove" button appears
+  while the repository is enabled and works only while unlocked.
+- In the backend `apply_items()` and `apply_single()` refuse a locked key
+  that isn't also in `unlocked` - being in the list of keys isn't enough.
+- Profile import never passes `unlocked`, and filters locked keys out
+  itself with a line saying so: a profile is a file, hand-edited or someone
+  else's, and mustn't be a way past the lock. Locked items aren't exported.
+
+`status_summary()` works out each line on its own (`_STATUS_LINES`): a
+check that fails says "Couldn't check: ..." in its own line. One missing
+tool used to raise out of the whole function and leave the page with an
+error toast and no statuses at all.
 
 ### Security Profiles (`profiles.py` / `pages/profiles.py`)
 `export_profile() -> dict`, `save_profile_to_file`, `load_profile_from_file`,
@@ -721,14 +791,16 @@ are left alone, `PermitRootLogin` is replayed exactly via
 AppArmor modes other than enforce/complain are skipped, and anything already
 at the target value isn't re-applied. Each section runs isolated. Changed
 SELinux booleans go in a single `selinux.set_booleans()` call - one prompt
-and one policy rebuild, not one of each per boolean.
+and one policy rebuild, not one of each per boolean. A locked Quick Setup
+item is never applied from a profile (see Security Quick Setup).
 
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
 required, note)`; `check_all() -> list[DependencyStatus]`,
 `missing_required()`, `summary_counts()`. AUR-only tools (paru/yay, aide,
 and SELinux's userspace tools - their notes are built from
-`selinux.SELINUX_TOOL_PACKAGES`) have `package=None` and a note instead of
+`selinux.SELINUX_TOOL_PACKAGES` and mention the Quick Setup repository as
+the other way to get them) have `package=None` and a note instead of
 an Install button that would run `pacman -S` and fail. `checkupdates`
 (pacman-contrib) and `fakeroot` are listed for the Packages page's live
 update check.
@@ -809,6 +881,13 @@ every attempt for the same reason.
 firewall on, turning SSH password logins off, moving the SSH port, allowing
 empty passwords, locking a password, stopping or disabling a service.
 
+**Two controls are locked on top of that.** The SELinux enforcing switch
+has a click-to-arm lock - no password, it stops a stray click or drag.
+Quick Setup's locked item takes the administrator password to unlock
+(`privilege.authenticate()`), locks again after every run, and is refused
+by the backend for any caller that doesn't say it was unlocked (see
+Security Quick Setup in section 2).
+
 **The progress dialog has "Hide".** `run_streaming_operation()`'s dialog
 used to be unclosable until its command finished or timed out (30 minutes
 for an upgrade). Hiding it leaves the command running, and the usual
@@ -854,14 +933,15 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 727 tests across
+**There's a real pytest suite**: `tests/`, 765 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
 started from, and `subprocess.run`, with a prefix-matching response registry),
 `fake_which` (controls which CLI tools "exist"), `privilege_paths`
 (**autouse**: redirects `HOME`, the action log, backups, SELinux review
-artifacts and the legacy ArchYaST dir into `tmp_path`) and `kernel_state`
+artifacts, the downloaded policy source and the legacy ArchYaST dir into
+`tmp_path`) and `kernel_state`
 (**autouse**: points the checks that read live kernel state - the active LSM
 list, AppArmor's enabled flag and its securityfs directory - at files under
 `tmp_path`) — which is enough to unit-test
@@ -953,8 +1033,12 @@ exactly one definition.
   `/etc/security/faillock.conf` parameters are editable, and only if
   `pam_faillock` is already referenced (same for `pwquality.conf` /
   `pam_pwquality`)
-- **AUR-only tools** (AIDE, paru/yay, SELinux's userspace tools and policy):
-  detected and managed once installed, never built or installed by Atropa
+- **AUR-only tools** (AIDE, paru/yay): detected and managed once installed,
+  never built or installed by Atropa
+- **Turning SELinux on**: Atropa can install SELinux's tools (from the
+  unsigned repository, behind the Quick Setup lock) and fetch, build,
+  install and activate a policy. Swapping the base packages for their
+  SELinux builds, the kernel parameter and the reboot are not automated
 - **Plugins**: declarative TOML only, limited to actions in
   `plugin_registry.REGISTRY`; enabling/disabling takes effect on next launch
 - **AUR builds**: shells out to `paru`/`yay` if present, no PKGBUILD review/sandboxing
@@ -968,7 +1052,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (727 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (765 tests as of the latest pass, across all 23 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2002,6 +2086,34 @@ exactly one definition.
   because none of them had `bootctl` and GRUB installed together, which is
   every real GRUB machine.
 
+- ✅ **SELinux from inside Atropa: the tools and the policy.** Two things
+  that used to be "do it yourself first":
+  1. **The tools.** SELinux's userspace isn't in Arch's official
+     repositories. The archlinuxhardened project publishes a binary
+     repository, and Quick Setup can now add it to `pacman.conf` so the
+     SELinux step installs the tools with pacman. It is unsigned
+     (`SigLevel = Never`, as its own README says it has to be), so pacman
+     installs from it unverified, as root. Hence the lock: the item can't
+     be ticked without the administrator password, the confirmation
+     repeats what it does, the backend refuses it for any caller that
+     doesn't pass it as unlocked, and profile import never does - before
+     that last part, a hand-edited profile containing its key would have
+     switched the repository on with no lock at all.
+  2. **The policy.** The Build Policy page can fetch Atropa's own
+     reference policy and fills in its name. It is targeted-style despite
+     `TYPE = standard` in its `build.conf`, so Activate's default login
+     mapping to `unconfined_u` is the one it needs.
+
+  Still manual: swapping the base packages for their SELinux builds, the
+  kernel parameter, and the reboot. Quick Setup's status lines became
+  independent of each other in the same change.
+
+  How far this was checked: against real pacman, the repository was
+  accepted, synced, and the five tool packages resolved from it; removing
+  it left `pacman.conf` byte-identical. The packages are x86_64-only and
+  the machine this was written on isn't, so the install itself, and
+  building the policy with the installed tools, are unverified.
+
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
   since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
@@ -2021,6 +2133,10 @@ exactly one definition.
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
 **Still open from the full-repo audit** (rough priority order):
+- Run the SELinux path once on x86_64: Quick Setup's repository item and
+  SELinux step through to installed tools, then Get, Build and Install on
+  the Build Policy page (see the entry above for what was and wasn't
+  checked)
 - Check bootloader detection on a real UEFI machine that boots GRUB: the
   fix above rests on GRUB 2.12 writing "GRUB ..." to `LoaderInfo` and on
   `bootctl --print-esp-path` answering there, neither of which could be
@@ -2038,10 +2154,6 @@ exactly one definition.
   from the Dependencies page. `atropa.desktop` lists two main categories
   (`Settings;System;`), which `desktop-file-validate` flags because the app
   may show up twice in menus
-- Quick Setup's status summary fails as a whole when one item's check
-  raises: with SELinux in the kernel but no `sestatus` installed, the page
-  shows a "Couldn't check current status" toast instead of the other
-  items' status
 - The single privileged helper (see Architecture): one root helper per
   operation instead of one pkexec prompt per command. Its design gets
   agreed before any code. It is also where backups should move to

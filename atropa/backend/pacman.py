@@ -15,10 +15,32 @@ from __future__ import annotations
 import re
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 
-from .privilege import CommandResult, run_privileged, run_privileged_streaming, run_unprivileged
+from .privilege import (
+    CommandResult,
+    PrivilegeError,
+    backup_file,
+    run_privileged,
+    run_privileged_streaming,
+    run_unprivileged,
+)
 
 AUR_HELPERS = ["paru", "yay"]  # checked in priority order
+
+PACMAN_CONF = Path("/etc/pacman.conf")
+
+# The archlinuxhardened project's binary repository: SELinux's userspace
+# tools, policies, and SELinux-enabled builds of core packages. Neither the
+# repository nor its packages are signed, so pacman can only use it with
+# signature checking off - their README says the same. Enabling it means
+# pacman installs whatever that URL serves, as root, unverified.
+SELINUX_REPO_NAME = "selinux"
+SELINUX_REPO_SERVER = "https://github.com/archlinuxhardened/selinux/releases/download/ArchLinux-SELinux"
+_SELINUX_REPO_COMMENTS = (
+    "# Added by Atropa: SELinux packages from https://github.com/archlinuxhardened/selinux",
+    "# The repository is unsigned, so pacman does not verify what it installs from it.",
+)
 
 
 class PartialUpgradeError(RuntimeError):
@@ -231,3 +253,111 @@ def remove(package_names: list[str], purge_config: bool = False) -> CommandResul
 def clean_cache() -> CommandResult:
     """pacman -Sc : remove uninstalled/old packages from the cache."""
     return run_privileged(["pacman", "-Sc", "--noconfirm"])
+
+
+# ------------------------------------------------------- repositories --
+
+_SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*$")
+
+
+def _sections_in(conf_text: str) -> list[str]:
+    """Repository section names in pacman.conf text, in order ([options] isn't one)."""
+    names = [m.group(1) for m in map(_SECTION_RE.match, conf_text.splitlines()) if m]
+    return [name for name in names if name != "options"]
+
+
+def configured_repos() -> list[str]:
+    """
+    The repositories pacman uses, in order. Asks pacman itself
+    (pacman-conf follows Include lines); falls back to the section names
+    in pacman.conf when that can't be run.
+    """
+    try:
+        result = run_unprivileged(["pacman-conf", "--repo-list"])
+    except PrivilegeError:
+        result = None
+    if result is not None and result.ok:
+        return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    try:
+        return _sections_in(PACMAN_CONF.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return []
+
+
+def selinux_repo_enabled() -> bool:
+    return SELINUX_REPO_NAME in configured_repos()
+
+
+def _selinux_repo_block() -> str:
+    return "\n".join(
+        [*_SELINUX_REPO_COMMENTS, f"[{SELINUX_REPO_NAME}]", f"Server = {SELINUX_REPO_SERVER}", "SigLevel = Never"]
+    ) + "\n"
+
+
+def _without_section(conf_text: str, name: str) -> str:
+    """
+    conf_text without the [name] section: its header, everything up to the
+    next section, and the comment lines Atropa put above it.
+    """
+    lines = conf_text.splitlines()
+    kept: list[str] = []
+    skipping = False
+    for line in lines:
+        section = _SECTION_RE.match(line)
+        if section:
+            skipping = section.group(1) == name
+            if skipping:
+                while kept and (kept[-1].strip() in _SELINUX_REPO_COMMENTS or not kept[-1].strip()):
+                    kept.pop()
+        if not skipping:
+            kept.append(line)
+    return "\n".join(kept) + "\n"
+
+
+def enable_selinux_repo() -> CommandResult:
+    """
+    Adds the [selinux] repository at the end of pacman.conf - after the
+    official repositories, so those keep precedence for any package both
+    have. pacman.conf is backed up first, and if pacman can't read the new
+    file the previous content goes back: a pacman.conf that doesn't parse
+    stops every install and upgrade.
+
+    Nothing is downloaded or installed here. pacman first sees the
+    repository at its next sync - which in Atropa is always a full upgrade.
+    """
+    if selinux_repo_enabled():
+        return CommandResult(0, "already enabled", "")
+    original = PACMAN_CONF.read_text(encoding="utf-8")
+    updated = original.rstrip("\n") + "\n\n" + _selinux_repo_block()
+
+    backup_file(str(PACMAN_CONF))
+    result = run_privileged(["tee", str(PACMAN_CONF)], input_text=updated)
+    if not result.ok:
+        return result
+    try:
+        check = run_unprivileged(["pacman-conf", "--repo-list"])
+    except PrivilegeError:
+        return result  # no pacman-conf to ask
+    if check.ok and SELINUX_REPO_NAME in check.stdout.split():
+        return result
+
+    problem = check.stderr.strip() or f"it doesn't list [{SELINUX_REPO_NAME}]"
+    restore = run_privileged(["tee", str(PACMAN_CONF)], input_text=original)
+    if restore.ok:
+        raise RuntimeError(f"pacman couldn't use the new pacman.conf ({problem}). Restored the previous one.")
+    raise RuntimeError(
+        f"pacman couldn't use the new pacman.conf ({problem}), and restoring the previous one ALSO failed "
+        f"({restore.stderr.strip() or 'unknown error'}) - restore it from Activity & Backups before using pacman."
+    )
+
+
+def disable_selinux_repo() -> CommandResult:
+    """
+    Takes the [selinux] section back out of pacman.conf. Packages already
+    installed from it stay installed; pacman just stops looking there.
+    """
+    original = PACMAN_CONF.read_text(encoding="utf-8")
+    if SELINUX_REPO_NAME not in _sections_in(original):
+        return CommandResult(0, "not enabled in pacman.conf", "")
+    backup_file(str(PACMAN_CONF))
+    return run_privileged(["tee", str(PACMAN_CONF)], input_text=_without_section(original, SELINUX_REPO_NAME))

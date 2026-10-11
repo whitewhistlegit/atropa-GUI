@@ -14,6 +14,11 @@ need a reboot and carry real risk of a bad boot if done wrong: adding
 AppArmor/SELinux kernel parameters, and wiring pam_faillock into PAM.
 Those stay manual, cross-referenced from the messages this module prints.
 
+One item is not part of the baseline and is locked in the UI: adding the
+unsigned SELinux package repository to pacman.conf. It only lets the
+SELinux step install SELinux's tools; swapping the base packages for their
+SELinux builds stays manual too.
+
 This module composes existing backend functions rather than duplicating
 their logic - it is an orchestrator, not a new source of truth for how
 any single tool gets configured.
@@ -22,6 +27,7 @@ any single tool gets configured.
 from __future__ import annotations
 
 import shutil
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Callable
 
@@ -36,6 +42,7 @@ class SetupItem:
     description: str
     default_selected: bool = True
     risk_note: str = ""  # shown as a warning in the UI if non-empty
+    locked: bool = False  # can't be selected until the administrator password has unlocked it
 
 
 CATALOG: list[SetupItem] = [
@@ -78,20 +85,35 @@ CATALOG: list[SetupItem] = [
         ),
     ),
     SetupItem(
+        "selinux_repo", "SELinux package repository",
+        "Adds the archlinuxhardened project's [selinux] repository to pacman.conf, so the "
+        "SELinux step below can install SELinux's tools with pacman instead of from the AUR. "
+        "Locked until you unlock it with the administrator password.",
+        default_selected=False,
+        risk_note=(
+            "The repository and its packages are unsigned, so it is added with SigLevel = Never: "
+            f"pacman installs whatever {pacman.SELINUX_REPO_SERVER} serves, as root, without "
+            "verifying it. Enable it only if you trust that project."
+        ),
+        locked=True,
+    ),
+    SetupItem(
         "selinux", "SELinux",
         "Installs audit (for reviewing denials) and puts an enabled SELinux into permissive "
-        "mode. SELinux's own tools and a policy are AUR-only on Arch (policycoreutils, "
-        "checkpolicy, semodule-utils, selinux-python, and e.g. refpolicy-arch) - install those "
-        "with your AUR helper first. Enabling enforcement also needs a kernel parameter and a "
-        "reboot - not automated here.",
+        "mode. SELinux's own tools aren't in Arch's official repositories: with the SELinux "
+        "package repository above enabled they're installed from it, otherwise install them "
+        "from the AUR first (policycoreutils, checkpolicy, semodule-utils, selinux-python). "
+        "Turning SELinux on also needs SELinux-enabled base packages, a policy (see SELinux: "
+        "Build Policy), a kernel parameter and a reboot - not automated here.",
     ),
 ]
 
 # Fixed, safety-conscious order regardless of what the caller passes in:
 # firewall always runs first (and pre-allows SSH before enabling deny-by-default),
 # so nothing later runs against a freshly-locked-down network stack before SSH
-# access is confirmed preserved.
-_ORDER = ["firewall", "fail2ban", "sysctl", "faillock", "apparmor", "auditd", "usbguard", "selinux"]
+# access is confirmed preserved. The SELinux repository goes in right before
+# the SELinux step that installs from it.
+_ORDER = ["firewall", "fail2ban", "sysctl", "faillock", "apparmor", "auditd", "usbguard", "selinux_repo", "selinux"]
 
 
 def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
@@ -225,6 +247,24 @@ def _apply_usbguard(on_line: Callable[[str], None]) -> CommandResult:
     return result
 
 
+def _apply_selinux_repo(on_line: Callable[[str], None]) -> CommandResult:
+    on_line("=== SELinux package repository ===")
+    if pacman.selinux_repo_enabled():
+        on_line("Already enabled - nothing to do.")
+        return CommandResult(0, "already enabled", "")
+    on_line(
+        f"Adding [{pacman.SELINUX_REPO_NAME}] to {pacman.PACMAN_CONF} with SigLevel = Never - "
+        "pacman won't verify the packages it installs from it..."
+    )
+    result = pacman.enable_selinux_repo()
+    on_line(
+        "Repository added. pacman reads it at the next full upgrade."
+        if result.ok
+        else f"Failed to add the repository: {result.stderr.strip()}"
+    )
+    return result
+
+
 def _apply_selinux(on_line: Callable[[str], None]) -> CommandResult:
     on_line("=== SELinux ===")
     if shutil.which("ausearch") is None:
@@ -235,22 +275,36 @@ def _apply_selinux(on_line: Callable[[str], None]) -> CommandResult:
             return result
 
     if shutil.which("sestatus") is None:
-        # The old `pacman -S policycoreutils checkpolicy audit` could only
-        # fail: the SELinux userspace isn't in Arch's official repositories.
         packages = sorted(set(selinux.SELINUX_TOOL_PACKAGES.values()))
+        if not pacman.selinux_repo_enabled():
+            # A plain `pacman -S policycoreutils checkpolicy` can only fail:
+            # the SELinux userspace isn't in Arch's official repositories.
+            on_line(
+                "SELinux's userspace tools aren't in Arch's official repositories - install them from the "
+                f"AUR ({', '.join(packages)}) with your AUR helper, or enable 'SELinux package repository' "
+                "in this list to have pacman install them, then run this step again."
+            )
+            return CommandResult(
+                0, "skipped: SELinux's tools need the AUR or the SELinux repository - a manual step", ""
+            )
         on_line(
-            "SELinux's userspace tools aren't in Arch's official repositories - install them from the "
-            f"AUR ({', '.join(packages)}) with your AUR helper, along with a policy package (e.g. "
-            "refpolicy-arch), then run this step again."
+            f"Installing SELinux's tools from the [{pacman.SELINUX_REPO_NAME}] repository "
+            f"({', '.join(packages)}). pacman only reads a new repository as part of a full upgrade, "
+            "so this upgrades the system as well..."
         )
-        return CommandResult(0, "skipped: SELinux userspace tools are AUR-only - a manual step", "")
+        result = pacman.upgrade_and_install_streaming(packages, on_line)
+        if not result.ok:
+            on_line("Failed to install SELinux's tools - see pacman's output above.")
+            return result
 
     status = selinux.get_status()
     if not status.available:
         on_line(
-            "SELinux isn't enabled at the kernel level. That needs a policy package (e.g. "
-            "refpolicy-arch from the AUR), a kernel parameter, and a reboot - none of which "
-            "is automated here. The tools are installed and ready for when you do this manually."
+            "SELinux isn't enabled at the kernel level. That needs SELinux-enabled base packages "
+            "(base-selinux, from the SELinux repository or the AUR), a policy (Atropa's own can be "
+            "fetched and built on the 'SELinux: Build Policy' page), a kernel parameter, and a "
+            "reboot - none of which is automated here. The tools are installed and ready for when "
+            "you do this manually."
         )
         return CommandResult(0, "tools installed; kernel enablement is a manual step", "")
 
@@ -272,73 +326,115 @@ _APPLIERS: dict[str, Callable[[Callable[[str], None]], CommandResult]] = {
     "apparmor": _apply_apparmor,
     "auditd": _apply_auditd,
     "usbguard": _apply_usbguard,
+    "selinux_repo": _apply_selinux_repo,
     "selinux": _apply_selinux,
 }
 
 
-def status_summary() -> dict[str, str]:
-    """One human-readable status line per catalog key, for display before applying."""
-    summary: dict[str, str] = {}
+def _service_line(status: hardening.ServiceHardeningStatus) -> str:
+    return "Active" if status.active else ("Installed, inactive" if status.installed else "Not installed")
 
+
+def _firewall_line() -> str:
     fw = security.firewall_status()
-    summary["firewall"] = "Active" if fw.active else ("Installed, inactive" if fw.backend != "none" else "Not installed")
+    return "Active" if fw.active else ("Installed, inactive" if fw.backend != "none" else "Not installed")
 
-    f2b = hardening.fail2ban_status()
-    summary["fail2ban"] = "Active" if f2b.active else ("Installed, inactive" if f2b.installed else "Not installed")
 
+def _sysctl_line() -> str:
     gaps, available = hardening.sysctl_hardening_gaps()
-    summary["sysctl"] = (
-        "Couldn't read sysctl values" if not available
-        else "All recommended settings in effect" if not gaps
-        else f"{len(gaps)} of {available} recommended settings not in effect"
-    )
+    if not available:
+        return "Couldn't read sysctl values"
+    if not gaps:
+        return "All recommended settings in effect"
+    return f"{len(gaps)} of {available} recommended settings not in effect"
 
-    if hardening.faillock_wired_into_pam():
-        fl = hardening.faillock_status()
-        summary["faillock"] = f"Wired in - deny={fl.get('deny', '?')}, unlock_time={fl.get('unlock_time', '?')}"
-    else:
-        summary["faillock"] = "Not wired into PAM (manual step required)"
 
-    aa = hardening.apparmor_status()
-    if aa.active:
-        summary["apparmor"] = "Active"
-    elif aa.installed:
-        summary["apparmor"] = "Installed, inactive"
-    else:
-        summary["apparmor"] = "Not installed"
+def _faillock_line() -> str:
+    if not hardening.faillock_wired_into_pam():
+        return "Not wired into PAM (manual step required)"
+    fl = hardening.faillock_status()
+    return f"Wired in - deny={fl.get('deny', '?')}, unlock_time={fl.get('unlock_time', '?')}"
 
-    ad = hardening.auditd_status()
-    summary["auditd"] = "Active" if ad.active else ("Installed, inactive" if ad.installed else "Not installed")
 
-    ug = hardening.usbguard_status()
-    summary["usbguard"] = "Active" if ug.active else ("Installed, inactive" if ug.installed else "Not installed")
-
+def _selinux_line() -> str:
     sl = selinux.get_status()
-    summary["selinux"] = sl.mode.capitalize() if sl.available else "Not enabled at kernel level"
+    return sl.mode.capitalize() if sl.available else "Not enabled at kernel level"
 
+
+_STATUS_LINES: dict[str, Callable[[], str]] = {
+    "firewall": _firewall_line,
+    "fail2ban": lambda: _service_line(hardening.fail2ban_status()),
+    "sysctl": _sysctl_line,
+    "faillock": _faillock_line,
+    "apparmor": lambda: _service_line(hardening.apparmor_status()),
+    "auditd": lambda: _service_line(hardening.auditd_status()),
+    "usbguard": lambda: _service_line(hardening.usbguard_status()),
+    "selinux_repo": lambda: "Enabled (unsigned)" if pacman.selinux_repo_enabled() else "Not enabled",
+    "selinux": _selinux_line,
+}
+
+
+def status_summary() -> dict[str, str]:
+    """
+    One human-readable status line per catalog key, for display before
+    applying. Each line is worked out on its own: a check that fails says
+    so in its own line instead of taking every other line down with it -
+    one missing tool used to leave the whole checklist without a status.
+    """
+    summary: dict[str, str] = {}
+    for key, line in _STATUS_LINES.items():
+        try:
+            summary[key] = line()
+        except Exception as exc:  # noqa: BLE001 - shown in that item's own line
+            summary[key] = f"Couldn't check: {exc}"
     return summary
 
 
-def apply_single(key: str, on_line: Callable[[str], None]) -> CommandResult:
+_LOCKED_KEYS = frozenset(item.key for item in CATALOG if item.locked)
+
+
+def _locked_refusal(key: str, unlocked: Collection[str]) -> str | None:
+    """
+    Why a locked item won't run, or None. Being in the list of keys isn't
+    enough for one: the caller has to say it was unlocked, so a profile
+    import or any other batch can't switch it on in passing.
+    """
+    if key in _LOCKED_KEYS and key not in unlocked:
+        return "it is locked - unlock it with the administrator password in Security Quick Setup first"
+    return None
+
+
+def apply_single(key: str, on_line: Callable[[str], None], unlocked: Collection[str] = ()) -> CommandResult:
     """Applies exactly one catalog item by key - used by the step-by-step
     wizard, where each step is confirmed and run individually rather than
     as part of a batch. Raises KeyError for an unknown key rather than
-    silently doing nothing."""
-    return _APPLIERS[key](on_line)
+    silently doing nothing, and RuntimeError for a locked item whose key
+    isn't in `unlocked`."""
+    applier = _APPLIERS[key]
+    refusal = _locked_refusal(key, unlocked)
+    if refusal:
+        raise RuntimeError(f"Not applying '{key}': {refusal}")
+    return applier(on_line)
 
 
-def apply_items(keys: list[str], on_line: Callable[[str], None]) -> dict[str, CommandResult]:
+def apply_items(
+    keys: list[str], on_line: Callable[[str], None], unlocked: Collection[str] = ()
+) -> dict[str, CommandResult]:
     """
     Applies each selected catalog item in a fixed, safety-conscious order
     (see _ORDER) regardless of the order `keys` was given in, streaming a
     human-readable progress line to on_line before/after each step.
     Returns a per-key CommandResult so the caller can report exactly what
-    succeeded, failed, or was intentionally skipped.
+    succeeded, failed, or was intentionally skipped. A locked item is
+    refused unless its key is also in `unlocked`.
     """
     results: dict[str, CommandResult] = {}
     ordered_keys = [key for key in _ORDER if key in keys]
     for key in ordered_keys:
         try:
+            refusal = _locked_refusal(key, unlocked)
+            if refusal:
+                raise RuntimeError(f"Not applying '{key}': {refusal}")
             results[key] = _APPLIERS[key](on_line)
         except Exception as exc:  # noqa: BLE001 - one step's error (e.g. a refused install) mustn't skip the rest
             on_line(f"Failed: {exc}")

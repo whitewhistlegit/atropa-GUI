@@ -41,6 +41,71 @@ def source_dir(tmp_path):
     return str(d)
 
 
+# --------------------------------------------------------------- Atropa's own policy --
+
+@pytest.fixture
+def streamed(monkeypatch):
+    """Records the commands the streaming runner is asked for, without running them."""
+    calls = []
+
+    def run(argv, on_line, timeout=1800):
+        calls.append(argv)
+        return refpolicy_build.CommandResult(0, "", "")
+
+    monkeypatch.setattr(refpolicy_build, "run_unprivileged_streaming", run)
+    return calls
+
+
+def test_fetch_atropa_policy_clones_into_the_users_data_dir(fake_which, streamed):
+    fake_which.add("git")
+    target = refpolicy_build.ATROPA_POLICY_DIR
+    assert refpolicy_build.fetch_atropa_policy(lambda _l: None).ok
+    assert streamed == [["git", "clone", "--depth", "1", "https://github.com/whitewhistlegit/refpolicy-atropa", str(target)]]
+    assert target.parent.is_dir()  # git creates the checkout itself, but not the directories above it
+
+
+def test_fetch_atropa_policy_fast_forwards_an_existing_checkout(fake_which, streamed):
+    fake_which.add("git")
+    target = refpolicy_build.ATROPA_POLICY_DIR
+    (target / ".git").mkdir(parents=True)
+    refpolicy_build.fetch_atropa_policy(lambda _l: None)
+    # --ff-only: local changes are never merged over or thrown away.
+    assert streamed == [["git", "-C", str(target), "pull", "--ff-only"]]
+
+
+def test_fetch_atropa_policy_wont_clone_over_something_else(fake_which, streamed):
+    fake_which.add("git")
+    target = refpolicy_build.ATROPA_POLICY_DIR
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("mine")
+    with pytest.raises(RuntimeError, match="isn't a git checkout"):
+        refpolicy_build.fetch_atropa_policy(lambda _l: None)
+    assert streamed == []
+
+
+def test_fetch_atropa_policy_needs_git(fake_which, streamed):
+    with pytest.raises(RuntimeError, match="pacman -S git"):
+        refpolicy_build.fetch_atropa_policy(lambda _l: None)
+    assert streamed == []
+
+
+@pytest.mark.parametrize(
+    ("build_conf", "expected"),
+    [
+        ("TYPE = standard\nNAME = atropa-refpolicy\nMONOLITHIC = n\n", "atropa-refpolicy"),
+        ("# NAME = commented\nNAME=refpolicy-arch\n", "refpolicy-arch"),
+        ("TYPE = standard\n", None),
+        ("NAME = ../../etc\n", None),  # ends up as a directory name and SELINUXTYPE
+        (None, None),  # no build.conf at all
+    ],
+    ids=["atropa", "no-spaces", "unset", "not-a-name", "no-file"],
+)
+def test_policy_name_of_reads_build_conf(tmp_path, build_conf, expected):
+    if build_conf is not None:
+        (tmp_path / "build.conf").write_text(build_conf)
+    assert refpolicy_build.policy_name_of(str(tmp_path)) == expected
+
+
 # --------------------------------------------------------------- build --
 
 def test_build_missing_make_raises(fake_which, source_dir):
