@@ -7,8 +7,8 @@ internals reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~10,700 lines of Python across 23 backend modules and 22 UI
-pages, plus a 555-test pytest suite (~6,200 lines).** No GTK4/libadwaita is
+Current size: **~11,000 lines of Python across 23 backend modules and 22 UI
+pages, plus a 599-test pytest suite (~6,700 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -75,9 +75,18 @@ run_privileged(argv, input_text=None, timeout=600)     # via pkexec (falls back 
 
 `run_privileged` prepends `pkexec` to the argv and shells out — this pops a
 **native polkit auth dialog** scoped to that one command; there's no
-persistent root session and no setuid binary. `resources/org.atropa.pkexec.policy`
-customizes the prompt text and sets `allow_active = auth_admin_keep`, so
-consecutive privileged actions in a short window don't re-prompt every time.
+persistent root session and no setuid binary.
+
+**The shipped polkit policy is not actually in effect.** `resources/org.atropa.pkexec.policy`
+declares an `org.atropa.pkexec.run` action with `allow_active = auth_admin_keep`,
+but pkexec only switches to a custom action when it carries an
+`org.freedesktop.policykit.exec.path` annotation naming the program being run
+(pkexec(1)). This one has none, so every call uses the generic
+`org.freedesktop.policykit.exec` action, which asks for the password every time -
+one prompt per privileged *primitive* (`sed`, `tee`, `systemctl`, ...), not per
+operation. The planned fix is a single privileged helper invoked once per
+operation; annotating generic binaries like `tee`/`bash` with `auth_admin_keep`
+is not a safe shortcut (it would make them passwordless root for the keep window).
 
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
@@ -192,7 +201,9 @@ get_recent_actions(limit=200) -> list[str]           # most-recent-first tail of
 NetworkManager (`nmcli`) only — systemd-networkd is detected
 (`backend_available()` returns `"networkmanager" | "networkd" | "none"`) but
 **read-only**, no write support yet (noted as a known limitation).
-- `list_devices`, `list_wifi(rescan=False)`, `connect_wifi(ssid, password=None)`,
+- `list_devices`, `list_wifi(rescan=False)`, `connect_wifi(ssid, password=None)`
+  (the password goes to `nmcli --ask` on **stdin**, never argv - see the
+  last bug-fix entry in section 6),
   `disconnect`, `set_static_ip(connection_name, ip_cidr, gateway, dns)`,
   `set_dhcp`, `toggle_networking`
 
@@ -236,8 +247,11 @@ CIS settings `set_ssh_log_level` (INFO/VERBOSE only), `set_ssh_x11_forwarding`,
 which has the backup+`sshd -t`-validate+rollback logic described above).
 `firewall_status()` reads `ufw status verbose` / `firewall-cmd --list-all`
 **privileged** (both silently return empty output without root);
-`firewall_allow_port`/`firewall_deny_port(port, protocol="tcp")`. `sudoers_check()` runs `visudo -cf` (read-only,
-syntax-check only).
+`firewall_allow_port`/`firewall_deny_port(port, protocol="tcp")` (on a stopped
+firewalld these go through `firewall-offline-cmd`, since `firewall-cmd` needs
+the daemon). `sudoers_check() -> CommandResult` runs `visudo -cf /etc/sudoers`
+**privileged** - sudoers is 0440 root:root, so unprivileged visudo can only
+report "Permission denied" - read-only, syntax-check only; callers go by `.ok`.
 
 ### Hardening (`hardening.py` / `pages/hardening.py`)
 The "basic toggle" layer — NOT the deep AppArmor/SELinux pages (those are
@@ -257,7 +271,12 @@ separate, richer modules; see below). Covers:
   (`faillock_status`/`set_faillock_policy` — **only touches
   `/etc/security/faillock.conf`**, never auto-wires `pam_faillock` into the PAM
   stack itself, since a bad PAM edit can lock out every account with no easy
-  recovery outside a live USB)
+  recovery outside a live USB). `faillock_wired_into_pam()` /
+  `pwquality_wired_into_pam()` follow `include`/`substack`/`@include` and ignore
+  comments - on Arch, `system-login` only includes `system-auth`, which is
+  where pambase wires faillock in; pwquality also checks the `passwd` service.
+  `vulnerability_scan()` raises when `arch-audit` itself fails (e.g. offline)
+  rather than returning an empty "nothing vulnerable" list.
 - `run_audit() -> list[AuditCheck]` — rollup pass/warn/fail/info across all of
   the above plus firewall/SSH from `security.py` plus SELinux status; powers
   the "Security Audit" score section
@@ -286,8 +305,10 @@ duplication). No `install()` function on purpose.
 - `initialize_baseline(on_line)` / `update_baseline(on_line)` - same
   mechanism (`aide --init` + promote), two names for two different human
   intents. `run_check(on_line)` - `aide --check`, parse via
-  `parse_check_summary()` (returns `None`, never a fabricated `0/0/0`,
-  when AIDE's own summary block is absent from the output).
+  `parse_check_summary(output, returncode)`. AIDE prints its "Summary:"
+  block only when it found differences, so a clean run is recognized from
+  its own "found NO differences" message or exit status 0; otherwise
+  `None` (never a fabricated `0/0/0`) when there's no report at all.
   All three stream through `run_streaming_operation()` - a full-tree walk
   can take minutes.
 - `enable_timer(unit)` / `disable_timer(unit)` - operate on whatever
@@ -396,7 +417,11 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   → `group_denials()` → `classify_denials()` (`new` / `already_allowed` /
   `undefined_in_policy`), wrapped by `review_all_denials(source="both",
   since_setup_mode=True) -> ExtensiveDenialReview` which also diffs against
-  `last_review.json` to produce `resolved`. Details in section 6.
+  `last_review.json` to produce `resolved`. Details in section 6. Time
+  scoping uses absolute instants: journalctl gets `--since @<epoch>`, and
+  audit-log records are filtered on their own `msg=audit(<epoch>)` stamps
+  rather than via ausearch's locale-dependent `-ts`; a failed audit-log read
+  raises when the audit log is the requested source.
 - `list_semodules()` — `semodule -l`, **privileged** (unprivileged it
   silently returns nothing)
 - `compile_and_load_te(te_content, module_name)` — the single-file
@@ -467,14 +492,21 @@ for firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard
 (`default_selected=False`) and SELinux (permissive only). `status_summary()`,
 `apply_single(key, on_line)`, `apply_items(keys, on_line) -> dict[str,
 CommandResult]` — checklist and wizard share these. The firewall step
-allows the configured SSH port before enabling deny-by-default.
+allows the configured SSH port before enabling deny-by-default, and doesn't
+enable the firewall at all if that allow fails.
 
 ### Security Profiles (`profiles.py` / `pages/profiles.py`)
 `export_profile() -> dict`, `save_profile_to_file`, `load_profile_from_file`,
 `summarize_profile -> ProfileSummary`, `import_profile(profile, sections,
 on_line) -> dict[str, CommandResult]`. Quick-setup modules are replayed via
 `quicksetup.apply_items()`; AppArmor modes and SELinux booleans value-for-
-value; the `ssh` section is unchecked by default on import (UI).
+value; the `ssh` section is unchecked by default on import (UI). Only
+explicit, recognized values are applied: SSH settings exported as `unknown`
+(not set in `sshd_config`, so OpenSSH's default applies - including the port)
+are left alone, `PermitRootLogin` is replayed exactly via
+`security.set_ssh_permit_root_login()` (validated against sshd's own keywords),
+AppArmor modes other than enforce/complain are skipped, and anything already
+at the target value isn't re-applied. Each section runs isolated.
 
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
@@ -567,12 +599,13 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 555 tests across
+**There's a real pytest suite**: `tests/`, 599 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides three fixtures —
 `fake_run` (fakes `subprocess.run` with a prefix-matching response registry),
 `fake_which` (controls which CLI tools "exist"), and `privilege_paths`
-(redirects backup/log paths into `tmp_path`) — which is enough to unit-test
+(**autouse**: redirects `HOME`, the action log, backups, SELinux review
+artifacts and the legacy ArchYaST dir into `tmp_path`) — which is enough to unit-test
 parsing/logic across every module, since they all funnel through
 `privilege.run_privileged`/`run_unprivileged`. CI (`.github/workflows/ci.yml`)
 runs `py_compile` + `ruff check` + the full suite on push/PR.
@@ -605,9 +638,14 @@ always patch at `atropa.backend.privilege.subprocess.run` directly — the
 one real boundary every path funnels through regardless of which module holds
 which imported name.
 
-Tests that touch backups or the action log must use the `privilege_paths`
-fixture, which redirects `LOG_PATH`/`BACKUP_DIR`/`BACKUP_MANIFEST` into
-pytest's `tmp_path` so nothing is written under the real `~/.local/share`.
+`privilege_paths` is autouse, so every test gets those redirects without
+asking for them; request it by name only to get at the paths
+(`.log_path`, `.backup_dir`, `.manifest`, `.home`). It used to be opt-in, and
+the action log's file handler was opened at import time (ignoring any
+redirect) - between them, a single test run wrote ~1,250 fake log lines and
+several restorable "backups" into the developer's real `~/.local/share/atropa`.
+The handler now resolves `LOG_PATH` per record, and importing `privilege.py`
+creates nothing on disk.
 
 Known bugs caught **only** by these tests, not by reading the code back:
 - Duplicate `install_pp_file` definitions in `selinux.py` (second silently
@@ -649,7 +687,7 @@ exactly one definition.
 - ✅ SSH validate-before-reload with auto-rollback
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update)
-- ✅ A real pytest suite (555 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (599 tests as of the latest pass, across all 23 `backend/` modules, one
   shared `subprocess.run` fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -945,6 +983,10 @@ exactly one definition.
   the bug; worth having checked rather than assumed, since the batch
   fix is deterministic regardless of how polkit's own caching behaves
   in practice, where the policy tweak would only have been a maybe.
+  **Correction (later audit):** the policy was never in effect at all - it
+  has no `org.freedesktop.policykit.exec.path` annotation, so pkexec uses the
+  generic `org.freedesktop.policykit.exec` action (`auth_admin`, no caching)
+  for every call. See the privilege-model note in section 1.
 
 - ✅ **CIS DIL Benchmark, Phase 1** (`security.py` SSH depth,
   `hardening.py` password complexity, new `backend/audit_rules.py`) — a
@@ -1103,7 +1145,10 @@ exactly one definition.
     when AIDE's own summary block doesn't appear in the output (e.g. it
     errored before producing one) - a missing summary is a materially
     different, worse situation than a genuinely clean run, and the two
-    must never look identical to a caller.
+    must never look identical to a caller. (Corrected later: AIDE prints
+    that block only when it found differences, so a genuinely clean run
+    showed up as "no summary could be parsed" - see the bug-fix batch at
+    the end of this section.)
   - The UI's "Update baseline" action is gated behind `self.confirm()`
     with copy that says outright it accepts everything currently reported
     as the new normal - re-baselining is the correct workflow after a
@@ -1548,6 +1593,50 @@ exactly one definition.
   <version>;` declaration line (matching `audit2allow`'s own output
   format, which is what these files typically already are) and only
   falls back to the filename stem if that line isn't present.
+
+- 🐛 **Bug-fix batch from a full-repo audit** - six fixes, each with
+  regression tests verified to fail against the previous code. The common
+  thread: the old tests passed because their fixtures shared the code's own
+  assumptions (a `system-login` that names `pam_faillock` directly, a
+  `visudo` that succeeds unprivileged, an AIDE "Summary" block on a clean
+  run) - fixtures for parsed output should come from real Arch systems or
+  upstream sources, not from what the code expects.
+  1. **Tests wrote into the real home dir** - see section 4:
+     `privilege_paths` is now autouse and the action-log handler resolves
+     `LOG_PATH` per record.
+  2. **Quick Setup could enable the firewall without the SSH rule** -
+     `_apply_firewall()` ignored `firewall_allow_port()`'s result, so a
+     dismissed prompt or a ufw error still led to deny-by-default with no
+     SSH rule (the remote lockout the allow-first ordering exists to
+     prevent). It now stops. firewalld ports go through
+     `firewall-offline-cmd` while the daemon is stopped (otherwise that check
+     would have failed the step for every firewalld user), and a failed
+     `--reload` is reported.
+  3. **Profile import turned "unknown" into "no"** - a profile exported
+     from a stock `sshd_config` records `unknown` (OpenSSH defaults apply),
+     and import mapped anything but `yes` to `no`: password login got
+     disabled on the importing machine. Unknown/invalid values are now
+     skipped; see the Security Profiles summary in section 2 for the rest
+     (exact `PermitRootLogin`, explicit-only port, AppArmor 4 modes,
+     non-boolean SELinux values, section isolation).
+  4. **Four checks reported the wrong result** - faillock "not wired" on
+     every stock Arch install (only `system-login` was read; pambase puts
+     it in `system-auth`), sudoers always "Permission denied" (unprivileged
+     visudo), a failed `arch-audit` scored as "no known vulnerabilities",
+     and a clean AIDE check showed "no summary could be parsed". All four
+     fixed; the Compliance sudoers row is now `fail` on a real visudo
+     error and unscored `info` when authentication is dismissed.
+  5. **Setup Mode's time window** - journalctl read the stored UTC time
+     as local time (5h late in US Eastern), and ausearch rejected its
+     single "date time" `-ts` argument as an invalid time, which went
+     unnoticed, so Setup Mode reviews got nothing from the audit log.
+     Now `--since @<epoch>` and epoch filtering of audit records; ausearch
+     also gets `--input-logs` (with a piped stdin it otherwise reads
+     records from stdin).
+  6. **Wi-Fi password on the command line** - visible via `ps` and stored
+     in plain text in `actions.log` (and the Activity page). Now
+     `nmcli --ask` with the password on stdin. Logs written before this
+     fix may still contain `wifi connect <ssid> password <pw>` lines.
 
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
