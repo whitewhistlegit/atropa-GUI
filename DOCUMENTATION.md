@@ -7,8 +7,8 @@ internals reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~11,000 lines of Python across 23 backend modules and 22 UI
-pages, plus a 599-test pytest suite (~6,700 lines).** No GTK4/libadwaita is
+Current size: **~12,500 lines of Python across 23 backend modules and 22 UI
+pages, plus a 717-test pytest suite (~7,800 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -46,6 +46,7 @@ atropa/
                               the logo as the app icon, 16 to 256 px
     org.atropa.pkexec.policy  polkit policy for nicer auth prompts
 tests/                          pytest suite, one test_<module>.py per backend module
+                                (plus test_resources.py for the app icon)
 examples/plugins/example-plugin/manifest.toml   reference plugin manifest (parsed by a test)
 install.sh                      Arch installer (pacman deps + pipx + launcher + icon + polkit policy)
 .github/workflows/ci.yml        py_compile + ruff + pytest on Python 3.11/3.12
@@ -62,8 +63,9 @@ Backups — followed by one entry per enabled plugin.
 `backend/*.py` has **zero GTK imports**. Every function is a plain Python
 wrapper around a `subprocess` call (via `privilege.py`), returning either a
 `CommandResult` dataclass or a typed dataclass of parsed data. This means:
-- Every backend function is independently testable by mocking
-  `subprocess.run` — no display server, no GTK, no root needed.
+- Every backend function is independently testable by faking the one
+  function that starts commands (`privilege._subprocess_run`) — no display
+  server, no GTK, no root needed.
 - `ui/pages/*.py` never shells out directly; it only calls into `backend/`.
 
 ### Privilege model
@@ -90,17 +92,25 @@ operation. The planned fix is a single privileged helper invoked once per
 operation; annotating generic binaries like `tee`/`bash` with `auth_admin_keep`
 is not a safe shortcut (it would make them passwordless root for the keep window).
 
+**Timeouts hold, even for a child that runs as root.** Commands start in
+`privilege._subprocess_run()`, which has `subprocess.run()`'s interface but
+runs through `Popen`. At a timeout `subprocess.run()` kills the child and
+then waits for it with no limit - and a child `pkexec` started runs as
+root, so the kill raises `PermissionError` and that wait never returned,
+hanging the worker thread for good. Such a child is now left running and
+reported: `PrivilegeError` names its PID. The streaming runners read output
+on a separate thread, so their timeout counts while the command runs
+instead of after it has closed its output.
+
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
 user-supplied (package names, hostnames, usernames, etc.) ending up
-interpreted by a shell. Known exceptions that do pass a string to
-`["bash", "-c", ...]` (needed for `>`/`>>` redirection as root):
-`hardening.usbguard_generate_and_enable()` (fixed string), and the
-append-if-missing branch of `security._set_sshd_option()`,
-`hardening._set_faillock_option()` and `hardening._set_pwquality_option()`.
-The interpolated values there are code-controlled (ints, `yes`/`no`, or a
-validated enum such as SSH `LogLevel`), never free text — keep it that way,
-or switch them to `tee -a` with `input_text`.
+interpreted by a shell. There are no exceptions left: nothing in the
+backend runs `bash -c` any more. Root-owned files are written with `tee`
+(or `tee -a`, or `install -m` when the file needs a particular mode) with
+the content on stdin. The redirections that used to need a root shell -
+USBGuard's `generate-policy > rules.conf` and the append-if-missing
+branches for `sshd_config`, `faillock.conf` and `pwquality.conf` - are gone.
 
 **Every command is logged** — privileged *and* unprivileged — to
 `~/.local/share/atropa/actions.log` by `privilege._run()` (Python
@@ -135,17 +145,28 @@ marks each entry `restorable`, and the page disables Restore for the rest.
 | `fail2ban_protect_ssh` | `hardening.py` | `/etc/fail2ban/jail.d/sshd.local` |
 | `set_faillock_policy` | `hardening.py` | `/etc/security/faillock.conf` |
 | `set_password_complexity_policy` | `hardening.py` | `/etc/security/pwquality.conf` |
-| `set_timeout` | `bootloader.py` | GRUB default file or systemd-boot loader.conf |
+| `usbguard_generate_and_enable` | `hardening.py` | `/etc/usbguard/rules.conf` |
+| `set_timeout` | `bootloader.py` | `/etc/default/grub`, or systemd-boot's `loader/loader.conf` on the ESP |
 | `set_mode` | `selinux.py` | `/etc/selinux/config` |
 | `activate` | `refpolicy_build.py` | `/etc/selinux/config` (`SELINUXTYPE=`) |
 | `set_locale_gen_enabled` | `system_config.py` | `/etc/locale.gen` |
 | `append_rule_to_profile` / `_set_rule_presence` | `apparmor.py` | an AppArmor profile file |
 
 **SSH gets an extra safety step beyond backup**: `_set_sshd_option` runs
-`sshd -t` to validate the new config *before* `systemctl reload sshd`. If
-validation fails, the backup is restored automatically and sshd is **never**
-reloaded — verified end-to-end with a real (mocked) broken-config scenario,
-see Testing section.
+`sshd -t` to validate the new config *before* reloading anything. If
+validation fails, the original text - held in memory, so this doesn't depend
+on the backup - is written back and sshd is **never** reloaded; the error
+says plainly if even the write-back failed. The reload is `systemctl
+try-reload-or-restart sshd`, a no-op when sshd isn't running (plain `reload`
+failed there and reported the change as an error). Verified end-to-end with
+a real (mocked) broken-config scenario, see Testing section.
+
+**The same write-back-on-failure pattern** covers the other edits that can
+leave a broken system behind: an AppArmor profile `apparmor_parser -r`
+rejects, a GRUB timeout change after which `grub-mkconfig` fails, and a
+refpolicy activation whose relabel can't be scheduled. Each puts the
+previous content back and says so, or says plainly that the write-back
+failed too.
 
 ### Markup-escaping (a real bug we hit and fixed)
 `Adw.ActionRow`/`PreferencesGroup` titles/subtitles and `Adw.Toast` messages
@@ -162,8 +183,13 @@ def esc(text: object) -> str:
 ```
 - `BasePage.notify()` auto-escapes (every `self.notify(f"...{error}...")` call
   across the app is safe without touching each call site)
+- `BasePage.add_group()` and `BasePage.start_loading()` escape their title,
+  description and message too - a plain `&` in a group title ("Account &
+  File Hygiene") rendered it blank
 - `BasePage.confirm()` disables markup entirely on the dialog (`heading`/`body`
   often embed raw package/user names via f-strings)
+- Plain-text widgets go the other way: a `Gtk.Label` or button label that
+  isn't markup must **not** be escaped, or it shows literal `&amp;`
 - Every `Adw.ActionRow(title=..., subtitle=...)` built from live system data
   wraps the dynamic parts in `esc()` — this was done file-by-file across
   every page; if you add a new row with dynamic content, wrap it in `esc()`.
@@ -177,31 +203,55 @@ def esc(text: object) -> str:
 CommandResult(returncode, stdout, stderr)          # .ok property = returncode == 0
 run_unprivileged(argv, input_text=None, timeout=120) -> CommandResult
 run_privileged(argv, input_text=None, timeout=600)   -> CommandResult   # via pkexec, else sudo -A, else PrivilegeError
-run_privileged_streaming(argv, on_line, ...)         -> CommandResult   # live line-by-line output (Popen)
-run_unprivileged_streaming(argv, on_line, ...)       -> CommandResult   # same, no escalation
+run_privileged_streaming(argv, on_line, input_text=None, timeout=1800)   -> CommandResult   # live line-by-line output
+run_unprivileged_streaming(argv, on_line, input_text=None, timeout=1800) -> CommandResult   # same, no escalation
+path_exists(path) -> bool | None                     # None = can't tell
 backup_file(path) -> str | None                      # filename only, not full path
-restore_file(backup_file_name, original_path) -> CommandResult
-list_backups(limit=200) -> list[dict]                # most-recent-first
+restorable(path) -> bool                             # one of the files Atropa backs up?
+restore_file(backup_file_name, original_path) -> CommandResult   # PrivilegeError unless restorable()
+list_backups(limit=200) -> list[dict]                # most-recent-first, each with a "restorable" flag
 get_recent_actions(limit=200) -> list[str]           # most-recent-first tail of actions.log
 ```
+A timeout raises `PrivilegeError` (see "Timeouts hold" in section 1); the
+streaming runners return everything in `.stdout`, with `.stderr` always empty.
+`path_exists()` is there because `Path.exists()` raises `PermissionError` on
+Python 3.11-3.13 when a directory on the way isn't searchable - a root-only
+ESP, a 0700 `/var/lib/aide`. `backup_file()` treats "can't tell" as "try the
+privileged read" rather than crashing.
 
 ### Packages (`pacman.py` / `pages/packages.py`)
-- `Package(name, version, installed=True, description="")`
-- `PendingUpdate(name, old_version, new_version)` — parsed from `pacman -Qu`
-  via regex `^(\S+)\s+(\S+)\s*->\s*(\S+)`, correctly stops before an
-  `[ignored]` suffix (IgnorePkg-held packages)
-- `check_updates() -> list[PendingUpdate]`
-- `update_single_package(name) -> CommandResult` — **deliberately a partial
-  upgrade**; Arch's own docs discourage this (ABI mismatches between updated
-  and non-updated packages). The UI confirm dialog explains the actual
-  mechanism, not just "risky", and the primary/suggested action stays
-  "Upgrade system" (full `-Syu`).
+- `Package(name, version, installed=True, description="", repo="")` — `repo`
+  is `"core"`, `"extra"`, ... or `"aur"`
+- `PendingUpdate(name, old_version, new_version)` — parsed via regex
+  `^(\S+)\s+(\S+)\s*->\s*(\S+)`, correctly stops before an `[ignored]`
+  suffix (IgnorePkg-held packages)
+- `check_updates() -> list[PendingUpdate]` — the "Check for updates" button.
+  Uses `checkupdates` (pacman-contrib; it needs `fakeroot`) when
+  `live_update_check_available()`: it syncs a private copy of the database,
+  so it needs no root and leaves the real one alone. Exit status 2 is its
+  "no updates"; any other failure raises instead of reading as "up to
+  date". Without it the list falls back to `pacman -Qu`, which only knows
+  what the last full upgrade's sync saw, and the page says so.
+- **No partial upgrades.** Nothing runs `pacman -Sy`: the old "Refresh
+  database" button left the sync database newer than the installed
+  packages, which turns every later `pacman -S` - this page's own Install
+  included - into the partial upgrade Arch doesn't support. `sync_database()`
+  and `update_single_package()` ("Update only this") are gone with it.
+  `install(names)` runs `pacman -S --needed` and raises `PartialUpgradeError`
+  when `_behind_local_database()` finds the database already ahead
+  (something else ran `-Sy`); the page then offers "Upgrade and install",
+  `upgrade_and_install_streaming(names, on_line)` = `pacman -Syu --needed
+  <names>`, the Arch wiki's way.
 - `search(query, include_aur=True)` merges official repo (`pacman -Ss`) with
-  AUR helper results if `paru`/`yay` is installed (checked in that priority order)
+  AUR helper results if `paru`/`yay` is installed (checked in that priority
+  order). AUR results carry `repo="aur"`; the page marks them "AUR" and
+  points at the helper instead of offering an Install button that would run
+  `pacman -S` and fail with "target not found".
 - `upgrade_system_streaming(on_line)` — the `-Syu` used by the UI, streamed
   into a live progress dialog
-- `install`, `remove`, `sync_database`, `upgrade_system`, `clean_cache`,
-  `list_installed`, `list_explicit`, `list_orphans` — straightforward pacman wraps
+- `remove(names, purge_config=False)`, `upgrade_system`, `clean_cache`,
+  `list_installed`, `list_explicit`, `list_orphans` — straightforward pacman
+  wraps (`list_orphans()` has no caller yet, see the open items in section 6)
 
 ### Network (`network.py` / `pages/network.py`)
 NetworkManager (`nmcli`) only — systemd-networkd is detected
@@ -223,19 +273,50 @@ always accurate); writes via `useradd`/`usermod`/`userdel`/`groupadd`/`groupdel`
   `create_group`, `delete_group`
 - `set_password` pipes `user:pass` to `chpasswd` via **stdin**, never argv
   (argv would leak into `ps` output)
+- Guards for the one-click changes that can't be undone from Atropa:
+  `lock_refusal(username)` refuses the account you're signed in with, and
+  root when nobody is in `ADMIN_GROUP` (`wheel` - polkit then asks for
+  root's password); `lock_warning(username)` says what else locking breaks
+  (the only wheel member, an administrator); `delete_refusal(username)`
+  refuses your own account and root. The page asks before locking, has an
+  unlock button, disables what's refused, and its delete dialog offers
+  "Delete" or "Delete with home folder".
 
 ### Services (`services.py` / `pages/services.py`)
-Straightforward `systemctl`/`journalctl` wraps: `list_services(pattern="*.service")`,
+`systemctl`/`journalctl` wraps: `list_services(pattern="*.service")`,
 `status`, `start`, `stop`, `restart`, `enable(unit, now=False)`,
-`disable(unit, now=False)`, `journal_tail(unit, lines=100)`
+`disable(unit, now=False)`, `journal_tail(unit, lines=100)`.
+`list_services()` fills in `Service.enabled` from one `systemctl show
+--property=Id,UnitFileState` call for every unit - it used to run
+`systemctl is-enabled` per service, hundreds of commands per refresh, each
+one a line in the Activity log. `stop_impact(unit)` returns what stopping or
+disabling a unit breaks (polkit, D-Bus, logind, the display manager,
+networking, sshd, the firewall, auditd, ...); the page shows it in the
+confirmation it asks before stop and disable. The page renders at most
+`MAX_ROWS = 150` services and says when the list is cut short.
 
 ### Bootloader (`bootloader.py` / `pages/bootloader.py`)
-Auto-detects GRUB vs systemd-boot (`detect()`; GRUB needs `grub-mkconfig`,
-systemd-boot needs `bootctl` + `/boot/loader/loader.conf`). `get_info()`
-returns a `BootloaderInfo(kind, entries, default_timeout)`. `set_timeout`
-edits the relevant config (backed up first) and, for GRUB, regenerates
-`/boot/grub/grub.cfg` — if `grub-mkconfig` fails, `/etc/default/grub` is
-restored from the backup automatically. `regenerate_config()` runs
+Auto-detects GRUB vs systemd-boot (`detect()`): systemd-boot when `bootctl`
+is installed and either its `LoaderInfo` EFI variable exists or an ESP is
+found; GRUB when `/etc/default/grub` exists and `grub-mkconfig` is installed.
+(An ESP is found on a UEFI machine that boots GRUB too - see the open items
+in section 6.) The ESP isn't assumed to be under `/boot`: `esp_path()` asks `bootctl
+--print-esp-path` and falls back to the first of `/efi`, `/boot`,
+`/boot/efi` that has a `loader/` directory. Entries are also read from
+XBOOTLDR (`bootctl --print-boot-path`), and a root-only ESP (`umask=0077`)
+is read with one privileged `grep -rH` instead of crashing. `get_info()`
+returns a `BootloaderInfo(kind, entries, default_timeout)`.
+
+`set_timeout` backs the file up and edits it by content (`_with_setting()`):
+every active line for the key is replaced, else the first commented-out one
+is restored, else the line is added. The old `s/^timeout.*/` changed nothing
+when the line was commented out - which is how `loader.conf`'s example
+ships it - or missing. For systemd-boot it also clears the
+`LoaderConfigTimeout` EFI variable (`bootctl set-timeout ""`) when present:
+a timeout picked in the boot menu is stored there and overrides
+`loader.conf`. For GRUB it then regenerates `/boot/grub/grub.cfg` — if
+`grub-mkconfig` fails, the previous `/etc/default/grub` is written back
+directly. `regenerate_config()` runs
 `grub-mkconfig -o /boot/grub/grub.cfg` or `bootctl update`. **`reinstall()` deliberately refuses to automate GRUB
 reinstall** — picking the wrong disk/EFI target is destructive; it raises
 `RuntimeError` pointing at manual `grub-install` instead. systemd-boot reinstall
@@ -245,12 +326,37 @@ ambiguity.
 ### Security (`security.py` / `pages/security.py`)
 Firewall abstraction over `ufw` **or** `firewalld` (whichever is installed;
 `firewall_backend()` returns `"ufw" | "firewalld" | "none"`). SSH hardening
-(`set_ssh_root_login`, `set_ssh_password_auth`, `set_ssh_port`, plus the
-CIS settings `set_ssh_log_level` (INFO/VERBOSE only), `set_ssh_x11_forwarding`,
-`set_ssh_max_auth_tries`, `set_ssh_ignore_rhosts`,
-`set_ssh_hostbased_authentication`, `set_ssh_permit_empty_passwords`,
-`set_ssh_permit_user_environment` — all route through `_set_sshd_option`,
-which has the backup+`sshd -t`-validate+rollback logic described above).
+(`set_ssh_root_login`, `set_ssh_permit_root_login`, `set_ssh_password_auth`,
+`set_ssh_port`, plus the CIS settings `set_ssh_log_level` (INFO/VERBOSE
+only), `set_ssh_x11_forwarding`, `set_ssh_max_auth_tries`,
+`set_ssh_ignore_rhosts`, `set_ssh_hostbased_authentication`,
+`set_ssh_permit_empty_passwords`, `set_ssh_permit_user_environment` — all
+route through `_set_sshd_option`, which has the backup, `sshd -t` validation
+and write-back logic described above).
+
+Reading and editing `sshd_config` both follow sshd's own rules: the first
+value read for a keyword wins (`Port` and `ListenAddress` accumulate
+instead), `Include` files are read where they appear, and nothing after a
+`Match` line applies globally until `Match all` (a `Match` inside an
+included file ends with that file). Reading only the main file and letting
+the last line win reported settings sshd wasn't using.
+- `ssh_status() -> SshStatus` reports the global values sshd reads.
+  `effective(name)` fills in OpenSSH's own default for a keyword that's
+  never set (`SSHD_DEFAULTS`: unset `PasswordAuthentication` means password
+  login is on), `ports` lists every port sshd listens on, and
+  `unreadable_includes` names included files that couldn't be read - the
+  audit judges effective values and won't award a pass when there are any.
+- `_edit_sshd_global_option()` is a Python read-modify-write of the global
+  section only, never a line inside a `Match` block: replace the first
+  active line, else uncomment the template, else insert before the first
+  `Include`/`Match`. The line goes above an `Include` that could override
+  it, later dead duplicates are rewritten to match, and "set the port" is
+  refused when several `Port` lines (or an included file) set it.
+- The Security page's switches show effective values and re-read
+  `sshd_config` after every attempt. Root login is a choice between sshd's
+  actual values, so going from "no" to the `prohibit-password` default no
+  longer passes through "yes".
+
 `firewall_status()` reads `ufw status verbose` / `firewall-cmd --list-all`
 **privileged** (both silently return empty output without root);
 `firewall_allow_port`/`firewall_deny_port(port, protocol="tcp")` (on a stopped
@@ -265,14 +371,39 @@ separate, richer modules; see below). Covers:
 - **Kernel sysctl hardening**: 20 curated settings in `SYSCTL_RECOMMENDATIONS`
   (ASLR, ptrace restriction, anti-spoofing, SYN cookies, hardlink/symlink
   protection, etc.), checkbox-select which to apply, written to a dedicated
-  `/etc/sysctl.d/99-atropa-hardening.conf` (never mixed with user's own config)
+  `/etc/sysctl.d/99-atropa-hardening.conf` (never mixed with user's own
+  config). Status is read live: `get_sysctl_status()` runs `sysctl -n` per
+  key, and `SysctlSetting.is_hardened` is also true for a value stricter
+  than the recommendation (`_STRICTER_SYSCTL_VALUES`: `ptrace_scope` 2/3,
+  `sysrq` 0). `apply_sysctl_hardening(keys)` leaves such values alone
+  instead of lowering them. The audit goes by `sysctl_hardening_gaps()` -
+  the recommended keys not in effect right now - not by whether Atropa's
+  file exists: a later file can override it, and the same settings can come
+  from somewhere else.
 - fail2ban (enable/disable, one-click "protect SSH" jail)
-- AppArmor **service-level only** here (`apparmor_status`/`apparmor_enable_service`)
-  — deliberately doesn't auto-add the `apparmor=1 security=apparmor` kernel
-  param (bad kernel params risk an unbootable system)
+- AppArmor **service-level only** here (`apparmor_status`/`apparmor_enable_service`).
+  `apparmor_kernel_enabled()` asks the kernel - the active LSM list in
+  `/sys/kernel/security/lsm`, falling back to AppArmor's own
+  `/sys/module/apparmor/parameters/enabled` - instead of looking for
+  `apparmor=1` in `/proc/cmdline`, which never matched the `lsm=` parameter
+  the Arch wiki recommends. The guidance shown is that parameter
+  (`APPARMOR_KERNEL_PARAMETER`); it is deliberately not added automatically
+  (bad kernel params risk an unbootable system)
 - USBGuard — `usbguard_generate_and_enable()` **always generates a policy from
   currently-plugged-in devices before enabling enforcement**; enabling blind
-  would block the next USB replug including your own keyboard
+  would block the next USB replug including your own keyboard. The policy is
+  generated first and written only if it has rules (the old
+  `generate-policy > rules.conf` emptied the file before generating, so a
+  failure left a policy that blocks every device). The previous file is
+  backed up, the new one is installed with mode 0600 (`usbguard-daemon`
+  refuses any other), and a daemon that was already running is restarted so
+  it loads it. `usbguard_status().extra["has_policy"]` is `None` when
+  `/etc/usbguard` can't be looked into
+- CIS audit rule sets (`audit_rules.py`): `active_rule_set_keys()` reads the
+  loaded rules with **one** privileged `auditctl -l` for every set - the
+  page used to run one per set, five password prompts on opening it - and
+  matches keys as whole tokens. `apply_all_rule_sets()` does one `mkdir -p`
+  and one `augenrules --load`
 - auditd, `vulnerability_scan()` (via `arch-audit`), login lockout
   (`faillock_status`/`set_faillock_policy` — **only touches
   `/etc/security/faillock.conf`**, never auto-wires `pam_faillock` into the PAM
@@ -281,6 +412,8 @@ separate, richer modules; see below). Covers:
   `pwquality_wired_into_pam()` follow `include`/`substack`/`@include` and ignore
   comments - on Arch, `system-login` only includes `system-auth`, which is
   where pambase wires faillock in; pwquality also checks the `passwd` service.
+  A key that isn't in `faillock.conf`/`pwquality.conf` yet is appended with
+  `tee -a` and the line on stdin (`_append_line()`), not a root shell.
   `vulnerability_scan()` raises when `arch-audit` itself fails (e.g. offline)
   rather than returning an empty "nothing vulnerable" list.
 - `run_audit() -> list[AuditCheck]` — rollup pass/warn/fail/info across all of
@@ -300,7 +433,9 @@ more categories ("Service Inventory", "Account & File Hygiene") - those
 go straight into their own categories rather than through
 `_CATEGORY_MAP`, since their check names are per-entry/per-account (one
 row per installed service, one per user's home directory) rather than the
-fixed small set `_CATEGORY_MAP` was built for.
+fixed small set `_CATEGORY_MAP` was built for. The header's total
+(`total_check_count`) counts every check in the report; it used to count
+only `run_audit()`'s, so it could read "29 scored checks, 3 total".
 
 ### File Integrity / AIDE (`aide.py` / `pages/aide_page.py`)
 CIS DIL Phase 3 - see the Phase 3 write-up in section 6 for the full
@@ -308,6 +443,10 @@ scoping rationale (AUR-only trust boundary, timer-detection-not-
 duplication). No `install()` function on purpose.
 - `is_installed()` / `baseline_initialized()` / `detect_timer_unit()` /
   `get_status()` - read-only detection, all unprivileged.
+  `baseline_initialized()` returns `None` - "can't tell without root" -
+  when `/var/lib/aide` isn't searchable (it's often 0700) instead of
+  raising, and promoting a fresh baseline doesn't call a successful
+  `--init` a failure just because the new database can't be seen from here.
 - `initialize_baseline(on_line)` / `update_baseline(on_line)` - same
   mechanism (`aide --init` + promote), two names for two different human
   intents. `run_check(on_line)` - `aide --check`, parse via
@@ -339,7 +478,11 @@ onto Arch's actual packaging). Both read-only, no fix actions on the page.
   root `PATH` integrity (checked against `/root/.bash_profile`,
   `/root/.bashrc`, `/etc/profile` directly - **not** `pkexec`'s own
   environment, which is a fixed sanitized `PATH` that would make this
-  check trivially pass regardless of root's real shell config).
+  check trivially pass regardless of root's real shell config). Root's two
+  files are read with one privileged `cat`, and whatever it printed is kept
+  even when `cat` exits 1 because one of them is missing, as on a fresh
+  install. If the privileged read itself fails (prompt dismissed), the
+  result is `info` with the reason, not a pass.
 
 ### Custom Reference Policy build (`refpolicy_build.py` / `pages/refpolicy_build.py`)
 Builds/installs/activates a user-maintained refpolicy fork (e.g. Arch-
@@ -349,14 +492,28 @@ handles `MONOLITHIC = n` (modular) source trees - detected from the
 target set used, not auto-sensed from `build.conf`.
 - `build(source_dir, on_line)` - `make conf all`, unprivileged, via the
   newly-added `run_unprivileged_streaming()` in `privilege.py`.
-- `install(source_dir, on_line)` - `make install`, privileged, does not
-  touch `/etc/selinux/config` or the running kernel policy.
-- `activate(policy_name, default_login_seuser="unconfined_u")` - sets
-  `SELINUXTYPE=` (backed up first), maps `__default__` login (`-a` then
-  `-m` fallback if already mapped), schedules a relabel via
-  `selinux.relabel_filesystem()`. Returns one `CommandResult` per step;
-  stops on first failure. Never touches kernel boot params or triggers a
-  reboot - both stay the user's explicit, separate, manual next step.
+- `install(source_dir, on_line)` - `make install load`, privileged. Plain
+  `make install` only copies the module packages and context files in a
+  modular build; `load` is what has `semodule` build NAME's own policy
+  store and write the compiled policy (`/etc/selinux/NAME/policy/policy.NN`)
+  a boot into NAME loads. Does not touch `/etc/selinux/config`, so the
+  running system stays on its current policy. Because `make` runs as root
+  inside the user's source tree, the files it creates there are handed back
+  afterwards (`chown -R -h --from=0:0`, symlinks not followed) - left
+  root-owned they broke the next unprivileged Build. The confirmation says
+  plainly that the tree's Makefile runs as root.
+- `activate(policy_name, default_login_seuser="unconfined_u")` - refuses up
+  front unless the name is a plain one (`_POLICY_NAME_RE`) and
+  `/etc/selinux/NAME/policy` holds a compiled policy: `SELINUXTYPE` pointing
+  at a missing policy leaves an enforcing system unable to boot. Then, in
+  order: maps the `__default__` login in the **new** policy's own store
+  (`semanage login -S NAME -N`, `-a` then `-m` if already mapped), so a
+  failure there changes nothing; sets `SELINUXTYPE=` by content (backed up
+  first, adding the line when there is none); schedules a relabel via
+  `selinux.relabel_filesystem()`, putting the previous config back if that
+  fails. Returns one `CommandResult` per step; stops on first failure.
+  Never touches kernel boot params or triggers a reboot - both stay the
+  user's explicit, separate, manual next step.
 
 ### AppArmor (`apparmor.py` / `pages/apparmor.py`)
 The **dedicated** AppArmor module (richer than `hardening.py`'s basic toggle).
@@ -372,12 +529,21 @@ The **dedicated** AppArmor module (richer than `hardening.py`'s basic toggle).
   `set_network_rule` → `_set_rule_presence()` adds/removes the exact line,
   idempotently (verified: toggling on twice doesn't duplicate, toggling off
   removes only the target line and leaves everything else in the profile
-  intact), then reloads via `apparmor_parser -r`.
+  intact), then reloads via `apparmor_parser -r`. When the parser rejects
+  the result, `_write_and_reload()` writes the previous content back - the
+  kernel keeps the profile it already had loaded, and the broken file would
+  otherwise sit on disk for the next boot or reload to trip over.
+  `append_rule_to_profile()` ("Append & Reload") goes through the same path.
 - `resolve_profile_file(identifier)` — profile files are conventionally named
   by replacing `/` with `.` (e.g. `/usr/bin/firefox` → `usr.bin.firefox`),
   with a `grep -rl` fallback for child profiles/hats/named profiles
 - **Denial review**: `list_denials()` reads `apparmor="DENIED"` lines from
-  `journalctl -k`. **There's no `audit2allow` equivalent for AppArmor** —
+  `journalctl -k`. That's only complete while auditd isn't running: once it
+  is, the kernel hands audit records to auditd instead of printing them. So
+  the page says when `auditd_running()` and offers a second source,
+  `list_denials_from_audit_log()` (privileged `ausearch -m
+  AVC,APPARMOR_DENIED -ts boot --input-logs`), which raises on a failed read
+  instead of showing "no denials". **There's no `audit2allow` equivalent for AppArmor** —
   `generate_rule_suggestion()` builds a best-effort rule directly from the
   denial's own fields:
   - file access: `name=` + `requested_mask=` → `<path> <mask>,`
@@ -401,7 +567,18 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   output on a system running `refpolicy-arch`, an AUR SELinux policy for
   Arch — note this means the boolean list will be **much sparser** than
   Fedora/RHEL's targeted policy, since fewer people have written per-app
-  policy modules for it)
+  policy modules for it). Installed tools aren't an enabled SELinux: when
+  `sestatus` says "disabled", the result is `available=False` with mode
+  `"disabled"`, which is what every caller already took "available" to
+  mean - it used to come back available with mode "unknown", and Quick
+  Setup then ran `setenforce` on a disabled SELinux. The page says the
+  tools are installed but SELinux is off.
+- `SELINUX_TOOL_PACKAGES` names the package behind each tool Atropa runs -
+  all AUR-only on Arch: `checkmodule` is in `checkpolicy`,
+  `semodule_package` in `semodule-utils`, `audit2allow`/`audit2why`/
+  `semanage` in `selinux-python` (not `audit`), `getsebool` in
+  `libselinux`, the rest in `policycoreutils`. `missing_tool_error(tool)`
+  builds the "isn't installed" error from it, naming the package and the AUR.
 - `set_mode(enforcing, persistent=True)` — `setenforce` (runtime) +
   optionally edits `/etc/selinux/config` (backed up first) so it survives reboot.
   The enforcing/permissive switch itself is lock-gated in the UI (a
@@ -412,7 +589,9 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   Phase-adjacent bug-fix write-up in section 6 for why (a real cancel-
   doesn't-revert bug got fixed in the same pass).
 - `list_booleans(filter_text="")` / `set_boolean(name, value, persistent=True)`
-  — `getsebool -a` / `setsebool` (`-P` when persistent)
+  — `getsebool -a` / `setsebool` (`-P` when persistent).
+  `set_booleans(values, persistent=True)` sets several in one `setsebool`
+  call: with `-P` each call rebuilds the whole policy and is its own prompt
 - `restorecon(path, recursive=True)`, `restorecon_streaming(...)`,
   `relabel_filesystem()` (schedules a full relabel on next boot)
 - **Setup Mode**: `start_setup_mode()` (`set_mode(enforcing=False,
@@ -437,20 +616,31 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   approved modules in **one** `semodule -i` call = one auth prompt)
 - `check_policy_source_for_permission(policy_src_dir, tclass, permission="")`
   — read-only search of a refpolicy source tree's `access_vectors`
-- **Denial review**: `list_avc_denials()` (unprivileged, `journalctl -k`,
-  works even without root since AVCs get printk'd to the kernel ring buffer)
-  with `list_avc_denials_from_audit_log()` as a privileged (`ausearch`)
-  fallback for systems where they don't reach the ring buffer. Per-denial:
+- **Denial review**: `list_avc_denials()` (unprivileged, `journalctl -k`)
+  only sees AVCs while auditd isn't running - once it is, the kernel hands
+  audit records to auditd instead of printing them, so they're only in the
+  audit log. `list_avc_denials_from_audit_log()` reads that (privileged
+  `ausearch -m avc -ts boot --input-logs`): the whole boot rather than
+  ausearch's "recent" 10 minutes, the log files even when stdin is a pipe,
+  and a failed read - a dismissed prompt included - raises instead of
+  showing "no denials". The "not defined in policy" messages are plain
+  printk lines and stay in the kernel log either way. Per-denial:
   `explain_denial()` runs `audit2why`, `generate_te(raw_line, module_name)`
   runs `audit2allow -m <name>`
 - **Per-application batch review** (`build_policy_review(source="journal",
   denial_limit=500, sample_size=5, since=<unset>)`) — ported from a
-  user-supplied shell script. Groups denials by `comm=`, skips kernel noise
-  (`^(systemd|kernel|audit|kworker|swapper)`), and for each program: generates
-  a `.te`, an `audit2why` explanation, and compiles (but does **not**
-  install) a `.pp`. Rationale for grouping: `audit2allow` produces a much
-  better policy seeing all of a program's related denials together vs. one
-  denial at a time.
+  user-supplied shell script. Groups denials by **(program, source
+  domain)**, skips kernel noise (`^(systemd|kernel|audit|kworker|swapper)`),
+  and for each group: generates a `.te`, an `audit2why` explanation, and
+  compiles (but does **not** install) a `.pp`. Rationale for grouping:
+  `audit2allow` produces a much better policy seeing all of a program's
+  related denials together vs. one denial at a time. `comm=` alone isn't
+  enough - it's whatever name a process gives itself, so one name running
+  in two domains used to become one module granting both domains' rules.
+  Generated modules are named `atropa_<program>_<domain>`
+  (`_review_module_name()`): named after the program alone, a denial from
+  `ssh`, `mount` or `sudo` produced `ssh.pp`, `mount.pp` or `sudo.pp`, and
+  installing one replaces the policy's own module of that name.
 - **Compile pipeline hardening vs. the original script**: `checkmodule` and
   `semodule_package` run **unprivileged** (`run_unprivileged`, not
   `run_privileged`) — they only read/write local files and don't touch the
@@ -498,8 +688,17 @@ for firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard
 (`default_selected=False`) and SELinux (permissive only). `status_summary()`,
 `apply_single(key, on_line)`, `apply_items(keys, on_line) -> dict[str,
 CommandResult]` — checklist and wizard share these. The firewall step
-allows the configured SSH port before enabling deny-by-default, and doesn't
-enable the firewall at all if that allow fails.
+allows every port sshd listens on (`SshStatus.ports` - `Port` lines
+accumulate and `ListenAddress` can name its own) before enabling
+deny-by-default, and doesn't enable the firewall at all if an allow fails.
+`apply_items()` records a step that raises - a `PartialUpgradeError` from
+`pacman.install()`, say - as that step's failure and carries on with the
+next one instead of aborting the batch. The AppArmor step's guidance is the
+`lsm=` kernel parameter (`hardening.APPARMOR_KERNEL_PARAMETER`). The SELinux
+step installs `audit` and, since SELinux's userspace is AUR-only, points at
+the packages in `selinux.SELINUX_TOOL_PACKAGES` instead of running a
+`pacman -S` that could only fail; a SELinux that's disabled in the kernel is
+reported as a manual step.
 
 ### Security Profiles (`profiles.py` / `pages/profiles.py`)
 `export_profile() -> dict`, `save_profile_to_file`, `load_profile_from_file`,
@@ -512,17 +711,24 @@ explicit, recognized values are applied: SSH settings exported as `unknown`
 are left alone, `PermitRootLogin` is replayed exactly via
 `security.set_ssh_permit_root_login()` (validated against sshd's own keywords),
 AppArmor modes other than enforce/complain are skipped, and anything already
-at the target value isn't re-applied. Each section runs isolated.
+at the target value isn't re-applied. Each section runs isolated. Changed
+SELinux booleans go in a single `selinux.set_booleans()` call - one prompt
+and one policy rebuild, not one of each per boolean.
 
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
 required, note)`; `check_all() -> list[DependencyStatus]`,
-`missing_required()`, `summary_counts()`. AUR-only tools (paru/yay, aide)
-have `package=None` and a note instead of an Install button.
+`missing_required()`, `summary_counts()`. AUR-only tools (paru/yay, aide,
+and SELinux's userspace tools - their notes are built from
+`selinux.SELINUX_TOOL_PACKAGES`) have `package=None` and a note instead of
+an Install button that would run `pacman -S` and fail. `checkupdates`
+(pacman-contrib) and `fakeroot` are listed for the Packages page's live
+update check.
 
 ### Add-ons / plugins (`plugins.py` + `plugin_registry.py` / `pages/addons.py`, `pages/plugin_page.py`)
 - `plugin_registry.REGISTRY` — the only actions a manifest may reference:
-  `pacman.{check_updates,list_explicit,sync_database,clean_cache}`,
+  `pacman.{check_updates,list_explicit,clean_cache}` (no `sync_database`:
+  plugins can't set up a partial upgrade either),
   `services.{list_services,start,stop,restart,enable,disable}`,
   `network.list_devices`, `hardening.run_audit`,
   `compliance.generate_report`, `dependencies.check_all`.
@@ -562,6 +768,9 @@ self.start_loading(group, message="Loading…")       # spinner placeholder row 
 self.run_async(work_fn, on_done)                    # backend call -> worker thread -> GLib.idle_add back to main thread
 self.handle_command_result(result, error, success_message="Done", refresh=True)
                                                     # shared on_done for CommandResult-returning calls
+self.run_action(work_fn, on_done) -> bool           # run_async for a state change: one at a time per page
+self.apply_switch(switch, requested, work_fn, confirm=None, on_done=None) -> bool
+                                                    # body of a Gtk.Switch "state-set" handler
 self.run_streaming_operation(title, work_fn, on_done=None)
                                                     # modal live-log dialog; work_fn(on_line)
 self.confirm(heading, body, danger_label, on_confirm, on_cancel=None)
@@ -570,6 +779,38 @@ self.confirm(heading, body, danger_label, on_confirm, on_cancel=None)
 `run_async` is **mandatory** for any backend call — backend functions block on
 subprocess I/O, so calling them directly on the main thread would freeze the GTK
 event loop (e.g. during a full `pacman -Syu`).
+
+**State-changing buttons use `run_action()`**, not `run_async()` directly. It
+refuses to start a second change on a page while one is still running (and
+says so), instead of racing two privileged sequences - two pacman
+transactions fighting over the lock, two `sshd_config` edits racing each
+other's validate/restore. It returns `False` when it refused, so the caller
+can put a widget back.
+
+**Switches that change the system use `apply_switch()`.** A handler returns
+its result from "state-set"; it takes over GTK's default state handling,
+optionally asks first (`confirm=(heading, body, button label)`), runs
+`work_fn` through `run_action()`, and settles the switch on the new state
+only once the change succeeded - it flips back when the change fails, is
+refused or is cancelled. A switch must never keep showing a state that was
+never applied. The firewall, fail2ban, auditd, SELinux boolean and AppArmor
+rule switches all go through it; SSH settings re-read `sshd_config` after
+every attempt for the same reason.
+
+**Risky one-click changes ask first** and say what they break: turning the
+firewall on, turning SSH password logins off, moving the SSH port, allowing
+empty passwords, locking a password, stopping or disabling a service.
+
+**The progress dialog has "Hide".** `run_streaming_operation()`'s dialog
+used to be unclosable until its command finished or timed out (30 minutes
+for an upgrade). Hiding it leaves the command running, and the usual
+notification reports how it ended. A page won't start a second streaming
+operation while one is running.
+
+**A row has to live in a list box.** An `Adw.ActionRow` placed directly in
+a `Gtk.Box` makes GTK assert when it gets focus; wrap it in a
+`Gtk.ListBox` with the `boxed-list` class, as the progress dialog's status
+row does.
 
 **Row-building pattern**, used identically across every page:
 ```python
@@ -605,16 +846,30 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 599 tests across
+**There's a real pytest suite**: `tests/`, 717 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
-`pyproject.toml`). A shared `conftest.py` provides three fixtures —
-`fake_run` (fakes `subprocess.run` with a prefix-matching response registry),
-`fake_which` (controls which CLI tools "exist"), and `privilege_paths`
+`pyproject.toml`). A shared `conftest.py` provides four fixtures —
+`fake_run` (replaces `privilege._subprocess_run`, the one place commands are
+started from, and `subprocess.run`, with a prefix-matching response registry),
+`fake_which` (controls which CLI tools "exist"), `privilege_paths`
 (**autouse**: redirects `HOME`, the action log, backups, SELinux review
-artifacts and the legacy ArchYaST dir into `tmp_path`) — which is enough to unit-test
+artifacts and the legacy ArchYaST dir into `tmp_path`) and `kernel_state`
+(**autouse**: points the checks that read live kernel state - the active LSM
+list, AppArmor's enabled flag and its securityfs directory - at files under
+`tmp_path`) — which is enough to unit-test
 parsing/logic across every module, since they all funnel through
 `privilege.run_privileged`/`run_unprivileged`. CI (`.github/workflows/ci.yml`)
 runs `py_compile` + `ruff check` + the full suite on push/PR.
+
+`fake_run` is **not** autouse: a test that doesn't ask for it runs real
+commands. One did for a long time - `apply_sysctl_hardening([])` made 20
+real `sysctl -n` reads before raising, so the test read the kernel of
+whatever machine ran it and failed on one without `sysctl`. Give every test
+that reaches a backend call the fixture, even when its body never refers
+to it. `kernel_state` exists for the same reason from the other side:
+GitHub's Ubuntu runners have AppArmor enabled, so an "AppArmor isn't
+available" test passed locally and failed in CI until the paths it reads
+became module constants the fixture can redirect.
 
 `tests/test_resources.py` is the one file that isn't about a backend module.
 The app icon is wired by name in three places - `APP_ID` in `main.py` (the
@@ -646,9 +901,11 @@ never touches (`from x import y` copies a reference at import time; it isn't
 a live alias). The test's "expected RuntimeError" was actually a real
 `PrivilegeError` (pkexec not found in the sandbox) being mis-caught by the
 same `except RuntimeError` clause (`PrivilegeError` subclasses it). **Fix**:
-always patch at `atropa.backend.privilege.subprocess.run` directly — the
-one real boundary every path funnels through regardless of which module holds
-which imported name.
+always patch the one real boundary every path funnels through, regardless of
+which module holds which imported name. That boundary was
+`atropa.backend.privilege.subprocess.run`; since the timeout fix it is
+`privilege._subprocess_run`, and the `fake_run` fixture patches both. The
+streaming runners call `subprocess.Popen` directly and aren't covered by it.
 
 `privilege_paths` is autouse, so every test gets those redirects without
 asking for them; request it by name only to get at the paths
@@ -678,15 +935,18 @@ exactly one definition.
 
 - **systemd-networkd**: read-only detection only, no write support
 - **GRUB reinstall**: not automated (disk-target ambiguity is destructive if wrong)
-- **AppArmor kernel parameter** (`apparmor=1 security=apparmor`): not
-  auto-added to bootloader config (risk of unbootable system)
+- **AppArmor kernel parameter** (`lsm=landlock,lockdown,yama,integrity,apparmor,bpf`):
+  not auto-added to bootloader config (risk of unbootable system)
+- **Partial upgrades**: no `pacman -Sy` and no single-package update; the
+  only ways to change packages are a full upgrade, an install that refuses
+  while the database is ahead, and "Upgrade and install"
 - **pam_faillock wiring into the PAM stack**: not automated (risk of
   lockout with no easy recovery); only the already-safe
   `/etc/security/faillock.conf` parameters are editable, and only if
   `pam_faillock` is already referenced (same for `pwquality.conf` /
   `pam_pwquality`)
-- **AUR-only tools** (AIDE, paru/yay): detected and managed once installed,
-  never built or installed by Atropa
+- **AUR-only tools** (AIDE, paru/yay, SELinux's userspace tools and policy):
+  detected and managed once installed, never built or installed by Atropa
 - **Plugins**: declarative TOML only, limited to actions in
   `plugin_registry.REGISTRY`; enabling/disabling takes effect on next launch
 - **AUR builds**: shells out to `paru`/`yay` if present, no PKGBUILD review/sandboxing
@@ -698,9 +958,10 @@ exactly one definition.
 - ✅ Config backup + restore mechanism (Activity & Backups page)
 - ✅ SSH validate-before-reload with auto-rollback
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
-- ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update)
-- ✅ A real pytest suite (599 tests as of the latest pass, across all 23 `backend/` modules, one
-  shared `subprocess.run` fake in `conftest.py`; covers the SSH and GRUB
+- ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
+  removed again later, see the second bug-fix batch at the end of this section)
+- ✅ A real pytest suite (717 tests as of the latest pass, across all 23 `backend/` modules, one
+  shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
   check` + the pytest suite on push/PR, Python 3.11 and 3.12; `ruff`
@@ -1532,7 +1793,11 @@ exactly one definition.
      `/etc/selinux/NAME` and `/usr/share/selinux/NAME`), but does **not**
      touch `/etc/selinux/config` or load anything into the running kernel
      policy - the system keeps running whatever it was running before
-     this step.
+     this step. (Corrected later: in a modular build `make install` alone
+     never builds the compiled policy or the policy store, so Activate
+     pointed `SELINUXTYPE` at a policy with nothing to load. It is `make
+     install load` now, and Activate checks, validates and orders its steps
+     differently - see the second bug-fix batch at the end of this section.)
   3. `activate()` - the consequential one, and the one that took the most
      care. Sets `SELINUXTYPE=` in `/etc/selinux/config` (backed up first,
      same `backup_file()` + `sed -i -E` pattern `set_mode()` already uses
@@ -1650,6 +1915,68 @@ exactly one definition.
      `nmcli --ask` with the password on stdin. Logs written before this
      fix may still contain `wifi connect <ssid> password <pw>` lines.
 
+- 🐛 **Second bug-fix batch from the same audit** (PRs #3, #4 and #6,
+  fourteen commits). The thread through most of them: Atropa reported or
+  changed something other than what the system actually uses - a config
+  value the daemon doesn't read, a file that exists but isn't in effect, a
+  switch showing a state that was never applied. The detail for each is in
+  section 2 under its module; this is the list.
+  1. **`sshd_config` is read and edited the way sshd reads it** - first
+     value wins, `Include` and `Match` honoured. Drop-ins and `Match` blocks
+     could make Atropa report settings sshd wasn't using, and the audit
+     passed them; the old `sed` rewrote lines inside `Match` blocks and
+     appended new keys into whatever block came last. Edits are now a
+     read-modify-write of the global section, with the original written
+     back if `sshd -t` rejects the result.
+  2. **Risky one-click changes ask first, and switches stay truthful** -
+     `BasePage.apply_switch()` and `run_action()` (section 3), lock and
+     delete guards on Users, stop/disable confirmations on Services, a
+     root-login choice that no longer passes through "yes".
+  3. **No partial upgrades from the Packages page** - "Refresh database"
+     (`pacman -Sy`) and "Update only this" are gone, "Check for updates"
+     uses `checkupdates`, and `install()` refuses while the database is
+     ahead. AUR search results no longer get an Install button that could
+     only fail.
+  4. **Four checks report what's in effect** - sysctl hardening reads live
+     values and leaves stricter ones alone, AppArmor asks the kernel's LSM
+     list, the compliance total counts every check, and the root `PATH`
+     check survives a missing dotfile.
+  5. **AppArmor edits roll back when the parser rejects them**, and both
+     denial pages can read the audit log, where denials go while auditd
+     runs. The SELinux docstring that claimed AVCs reach the kernel log
+     regardless was wrong.
+  6. **Review modules are `atropa_<program>_<domain>`**, grouped by domain
+     as well as program - a generated `ssh.pp` replaced the policy's own
+     `ssh` module when installed.
+  7. **refpolicy Install produces a bootable policy** (`make install load`)
+     **and Activate is safe**: plain name only, compiled policy required,
+     login mapping in the new store first, config put back if the relabel
+     can't be scheduled.
+  8. **USBGuard generation can't leave an empty policy** (which blocks
+     every device, keyboards included), **systemd-boot is found wherever
+     the ESP is mounted**, and timeout edits work on a commented-out line.
+  9. **Timeouts hold** (section 1), **root-only directories don't crash**
+     (`privilege.path_exists()`), and **the progress dialog can be hidden**.
+  10. **One command where one will do** - one `auditctl -l` for all audit
+      rule sets (five prompts on opening the Hardening page before), one
+      `systemctl show` for every service's enabled state, one `setsebool`
+      for a profile's booleans.
+  11. **SELinux package names and install guidance corrected** - the tools
+      are AUR-only and several aren't in the package their name suggests;
+      a SELinux that is disabled in the kernel counts as unavailable.
+  12. **Tests don't depend on the host's kernel** - the autouse
+      `kernel_state` fixture (section 4). One test had failed in CI since
+      the initial commit because GitHub's runners have AppArmor on.
+  13. **No root shell is left** - the last two `bash -c "echo ... >> file"`
+      appends became `tee -a` with the line on stdin.
+
+- ✅ **App icon, icon names and one more test leak** (PRs #9-#11). The logo
+  is the app icon - window, launcher and README (layout in section 1,
+  `tests/test_resources.py` in section 4). Three icon names that the stock
+  Adwaita theme doesn't have rendered blank and were replaced (the note in
+  section 7). `test_apply_sysctl_hardening_requires_selection` ran real
+  `sysctl` until it was given `fake_run` (section 4).
+
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
   since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
@@ -1669,6 +1996,13 @@ exactly one definition.
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
 **Still open from the full-repo audit** (rough priority order):
+- `bootloader.detect()` answers systemd-boot whenever `bootctl` is installed
+  and finds an ESP - which is also true of a UEFI machine that boots GRUB.
+  It should need the `LoaderInfo` EFI variable or a `loader/` directory on
+  the ESP. Shown with a simulated GRUB-on-UEFI setup (bootctl reporting an
+  ESP, no `loader/`, `/etc/default/grub` present), not yet on a real one.
+  There the Bootloader page would name the wrong bootloader and write the
+  timeout to `<ESP>/loader/loader.conf` instead of `/etc/default/grub`
 - UI for what the README promises but no page offers yet: setting a user's
   password, managing groups, a service's journal, cleaning up orphan
   packages (`pacman.list_orphans()` exists, nothing calls it), and
@@ -1677,10 +2011,15 @@ exactly one definition.
   suite never imports GTK), Python 3.13/3.14 in the matrix next to
   3.11/3.12, and tests that run the parsers against real config files
   rather than hand-written snippets
-- Packaging and docs: bring this document up to date with the changes from
-  PRs #3 and #4 (UI confirmations and switch handling, no partial
-  upgrades, the AppArmor/SELinux/refpolicy fixes), and check the
-  packaging files against the current dependencies
+- Packaging: `install.sh` doesn't install `pacman-contrib` or `fakeroot`,
+  so "Check for updates" falls back to `pacman -Qu` until they're installed
+  from the Dependencies page. `atropa.desktop` lists two main categories
+  (`Settings;System;`), which `desktop-file-validate` flags because the app
+  may show up twice in menus
+- Quick Setup's status summary fails as a whole when one item's check
+  raises: with SELinux in the kernel but no `sestatus` installed, the page
+  shows a "Couldn't check current status" toast instead of the other
+  items' status
 - The single privileged helper (see Architecture): one root helper per
   operation instead of one pkexec prompt per command. Its design gets
   agreed before any code. It is also where backups should move to
