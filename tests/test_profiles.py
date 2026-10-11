@@ -342,12 +342,11 @@ def test_import_ssh_replays_prohibit_password_exactly(fake_run, fake_which, priv
     conf = tmp_path / "sshd_config"
     conf.write_text("PermitRootLogin yes\n")
     monkeypatch.setattr(security, "SSHD_CONFIG", conf)
-    fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
 
     results = profiles.import_profile({"ssh": {"root_login": "prohibit-password"}}, ["ssh"], lambda _l: None)
     assert results["ssh"].ok
-    sed_call = fake_run.call_containing("sed")
-    assert sed_call is not None and "PermitRootLogin prohibit-password" in sed_call[4]
+    written = [text for call, text in zip(fake_run.calls, fake_run.inputs) if call == ["pkexec", "tee", str(conf)]]
+    assert written == ["PermitRootLogin prohibit-password\n"]
 
 
 def test_import_ssh_never_writes_values_outside_sshd_keywords(fake_run, fake_which):

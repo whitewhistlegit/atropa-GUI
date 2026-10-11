@@ -436,12 +436,21 @@ def run_audit() -> list[AuditCheck]:
         if not ssh.installed:
             checks.append(AuditCheck("SSH root login", "info", "OpenSSH not installed"))
         else:
-            if ssh.root_login.lower() in ("no", "prohibit-password"):
-                checks.append(AuditCheck("SSH root login", "pass", f"PermitRootLogin {ssh.root_login}"))
+            # Judged on the effective values (OpenSSH's defaults where
+            # sshd_config sets nothing): an unset PermitRootLogin is
+            # prohibit-password, an unset PasswordAuthentication is yes.
+            root_login = ssh.effective("root_login")
+            password_auth = ssh.effective("password_auth")
+            caveat = ""
+            if ssh.unreadable_includes:
+                caveat = f" - but couldn't read {', '.join(ssh.unreadable_includes)}, which may override it"
+            if root_login.lower() in ("no", "prohibit-password", "without-password"):
+                status = "warn" if caveat else "pass"
+                checks.append(AuditCheck("SSH root login", status, f"PermitRootLogin {root_login}{caveat}"))
             else:
-                checks.append(AuditCheck("SSH root login", "fail", f"PermitRootLogin {ssh.root_login}"))
-            if ssh.password_auth.lower() == "no":
-                checks.append(AuditCheck("SSH password auth", "pass", "Key-only authentication"))
+                checks.append(AuditCheck("SSH root login", "fail", f"PermitRootLogin {root_login}"))
+            if password_auth.lower() == "no":
+                checks.append(AuditCheck("SSH password auth", "warn" if caveat else "pass", f"Key-only authentication{caveat}"))
             else:
                 checks.append(AuditCheck("SSH password auth", "warn", "Password authentication is allowed"))
     except Exception as exc:  # noqa: BLE001

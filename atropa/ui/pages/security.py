@@ -149,20 +149,33 @@ class SecurityPage(BasePage):
             self.ssh_status_row.set_title("OpenSSH is not installed")
         else:
             self.ssh_status_row.set_title(f"sshd is {'running' if status.running else 'stopped'}")
-        self.root_login_row.set_active(status.root_login.lower() in ("yes", "true"))
-        self.password_auth_row.set_active(status.password_auth.lower() in ("yes", "true"))
+        if status.unreadable_includes:
+            self.ssh_status_row.set_subtitle(
+                esc(f"Couldn't read {', '.join(status.unreadable_includes)} - sshd may use different values than shown")
+            )
+        else:
+            self.ssh_status_row.set_subtitle("")
+
+        # Switches show what sshd actually uses: a keyword sshd_config never
+        # sets means OpenSSH's default (e.g. password logins are allowed).
+        def is_yes(name: str) -> bool:
+            return status.effective(name).lower() in ("yes", "true")
+
+        self.root_login_row.set_active(is_yes("root_login"))
+        self.password_auth_row.set_active(is_yes("password_auth"))
         if status.port.isdigit():
             self.ssh_port_row.set_value(int(status.port))
-        if status.max_auth_tries.isdigit():
-            self.max_auth_tries_row.set_value(int(status.max_auth_tries))
+        if status.effective("max_auth_tries").isdigit():
+            self.max_auth_tries_row.set_value(int(status.effective("max_auth_tries")))
+        default_note = " (OpenSSH default)" if status.log_level == "unknown" else ""
         self.log_level_row.set_subtitle(
-            f"Currently: {status.log_level} · CIS recommends INFO or VERBOSE"
+            f"Currently: {status.effective('log_level')}{default_note} · CIS recommends INFO or VERBOSE"
         )
-        self.x11_forwarding_row.set_active(status.x11_forwarding.lower() in ("yes", "true"))
-        self.ignore_rhosts_row.set_active(status.ignore_rhosts.lower() in ("yes", "true"))
-        self.hostbased_auth_row.set_active(status.hostbased_authentication.lower() in ("yes", "true"))
-        self.permit_empty_passwords_row.set_active(status.permit_empty_passwords.lower() in ("yes", "true"))
-        self.permit_user_environment_row.set_active(status.permit_user_environment.lower() in ("yes", "true"))
+        self.x11_forwarding_row.set_active(is_yes("x11_forwarding"))
+        self.ignore_rhosts_row.set_active(is_yes("ignore_rhosts"))
+        self.hostbased_auth_row.set_active(is_yes("hostbased_authentication"))
+        self.permit_empty_passwords_row.set_active(is_yes("permit_empty_passwords"))
+        self.permit_user_environment_row.set_active(is_yes("permit_user_environment"))
         self._suppress_signals = False
         return False
 
