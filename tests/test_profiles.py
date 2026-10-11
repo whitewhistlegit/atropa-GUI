@@ -258,6 +258,25 @@ def test_import_selinux_applies_matching_booleans(fake_run, fake_which):
     assert fake_run.call_containing("setsebool") is not None
 
 
+def test_import_selinux_applies_every_change_in_one_setsebool(fake_run, fake_which):
+    # Each `setsebool -P` rebuilds the whole policy and asks for a password.
+    fake_which.update({"sestatus", "getsebool"})
+    fake_run.set_response(["sestatus"], stdout="SELinux status: enabled\nCurrent mode: permissive\n")
+    fake_run.set_response(
+        ["getsebool", "-a"],
+        stdout="ssh_sysadm_login --> off\nhttpd_can_network_connect --> on\ndeny_ptrace --> off\n",
+    )
+    results = profiles.import_profile(
+        {"selinux_booleans": {"ssh_sysadm_login": True, "httpd_can_network_connect": False, "deny_ptrace": False}},
+        ["selinux_booleans"],
+        lambda _l: None,
+    )
+    assert results["selinux_booleans"].ok
+    assert "applied=2 unchanged=1" in results["selinux_booleans"].stdout
+    setsebool_calls = [c for c in fake_run.calls if "setsebool" in c]
+    assert setsebool_calls == [["pkexec", "setsebool", "-P", "ssh_sysadm_login=on", "httpd_can_network_connect=off"]]
+
+
 def test_import_selinux_skips_values_that_are_not_booleans(fake_run, fake_which):
     # bool("off") is True - a hand-edited string must not be read as "on".
     fake_which.add("sestatus")

@@ -127,6 +127,21 @@ def set_boolean(name: str, value: bool, persistent: bool = True) -> CommandResul
     return run_privileged(argv)
 
 
+def set_booleans(values: dict[str, bool], persistent: bool = True) -> CommandResult:
+    """
+    Several booleans in one setsebool call (`name=on name2=off ...`): with
+    -P every call rebuilds and reloads the whole policy, and each is its
+    own password prompt.
+    """
+    if not values:
+        raise ValueError("No booleans given")
+    argv = ["setsebool"]
+    if persistent:
+        argv.append("-P")
+    argv += [f"{name}={'on' if value else 'off'}" for name, value in values.items()]
+    return run_privileged(argv)
+
+
 def restorecon(path: str, recursive: bool = True) -> CommandResult:
     if not path:
         raise ValueError("Path is required")

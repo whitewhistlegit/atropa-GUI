@@ -21,6 +21,8 @@ would have worked fine.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -101,21 +103,31 @@ def _applicable_lines(rule_set: AuditRuleSet) -> list[str]:
     return lines
 
 
-def is_audit_rule_set_active(key: str) -> bool:
+_LOADED_KEY_RE = re.compile(r'(?:-k |-F key=|key=)"?([^"\s]+)')
+
+
+def active_rule_set_keys() -> set[str] | None:
     """
-    Checks whether this rule set's key already appears in the currently
-    loaded audit rules (auditctl -l), not just whether its file exists -
-    the file existing doesn't guarantee it was successfully loaded (e.g.
-    a syntax error, or a kernel that doesn't support 32-bit syscall
-    auditing rejecting the b32 rules).
+    Keys of the rule sets that appear in the currently loaded audit rules
+    (auditctl -l) - not just whose file exists: the file existing doesn't
+    guarantee it was successfully loaded (e.g. a syntax error, or a kernel
+    that doesn't support 32-bit syscall auditing rejecting the b32 rules).
+    One auditctl call - and one password prompt - for every rule set; the
+    Hardening page used to run one per set, five at once. None if the
+    loaded rules couldn't be read.
     """
-    rule_set = _RULE_SETS_BY_KEY.get(key)
-    if rule_set is None:
-        return False
     result = run_privileged(["auditctl", "-l"])
     if not result.ok:
+        return None
+    loaded = set(_LOADED_KEY_RE.findall(result.stdout))
+    return {rule_set.key for rule_set in RULE_SETS if rule_set.key in loaded}
+
+
+def is_audit_rule_set_active(key: str) -> bool:
+    """active_rule_set_keys() for a single rule set - prefer that one when checking several."""
+    if key not in _RULE_SETS_BY_KEY:
         return False
-    return f"-k {rule_set.key}" in result.stdout or f"key={rule_set.key}" in result.stdout
+    return key in (active_rule_set_keys() or set())
 
 
 def apply_audit_rule_set(key: str) -> CommandResult:
@@ -156,18 +168,23 @@ def apply_all_rule_sets() -> dict[str, CommandResult]:
     """
     results: dict[str, CommandResult] = {}
     any_written = False
+    applicable = {rule_set.key: _applicable_lines(rule_set) for rule_set in RULE_SETS}
+
+    # One mkdir for all of them, not one per rule set (each one is a prompt).
+    mkdir_result = None
+    if any(applicable.values()):
+        mkdir_result = run_privileged(["mkdir", "-p", str(AUDIT_RULES_DIR)])
 
     for rule_set in RULE_SETS:
-        lines = _applicable_lines(rule_set)
+        lines = applicable[rule_set.key]
         if not lines:
             results[rule_set.key] = CommandResult(0, "nothing applicable on this system", "")
             continue
-        content = "\n".join(lines) + "\n"
-        rules_path = AUDIT_RULES_DIR / f"50-{rule_set.key}.rules"
-        mkdir_result = run_privileged(["mkdir", "-p", str(AUDIT_RULES_DIR)])
-        if not mkdir_result.ok:
+        if mkdir_result is not None and not mkdir_result.ok:
             results[rule_set.key] = mkdir_result
             continue
+        content = "\n".join(lines) + "\n"
+        rules_path = AUDIT_RULES_DIR / f"50-{rule_set.key}.rules"
         write_result = run_privileged(["tee", str(rules_path)], input_text=content)
         results[rule_set.key] = write_result
         if write_result.ok:

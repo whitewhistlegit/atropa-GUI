@@ -199,17 +199,12 @@ class HardeningPage(BasePage):
         self._run_audit()
 
     def _refresh_audit_rule_statuses(self) -> None:
-        for rule_set in audit_rules.RULE_SETS:
-            self.run_async(
-                lambda key=rule_set.key: audit_rules.is_audit_rule_set_active(key),
-                lambda result, error, key=rule_set.key: self._on_audit_rule_status_loaded(result, error, key),
-            )
+        # One auditctl -l (one password prompt) for every rule set, not one each.
+        self.run_async(audit_rules.active_rule_set_keys, self._on_audit_rule_statuses_loaded)
 
-    def _on_audit_rule_status_loaded(self, result, error, key: str) -> bool:
-        icon = self._audit_rule_status_icons.get(key)
-        if icon is None:
-            return False
-        icon.set_visible(bool(result) and not error)
+    def _on_audit_rule_statuses_loaded(self, active_keys, error) -> bool:
+        for key, icon in self._audit_rule_status_icons.items():
+            icon.set_visible(not error and active_keys is not None and key in active_keys)
         return False
 
     def _run_audit(self) -> None:
