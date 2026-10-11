@@ -400,6 +400,15 @@ def faillock_status() -> dict:
     return {"wired": wired, "deny": deny, "unlock_time": unlock_time}
 
 
+def _append_line(path: Path, line: str) -> CommandResult:
+    """
+    Appends one line to a root-owned file with `tee -a` and the line on
+    stdin. It used to be `bash -c "echo '...' >> file"`: a root shell, with
+    the value pasted into its command line.
+    """
+    return run_privileged(["tee", "-a", str(path)], input_text=line + "\n")
+
+
 def _set_faillock_option(key: str, value: str) -> CommandResult:
     pattern = rf"^#?\s*{re.escape(key)}\s*=.*$"
     replacement = f"{key} = {value}"
@@ -407,7 +416,7 @@ def _set_faillock_option(key: str, value: str) -> CommandResult:
     if check.stdout.strip():
         result = run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(FAILLOCK_CONF)])
     else:
-        result = run_privileged(["bash", "-c", f"echo '{replacement}' >> {FAILLOCK_CONF}"])
+        result = _append_line(FAILLOCK_CONF, replacement)
     return result
 
 
@@ -465,7 +474,7 @@ def _set_pwquality_option(key: str, value: str) -> CommandResult:
     check = run_unprivileged(["grep", "-E", pattern, str(PWQUALITY_CONF)])
     if check.stdout.strip():
         return run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(PWQUALITY_CONF)])
-    return run_privileged(["bash", "-c", f"echo '{replacement}' >> {PWQUALITY_CONF}"])
+    return _append_line(PWQUALITY_CONF, replacement)
 
 
 def set_password_complexity_policy(
