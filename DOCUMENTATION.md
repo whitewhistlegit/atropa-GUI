@@ -8,7 +8,7 @@ decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
 Current size: **~12,900 lines of Python across 23 backend modules and 22 UI
-pages, plus a 782-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
+pages, plus a 785-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -101,6 +101,16 @@ hanging the worker thread for good. Such a child is now left running and
 reported: `PrivilegeError` names its PID. The streaming runners read output
 on a separate thread, so their timeout counts while the command runs
 instead of after it has closed its output.
+
+**Commands print the same on every system.** Every command starts with
+`LC_ALL=C.UTF-8` and without `LANGUAGE` (`privilege._command_env()`),
+because Atropa reads what commands print and they translate it:
+`pacman -Ss` translates its `[installed]` marker, so on a system set to
+another language the package search showed everything as not installed.
+`LANGUAGE` is dropped because Python's gettext (ufw, firewall-cmd,
+semanage) goes by it before `LC_ALL`. pkexec and sudo both hand these
+variables on, so privileged commands are covered too. The app's own
+environment is left alone.
 
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
@@ -956,7 +966,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 782 tests across
+**There's a real pytest suite**: `tests/`, 785 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -1075,7 +1085,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (782 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (785 tests as of the latest pass, across all 23 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
