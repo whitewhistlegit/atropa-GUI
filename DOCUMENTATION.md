@@ -531,7 +531,7 @@ have `package=None` and a note instead of an Install button.
   `/etc/atropa/plugins-enabled.json`); `set_plugin_enabled(id, enabled)`
   writes via pkexec; `run_plugin_action(action_key, params)`.
 - Manifest fields: `id`, `title`, `description`, `icon` (default
-  `puzzle-piece-symbolic`), `author`, `version`, `[[groups]]` with `title`,
+  `application-x-addon-symbolic`), `author`, `version`, `[[groups]]` with `title`,
   `description`, `[[groups.rows]]` with `title`, `action`, `button_label`,
   plus any parameter names the registry action declares.
 
@@ -1694,6 +1694,10 @@ exactly one definition.
   All three run in CI on push/PR to `main`.
 - **After any edit near an existing function**: `grep -n "^def <name>"
   <file>` to confirm you didn't just create a duplicate
+- **Icon names**: use only names the stock Adwaita theme ships (list them
+  with `ls /usr/share/icons/Adwaita/symbolic/*/`). A name the theme lacks
+  renders as a blank space with no error - `emblem-ok-symbolic`,
+  `shield-symbolic` and `puzzle-piece-symbolic` all did.
 - Real install on the user's Arch machine: `./install.sh`, or for
   fast iteration, straight from source: `python3 -m atropa.main`
   (requires `python-gobject gtk4 libadwaita polkit` from pacman)

@@ -13,7 +13,7 @@ from atropa.backend import audit_rules, hardening
 from atropa.ui.pages import BasePage, esc
 
 STATUS_ICON = {
-    "pass": "emblem-ok-symbolic",
+    "pass": "object-select-symbolic",
     "warn": "dialog-warning-symbolic",
     "fail": "dialog-error-symbolic",
     "info": "dialog-information-symbolic",
@@ -172,7 +172,7 @@ class HardeningPage(BasePage):
         self._audit_rule_status_icons: dict[str, Gtk.Image] = {}
         for rule_set in audit_rules.RULE_SETS:
             row = Adw.ActionRow(title=esc(rule_set.title), subtitle=esc(rule_set.description))
-            status_icon = Gtk.Image.new_from_icon_name("emblem-ok-symbolic")
+            status_icon = Gtk.Image.new_from_icon_name("object-select-symbolic")
             status_icon.set_visible(False)
             row.add_prefix(status_icon)
             apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)

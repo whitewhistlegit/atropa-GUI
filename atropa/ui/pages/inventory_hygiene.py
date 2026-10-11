@@ -22,7 +22,7 @@ from atropa.backend import account_hygiene, inventory
 from atropa.ui.pages import BasePage, esc
 
 STATUS_ICON = {
-    "pass": "emblem-ok-symbolic",
+    "pass": "object-select-symbolic",
     "warn": "dialog-warning-symbolic",
     "fail": "dialog-error-symbolic",
     "info": "dialog-information-symbolic",
