@@ -178,6 +178,9 @@ class ActivityPage(BasePage):
 
             restore_btn = Gtk.Button(label="Restore", valign=Gtk.Align.CENTER)
             restore_btn.connect("clicked", self._on_restore_backup, entry)
+            if not entry.get("restorable"):
+                restore_btn.set_sensitive(False)
+                restore_btn.set_tooltip_text("Atropa doesn't back up this file, so it won't restore it")
             row.add_suffix(restore_btn)
 
             self.backups_group.add(row)

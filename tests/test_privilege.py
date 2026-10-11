@@ -155,6 +155,43 @@ def test_restore_file_missing_backup_raises(privilege_paths):
         privilege.restore_file("nope.bak", "/etc/ssh/sshd_config")
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["/etc/sudoers", "/etc/apparmor.d/../sudoers", "/etc//ssh/sshd_config", "etc/ssh/sshd_config", "/efi/loader/x.conf"],
+)
+def test_restore_file_refuses_paths_atropa_does_not_back_up(privilege_paths, fake_run, target):
+    # Anything running as the user can add a manifest entry - Restore must not become "write any file as root".
+    privilege_paths.backup_dir.mkdir(parents=True, exist_ok=True)
+    (privilege_paths.backup_dir / "planted.bak").write_text("evil ALL=(ALL) NOPASSWD: ALL\n")
+    with pytest.raises(PrivilegeError, match="isn't a file Atropa backs up"):
+        privilege.restore_file("planted.bak", target)
+    assert fake_run.calls == []
+
+
+def test_restore_file_refuses_a_backup_outside_the_backup_dir(privilege_paths, fake_run):
+    with pytest.raises(PrivilegeError, match="isn't the name of a backup"):
+        privilege.restore_file("../../.ssh/id_ed25519", "/etc/ssh/sshd_config")
+    assert fake_run.calls == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/etc/ssh/sshd_config", "/etc/fail2ban/jail.d/sshd.local", "/etc/sysctl.d/99-atropa-hardening.conf",
+        "/etc/default/grub", "/etc/apparmor.d/usr.bin.firefox", "/boot/loader/loader.conf",
+    ],
+)
+def test_restorable_accepts_what_atropa_backs_up(fake_run, fake_which, target):
+    assert privilege.restorable(target)
+
+
+def test_restorable_asks_bootctl_where_the_esp_is(fake_run, fake_which):
+    fake_which.add("bootctl")
+    fake_run.set_response(["bootctl", "--print-esp-path"], stdout="/mnt/esp\n")
+    assert privilege.restorable("/mnt/esp/loader/loader.conf")
+    assert not privilege.restorable("/mnt/other/loader/loader.conf")
+
+
 # --------------------------------------------------------------- listing helpers --
 
 def test_list_backups_empty_when_no_manifest(privilege_paths):
@@ -503,3 +540,18 @@ def test_backup_file_reads_through_an_unsearchable_directory_as_root(monkeypatch
     name = privilege.backup_file(target)
     assert name is not None
     assert (privilege_paths.backup_dir / name).read_text() == "timeout 3\n"
+
+
+def test_list_backups_marks_what_restore_file_takes(privilege_paths, fake_run, fake_which):
+    privilege_paths.backup_dir.mkdir(parents=True, exist_ok=True)
+    with open(privilege_paths.manifest, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"timestamp": "1", "original_path": "/etc/ssh/sshd_config", "backup_file": "s.bak"}) + "\n")
+        f.write(json.dumps({"timestamp": "2", "original_path": "/etc/sudoers", "backup_file": "t.bak"}) + "\n")
+        f.write(json.dumps({"timestamp": "3", "original_path": "/etc/default/grub", "backup_file": "../x"}) + "\n")
+        f.write(json.dumps(["not", "an", "entry"]) + "\n")
+        f.write(json.dumps({"timestamp": "4", "original_path": None, "backup_file": "u.bak"}) + "\n")
+
+    entries = privilege.list_backups()
+    assert [(e["original_path"], e["restorable"]) for e in entries] == [
+        ("/etc/default/grub", False), ("/etc/sudoers", False), ("/etc/ssh/sshd_config", True),
+    ]
