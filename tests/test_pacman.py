@@ -1,9 +1,11 @@
 """Tests for atropa.backend.pacman."""
 from __future__ import annotations
 
+import re
+
 import pytest
 
-from atropa.backend import pacman
+from atropa.backend import pacman, privilege
 
 
 # --------------------------------------------------------------- check_updates --
@@ -234,3 +236,121 @@ def test_upgrade_system_streaming_forwards_lines(monkeypatch, fake_which):
         "core is up to date",
         ":: Starting full system upgrade...",
     ]
+
+
+# --------------------------------------------------------------- repositories --
+
+STOCK_CONF = (
+    "[options]\nArchitecture = auto\nSigLevel = Required DatabaseOptional\n\n"
+    "[core]\nInclude = /etc/pacman.d/mirrorlist\n\n"
+    "[extra]\nInclude = /etc/pacman.d/mirrorlist\n"
+)
+UPSTREAM_BLOCK = (
+    "[selinux]\n"
+    "Server = https://github.com/archlinuxhardened/selinux/releases/download/ArchLinux-SELinux\n"
+    "SigLevel = Never\n"
+)
+
+
+@pytest.fixture
+def pacman_conf(tmp_path, monkeypatch, fake_run, fake_which):
+    """A pacman.conf the fake `tee` really writes and the fake `pacman-conf` really reads back."""
+    conf = tmp_path / "pacman.conf"
+    conf.write_text(STOCK_CONF)
+    monkeypatch.setattr(pacman, "PACMAN_CONF", conf)
+
+    def run(argv, input=None, **kwargs):  # noqa: A002 - subprocess.run's own name for it
+        result = fake_run(argv, input=input, **kwargs)
+        if list(argv) == ["pkexec", "tee", str(conf)] and result.returncode == 0:
+            conf.write_text(input)
+        if list(argv) == ["pacman-conf", "--repo-list"] and result.returncode == 0 and not result.stdout:
+            names = re.findall(r"^\[(?!options\])([^\]]+)\]$", conf.read_text(), re.MULTILINE)
+            result.stdout = "".join(f"{name}\n" for name in names)
+        return result
+
+    monkeypatch.setattr(privilege, "_subprocess_run", run)
+    return conf
+
+
+def test_configured_repos_asks_pacman(fake_run):
+    fake_run.set_response(["pacman-conf", "--repo-list"], stdout="core\nextra\nmultilib\n")
+    assert pacman.configured_repos() == ["core", "extra", "multilib"]
+
+
+def test_configured_repos_reads_the_file_when_pacman_conf_cant_be_run(tmp_path, monkeypatch):
+    conf = tmp_path / "pacman.conf"
+    conf.write_text(STOCK_CONF + "\n#[testing]\n[selinux]\nSigLevel = Never\n")
+    monkeypatch.setattr(pacman, "PACMAN_CONF", conf)
+
+    def missing(argv, **kwargs):
+        raise FileNotFoundError(argv[0])
+
+    monkeypatch.setattr(privilege, "_subprocess_run", missing)
+    assert pacman.configured_repos() == ["core", "extra", "selinux"]  # not [options], not the commented one
+    assert pacman.selinux_repo_enabled()
+
+
+def test_selinux_repo_is_not_enabled_on_a_stock_pacman_conf(pacman_conf):
+    assert not pacman.selinux_repo_enabled()
+
+
+def test_enable_selinux_repo_appends_what_upstream_documents(pacman_conf, privilege_paths):
+    assert pacman.enable_selinux_repo().ok
+    text = pacman_conf.read_text()
+    assert text.startswith(STOCK_CONF)  # nothing that was there is touched
+    assert text.endswith(UPSTREAM_BLOCK)
+    # After the official repositories, so they keep precedence for a package both have.
+    assert pacman.configured_repos() == ["core", "extra", "selinux"]
+    assert pacman.selinux_repo_enabled()
+    assert str(pacman_conf) in privilege_paths.manifest.read_text()  # backed up first
+
+
+def test_enable_selinux_repo_says_in_the_file_that_it_is_unsigned(pacman_conf):
+    pacman.enable_selinux_repo()
+    assert "unsigned" in pacman_conf.read_text()
+
+
+def test_enable_selinux_repo_does_nothing_when_already_enabled(pacman_conf, fake_run):
+    pacman.enable_selinux_repo()
+    once = pacman_conf.read_text()
+    result = pacman.enable_selinux_repo()
+    assert result.ok and "already" in result.stdout
+    assert pacman_conf.read_text() == once
+    assert sum(1 for call in fake_run.calls if call[:2] == ["pkexec", "tee"]) == 1
+
+
+def test_enable_selinux_repo_puts_pacman_conf_back_when_pacman_cant_read_it(pacman_conf, fake_run):
+    # A pacman.conf that doesn't parse stops every install and upgrade.
+    fake_run.set_response(["pacman-conf", "--repo-list"], returncode=1, stderr="error: config file could not be read")
+    with pytest.raises(RuntimeError, match="Restored the previous one"):
+        pacman.enable_selinux_repo()
+    assert pacman_conf.read_text() == STOCK_CONF
+
+
+def test_enable_selinux_repo_reports_a_failed_write(pacman_conf, fake_run):
+    fake_run.set_response(["pkexec", "tee"], returncode=126, stderr="Request dismissed")
+    assert not pacman.enable_selinux_repo().ok
+    assert pacman_conf.read_text() == STOCK_CONF
+
+
+def test_disable_selinux_repo_removes_exactly_what_enable_added(pacman_conf):
+    pacman.enable_selinux_repo()
+    assert pacman.disable_selinux_repo().ok
+    assert pacman_conf.read_text() == STOCK_CONF
+    assert not pacman.selinux_repo_enabled()
+
+
+def test_disable_selinux_repo_leaves_the_sections_around_it_alone(pacman_conf):
+    pacman_conf.write_text(STOCK_CONF + "\n" + UPSTREAM_BLOCK + "\n[custom]\nServer = file:///srv/repo\n")
+    assert pacman.disable_selinux_repo().ok
+    text = pacman_conf.read_text()
+    assert "[selinux]" not in text and "ArchLinux-SELinux" not in text and "SigLevel = Never" not in text
+    assert text.startswith(STOCK_CONF)
+    assert text.endswith("[custom]\nServer = file:///srv/repo\n")
+
+
+def test_disable_selinux_repo_does_nothing_when_it_isnt_there(pacman_conf, fake_run):
+    result = pacman.disable_selinux_repo()
+    assert result.ok and "not enabled" in result.stdout
+    assert fake_run.call_containing("tee") is None
+    assert pacman_conf.read_text() == STOCK_CONF

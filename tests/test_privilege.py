@@ -168,6 +168,16 @@ def test_restore_file_refuses_paths_atropa_does_not_back_up(privilege_paths, fak
     assert fake_run.calls == []
 
 
+def test_authenticate_asks_for_the_password_without_changing_anything(fake_run, fake_which):
+    assert privilege.authenticate().ok
+    assert fake_run.calls == [["pkexec", "true"]]
+
+
+def test_authenticate_is_not_ok_when_the_prompt_is_dismissed(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "true"], returncode=126, stderr="Request dismissed")
+    assert not privilege.authenticate().ok
+
+
 def test_restore_file_refuses_a_backup_outside_the_backup_dir(privilege_paths, fake_run):
     with pytest.raises(PrivilegeError, match="isn't the name of a backup"):
         privilege.restore_file("../../.ssh/id_ed25519", "/etc/ssh/sshd_config")
@@ -178,7 +188,7 @@ def test_restore_file_refuses_a_backup_outside_the_backup_dir(privilege_paths, f
     "target",
     [
         "/etc/ssh/sshd_config", "/etc/fail2ban/jail.d/sshd.local", "/etc/sysctl.d/99-atropa-hardening.conf",
-        "/etc/default/grub", "/etc/apparmor.d/usr.bin.firefox", "/boot/loader/loader.conf",
+        "/etc/default/grub", "/etc/apparmor.d/usr.bin.firefox", "/boot/loader/loader.conf", "/etc/pacman.conf",
     ],
 )
 def test_restorable_accepts_what_atropa_backs_up(fake_run, fake_which, target):

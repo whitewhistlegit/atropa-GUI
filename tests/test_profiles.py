@@ -166,6 +166,21 @@ def test_import_quicksetup_section_ignores_unknown_keys(fake_run, fake_which):
     assert results == {}
 
 
+def test_import_never_applies_a_locked_quicksetup_item(fake_run, fake_which):
+    # A profile is a file: hand-edited, or someone else's. It mustn't be a
+    # way to switch on the unsigned SELinux repository past its lock.
+    lines = []
+    results = profiles.import_profile({"quicksetup_keys": ["selinux_repo"]}, ["quicksetup"], lines.append)
+    assert "selinux_repo" not in results
+    assert any("locked" in line for line in lines)
+    assert fake_run.calls == []
+
+
+def test_export_never_lists_a_locked_quicksetup_item(fake_run, fake_which, monkeypatch):
+    monkeypatch.setattr(profiles.quicksetup.pacman, "selinux_repo_enabled", lambda: True)
+    assert "selinux_repo" not in profiles.export_profile()["quicksetup_keys"]
+
+
 # --------------------------------------------------------------- import: apparmor --
 
 def test_import_apparmor_skips_when_unavailable(fake_run, fake_which):
