@@ -192,11 +192,14 @@ def fail2ban_disable() -> CommandResult:
     return run_privileged(["systemctl", "disable", "--now", "fail2ban"])
 
 
+FAIL2BAN_SSHD_JAIL = "/etc/fail2ban/jail.d/sshd.local"
+
+
 def fail2ban_protect_ssh() -> CommandResult:
     """Ensure the sshd jail is enabled, then restart fail2ban to pick it up."""
     content = "[sshd]\nenabled = true\nbackend = systemd\n"
-    backup_file("/etc/fail2ban/jail.d/sshd.local")
-    result = run_privileged(["tee", "/etc/fail2ban/jail.d/sshd.local"], input_text=content)
+    backup_file(FAIL2BAN_SSHD_JAIL)
+    result = run_privileged(["tee", FAIL2BAN_SSHD_JAIL], input_text=content)
     if result.ok:
         result = run_privileged(["systemctl", "restart", "fail2ban"])
     return result

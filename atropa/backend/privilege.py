@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -360,11 +361,50 @@ def backup_file(path: str) -> str | None:
     return backup_name
 
 
+def restorable(path: str) -> bool:
+    """
+    True for the files Atropa backs up before editing them - the only
+    places restore_file() writes to. The manifest lives in your home
+    directory, where anything running as you can add an entry: without
+    this check, a planted entry made Restore write any file as root.
+    """
+    # Imported here: each of these modules imports this one.
+    from . import apparmor, bootloader, hardening, security, selinux, system_config
+
+    if not isinstance(path, str) or not path.startswith("/") or os.path.normpath(path) != path:
+        return False  # relative, or "..", "." or "//" in it
+    target = Path(path)
+    backed_up = {
+        Path(p)
+        for p in (
+            hardening.SYSCTL_HARDENING_FILE, hardening.FAIL2BAN_SSHD_JAIL, hardening.USBGUARD_RULES,
+            hardening.FAILLOCK_CONF, hardening.PWQUALITY_CONF, security.SSHD_CONFIG, selinux.SELINUX_CONFIG,
+            bootloader.GRUB_DEFAULT_PATH, system_config.LOCALE_GEN_PATH,
+        )
+    }
+    if target in backed_up or Path(apparmor.PROFILES_DIR) in target.parents:
+        return True
+    if target.parts[-2:] == ("loader", "loader.conf"):  # systemd-boot's, on the ESP
+        esp = target.parent.parent
+        return esp in bootloader.ESP_CANDIDATES or esp == bootloader.esp_path()
+    return False
+
+
+def _is_backup_name(name: str) -> bool:
+    """A plain file name, so BACKUP_DIR / name stays inside BACKUP_DIR."""
+    return isinstance(name, str) and "/" not in name and name not in ("", ".", "..")
+
+
 def restore_file(backup_file_name: str, original_path: str) -> CommandResult:
     """
     Writes a previously-made backup back to its original location. Always
-    privileged, since everything we back up lives under /etc.
+    privileged, since everything we back up lives under /etc or on the
+    ESP. Refuses a path restorable() turns down.
     """
+    if not restorable(original_path):
+        raise PrivilegeError(f"{original_path} isn't a file Atropa backs up, so it won't restore over it")
+    if not _is_backup_name(backup_file_name):
+        raise PrivilegeError(f"{backup_file_name!r} isn't the name of a backup")
     src = BACKUP_DIR / backup_file_name
     if not src.exists():
         raise PrivilegeError(f"Backup {backup_file_name} no longer exists")
@@ -376,16 +416,26 @@ def restore_file(backup_file_name: str, original_path: str) -> CommandResult:
 
 
 def list_backups(limit: int = 200) -> list[dict]:
-    """Most-recent-first list of {timestamp, original_path, backup_file} entries."""
+    """
+    Most-recent-first list of {timestamp, original_path, backup_file,
+    restorable} entries; restorable says whether restore_file() takes it.
+    """
     if not BACKUP_MANIFEST.exists():
         return []
     entries = []
     for line in BACKUP_MANIFEST.read_text(encoding="utf-8", errors="replace").strip().splitlines():
         try:
-            entries.append(json.loads(line))
+            entry = json.loads(line)
         except json.JSONDecodeError:
             continue
-    return list(reversed(entries))[:limit]
+        if isinstance(entry, dict) and all(
+            isinstance(entry.get(key), str) for key in ("timestamp", "original_path", "backup_file")
+        ):
+            entries.append(entry)
+    entries = list(reversed(entries))[:limit]
+    for entry in entries:
+        entry["restorable"] = restorable(entry["original_path"]) and _is_backup_name(entry["backup_file"])
+    return entries
 
 
 def get_recent_actions(limit: int = 200) -> list[str]:

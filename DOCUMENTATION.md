@@ -119,7 +119,11 @@ Backups land in `~/.local/share/atropa/backups/<name>.<timestamp>.bak`,
 with a JSONL manifest (`manifest.jsonl`) recording `{timestamp, original_path,
 backup_file}`. `list_backups()` and `restore_file(backup_file_name,
 original_path)` (writes it back via `tee`, privileged) power the Activity &
-Backups page's restore button.
+Backups page's restore button. The manifest sits in the user's home, where
+any program they run can add entries, so `restore_file()` only writes to
+paths `restorable()` accepts: the files listed below, profiles under
+`/etc/apparmor.d/`, and `loader/loader.conf` on the ESP. `list_backups()`
+marks each entry `restorable`, and the page disables Restore for the rest.
 
 **Functions currently wired to call `backup_file()` before editing:**
 | Function | File | What it edits |
