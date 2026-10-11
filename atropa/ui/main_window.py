@@ -52,7 +52,7 @@ MODULES = [
     ("compliance", "Compliance Report", "text-x-generic-symbolic", CompliancePage),
     ("inventory_hygiene", "Inventory & Hygiene", "view-list-symbolic", InventoryHygienePage),
     ("aide", "File Integrity", "drive-harddisk-symbolic", AidePage),
-    ("apparmor", "AppArmor", "shield-symbolic", ApparmorPage),
+    ("apparmor", "AppArmor", "security-high-symbolic", ApparmorPage),
     ("selinux", "SELinux", "changes-prevent-symbolic", SelinuxPage),
     ("selinux_load", "SELinux: Load Policy", "document-open-symbolic", SelinuxLoadPage),
     ("selinux_review", "SELinux: Denial Review", "edit-find-symbolic", SelinuxReviewPage),

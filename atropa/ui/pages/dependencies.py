@@ -90,7 +90,7 @@ class DependenciesPage(BasePage):
         row = Adw.ActionRow(title=esc(dep.name), subtitle=esc(subtitle))
 
         if status.installed:
-            row.add_prefix(Gtk.Image.new_from_icon_name("emblem-ok-symbolic"))
+            row.add_prefix(Gtk.Image.new_from_icon_name("object-select-symbolic"))
             row.add_suffix(Gtk.Label(label="installed", css_classes=["dim-label"]))
             return row
 

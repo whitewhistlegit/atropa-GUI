@@ -61,7 +61,7 @@ class PluginManifest:
     id: str
     title: str
     description: str = ""
-    icon: str = "puzzle-piece-symbolic"
+    icon: str = "application-x-addon-symbolic"
     author: str = ""
     version: str = ""
     groups: list[PluginGroup] = field(default_factory=list)
@@ -137,7 +137,7 @@ def _parse_manifest(path: Path) -> tuple[PluginManifest | None, list[str]]:
 
     manifest = PluginManifest(
         id=plugin_id, title=title, description=raw.get("description", ""),
-        icon=raw.get("icon", "puzzle-piece-symbolic"), author=raw.get("author", ""),
+        icon=raw.get("icon", "application-x-addon-symbolic"), author=raw.get("author", ""),
         version=raw.get("version", ""), groups=groups, path=str(path),
     )
     return manifest, []

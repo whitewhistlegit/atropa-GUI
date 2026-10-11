@@ -233,7 +233,7 @@ class SelinuxReviewPage(BasePage):
                 title=esc(_denial_title(denial)),
                 subtitle=esc(f"Was seen {denial.count} time(s) before · program: {denial.program}"),
             )
-            row.add_prefix(Gtk.Image.new_from_icon_name("emblem-ok-symbolic"))
+            row.add_prefix(Gtk.Image.new_from_icon_name("object-select-symbolic"))
             self.resolved_group.add(row)
             self._resolved_rows.append(row)
 

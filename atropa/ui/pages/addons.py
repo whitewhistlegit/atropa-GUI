@@ -67,7 +67,7 @@ class AddonsPage(BasePage):
             subtitle = f"Enabled · {subtitle}"
         row = Adw.ActionRow(title=esc(plugin.manifest.title), subtitle=esc(subtitle))
         row.add_prefix(
-            Gtk.Image.new_from_icon_name("emblem-ok-symbolic" if plugin.enabled else "dialog-warning-symbolic")
+            Gtk.Image.new_from_icon_name("object-select-symbolic" if plugin.enabled else "dialog-warning-symbolic")
         )
 
         toggle_btn = Gtk.Button(label="Disable" if plugin.enabled else "Enable", valign=Gtk.Align.CENTER)

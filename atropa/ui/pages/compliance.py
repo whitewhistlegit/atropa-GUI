@@ -13,7 +13,7 @@ from atropa.backend import compliance
 from atropa.ui.pages import BasePage, esc
 
 _STATUS_ICON = {
-    "pass": "emblem-ok-symbolic",
+    "pass": "object-select-symbolic",
     "warn": "dialog-warning-symbolic",
     "fail": "dialog-error-symbolic",
     "info": "dialog-information-symbolic",
