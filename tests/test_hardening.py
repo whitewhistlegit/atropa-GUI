@@ -44,9 +44,46 @@ def test_get_sysctl_status_marks_hardened(fake_run):
     settings = hardening.get_sysctl_status()
     kptr = next(s for s in settings if s.key == "kernel.kptr_restrict")
     assert kptr.is_hardened is True
-    other = next(s for s in settings if s.key == "kernel.sysrq")
+    other = next(s for s in settings if s.key == "kernel.dmesg_restrict")
     assert other.current == "0"
-    assert other.is_hardened is False  # recommended is "4"
+    assert other.is_hardened is False  # recommended is "1"
+
+
+def test_stricter_than_recommended_counts_as_hardened(fake_run):
+    fake_run.set_response(["sysctl", "-n", "kernel.yama.ptrace_scope"], stdout="3\n")
+    fake_run.set_response(["sysctl", "-n", "kernel.sysrq"], stdout="0\n")
+    fake_run.set_response(["sysctl", "-n", "fs.protected_fifos"], stdout="1\n")
+    by_key = {s.key: s for s in hardening.get_sysctl_status()}
+    assert by_key["kernel.yama.ptrace_scope"].is_hardened  # recommended 1; 3 = no attaching at all
+    assert by_key["kernel.sysrq"].is_hardened  # recommended 4; 0 = SysRq off
+    assert not by_key["fs.protected_fifos"].is_hardened  # recommended 2; 1 is weaker
+
+
+def test_apply_sysctl_hardening_never_lowers_a_stricter_setting(fake_run, fake_which, privilege_paths):
+    fake_run.set_response(["sysctl", "-n", "kernel.yama.ptrace_scope"], stdout="3\n")
+    hardening.apply_sysctl_hardening(["kernel.yama.ptrace_scope", "kernel.kptr_restrict"])
+    written = next(text for call, text in zip(fake_run.calls, fake_run.inputs) if call[:2] == ["pkexec", "tee"])
+    assert "kernel.kptr_restrict = 2" in written
+    assert "ptrace_scope" not in written
+
+
+def test_audit_sysctl_check_reads_live_values_not_the_file(fake_run, fake_which, monkeypatch, tmp_path):
+    # Atropa's file exists, but something later in sysctl.d overrides it.
+    sysctl_file = tmp_path / "99-atropa-hardening.conf"
+    sysctl_file.write_text("kernel.kptr_restrict = 2\n")
+    monkeypatch.setattr(hardening, "SYSCTL_HARDENING_FILE", str(sysctl_file))
+    for key, recommended, _desc in hardening.SYSCTL_RECOMMENDATIONS:
+        fake_run.set_response(["sysctl", "-n", key], stdout=f"{recommended}\n")
+    fake_run.set_response(["sysctl", "-n", "kernel.kptr_restrict"], stdout="0\n")
+    check = next(c for c in hardening.run_audit() if c.name == "Kernel sysctl hardening")
+    assert check.status == "warn" and "kernel.kptr_restrict" in check.detail
+
+
+def test_audit_sysctl_check_passes_when_settings_are_live_without_atropas_file(fake_run, fake_which):
+    for key, recommended, _desc in hardening.SYSCTL_RECOMMENDATIONS:
+        fake_run.set_response(["sysctl", "-n", key], stdout=f"{recommended}\n")
+    check = next(c for c in hardening.run_audit() if c.name == "Kernel sysctl hardening")
+    assert check.status == "pass"
 
 
 def test_apply_sysctl_hardening_requires_selection():
@@ -127,26 +164,30 @@ def test_apparmor_status_not_installed_not_kernel_enabled(fake_run, fake_which):
     assert status.extra["kernel_enabled"] is False
 
 
-def test_apparmor_status_fully_enabled(fake_run, fake_which, monkeypatch, tmp_path):
+def test_apparmor_status_fully_enabled(fake_run, fake_which, kernel_state):
     fake_which.add("aa-status")
     fake_run.set_response(["systemctl", "is-active", "apparmor"], stdout="active\n")
-    cmdline = tmp_path / "cmdline"
-    cmdline.write_text("BOOT_IMAGE=/vmlinuz apparmor=1 security=apparmor\n")
-    monkeypatch.setattr(hardening, "Path", hardening.Path)  # no-op, keep real Path
-    # Patch just the specific cmdline check via a targeted monkeypatch:
-    real_path_cls = hardening.Path
-
-    def fake_path(arg):
-        if arg == "/proc/cmdline":
-            return cmdline
-        return real_path_cls(arg)
-
-    monkeypatch.setattr(hardening, "Path", fake_path)
-
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,apparmor,bpf")
     status = hardening.apparmor_status()
     assert status.installed is True
     assert status.active is True
     assert status.extra["kernel_enabled"] is True
+
+
+def test_apparmor_kernel_check_reads_the_active_lsm_list(kernel_state):
+    # The Arch wiki's lsm=... parameter never contains "apparmor=1".
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,bpf\n")
+    assert hardening.apparmor_kernel_enabled() is False
+    kernel_state.lsm.write_text("capability,landlock,lockdown,yama,integrity,apparmor,bpf\n")
+    assert hardening.apparmor_kernel_enabled() is True
+
+
+def test_apparmor_kernel_check_falls_back_to_the_module_parameter(kernel_state):
+    # No securityfs: AppArmor's own enabled flag says the same thing.
+    kernel_state.apparmor_enabled.write_text("Y\n")
+    assert hardening.apparmor_kernel_enabled() is True
+    kernel_state.apparmor_enabled.write_text("N\n")
+    assert hardening.apparmor_kernel_enabled() is False
 
 
 # --------------------------------------------------------------- usbguard --

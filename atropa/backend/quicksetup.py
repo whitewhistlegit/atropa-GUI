@@ -59,8 +59,9 @@ CATALOG: list[SetupItem] = [
     ),
     SetupItem(
         "apparmor", "AppArmor",
-        "Installs and enables the AppArmor service. Actual enforcement also needs an "
-        "'apparmor=1 security=apparmor' kernel parameter and a reboot - not automated here.",
+        "Installs and enables the AppArmor service. Actual enforcement also needs AppArmor in "
+        f"the kernel's LSM list ('{hardening.APPARMOR_KERNEL_PARAMETER}') and a reboot - not "
+        "automated here.",
     ),
     SetupItem(
         "auditd", "auditd",
@@ -183,9 +184,9 @@ def _apply_apparmor(on_line: Callable[[str], None]) -> CommandResult:
     if not status.extra.get("kernel_enabled"):
         on_line(
             "AppArmor isn't enabled at the kernel level yet - that needs "
-            "'apparmor=1 security=apparmor' added to your kernel parameters and a reboot, "
-            "which isn't automated here. Installing/enabling the service now so it's ready "
-            "once that's done."
+            f"'{hardening.APPARMOR_KERNEL_PARAMETER}' added to your kernel parameters and a "
+            "reboot, which isn't automated here. Installing/enabling the service now so it's "
+            "ready once that's done."
         )
 
     result = hardening.apparmor_enable_service()
@@ -272,7 +273,12 @@ def status_summary() -> dict[str, str]:
     f2b = hardening.fail2ban_status()
     summary["fail2ban"] = "Active" if f2b.active else ("Installed, inactive" if f2b.installed else "Not installed")
 
-    summary["sysctl"] = "Configured" if hardening.sysctl_hardening_file_exists() else "Not configured"
+    gaps, available = hardening.sysctl_hardening_gaps()
+    summary["sysctl"] = (
+        "Couldn't read sysctl values" if not available
+        else "All recommended settings in effect" if not gaps
+        else f"{len(gaps)} of {available} recommended settings not in effect"
+    )
 
     if hardening.faillock_wired_into_pam():
         fl = hardening.faillock_status()
