@@ -1,4 +1,0 @@
-PyGObject>=3.46
-
-[dev]
-pytest>=7.0
