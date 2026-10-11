@@ -115,6 +115,24 @@ def _abandon(proc: subprocess.Popen) -> None:
                 pass
 
 
+def _command_env() -> dict[str, str]:
+    """
+    The environment every command is started in: the app's own, with the
+    locale pinned to C.UTF-8. Atropa reads what commands print, and they
+    translate it - pacman -Ss translates its "[installed]" marker, so on
+    a system set to another language the package search showed everything
+    as not installed. LANGUAGE goes as well: glibc ignores it under a C
+    locale, but Python's gettext (ufw, firewall-cmd, semanage) goes by it
+    before anything else. pkexec and sudo both hand these variables on,
+    so a privileged command prints the same as an unprivileged one.
+    C.UTF-8 rather than C, so the output stays UTF-8.
+    """
+    env = dict(os.environ)
+    env["LC_ALL"] = "C.UTF-8"
+    env.pop("LANGUAGE", None)
+    return env
+
+
 def _subprocess_run(argv: list[str], input=None, capture_output=True, text=True, timeout=None):  # noqa: A002
     """
     The part of subprocess.run() Atropa uses, minus its one unbounded wait:
@@ -130,6 +148,7 @@ def _subprocess_run(argv: list[str], input=None, capture_output=True, text=True,
         stdout=subprocess.PIPE if capture_output else None,
         stderr=subprocess.PIPE if capture_output else None,
         text=text,
+        env=_command_env(),
     )
     try:
         stdout, stderr = proc.communicate(input, timeout=timeout)
@@ -220,6 +239,7 @@ def _run_streaming(argv: list[str], on_line: Callable[[str], None], input_text: 
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            env=_command_env(),
         )
     except FileNotFoundError as exc:
         raise PrivilegeError(f"Command not found: {argv[0]}") from exc

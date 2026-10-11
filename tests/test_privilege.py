@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -45,6 +46,34 @@ def test_run_timeout_raises_privilege_error(fake_run, monkeypatch):
     monkeypatch.setattr(privilege, "_subprocess_run", raise_timeout)
     with pytest.raises(PrivilegeError, match="timed out"):
         privilege.run_unprivileged(["slow-tool"])
+
+
+# --------------------------------------------------------------- command locale --
+
+def test_command_env_pins_the_locale_and_drops_the_language_list(monkeypatch):
+    monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "de:en")
+    monkeypatch.setenv("ATROPA_TEST_MARKER", "kept")
+
+    env = privilege._command_env()
+
+    assert env["LC_ALL"] == "C.UTF-8"
+    assert "LANGUAGE" not in env
+    assert env["ATROPA_TEST_MARKER"] == "kept"
+    assert os.environ["LANGUAGE"] == "de:en"  # the app's own environment isn't touched
+
+
+def test_a_command_runs_in_the_pinned_locale_whatever_the_session_says(monkeypatch):
+    # A real child, not a stand-in. Under a non-English language list pacman -Ss
+    # translated its "[installed]" marker and the search read every package as
+    # not installed.
+    monkeypatch.setenv("LANG", "de_DE.UTF-8")
+    monkeypatch.setenv("LANGUAGE", "de:en")
+    script = "import os; print(os.environ.get('LC_ALL'), os.environ.get('LANGUAGE'))"
+
+    result = privilege.run_unprivileged([sys.executable, "-c", script])
+
+    assert result.stdout.strip() == "C.UTF-8 None"
 
 
 # --------------------------------------------------------------- run_privileged --
@@ -336,6 +365,21 @@ def test_run_privileged_streaming_uses_pkexec_prefix(monkeypatch, fake_which):
     monkeypatch.setattr(subprocess, "Popen", fake_popen_factory)
     privilege.run_privileged_streaming(["restorecon", "-Rv", "/home"], on_line=lambda _l: None)
     assert captured_argv["argv"] == ["pkexec", "restorecon", "-Rv", "/home"]
+
+
+def test_streamed_commands_run_in_the_pinned_locale_too(monkeypatch):
+    monkeypatch.setenv("LANGUAGE", "de:en")
+    captured = {}
+
+    def fake_popen_factory(argv, **kwargs):
+        captured["env"] = kwargs["env"]
+        return _FakePopen(argv, stdout_lines=[])
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen_factory)
+    privilege.run_unprivileged_streaming(["make", "conf", "all"], on_line=lambda _l: None)
+
+    assert captured["env"]["LC_ALL"] == "C.UTF-8"
+    assert "LANGUAGE" not in captured["env"]
 
 
 def test_run_privileged_streaming_reports_nonzero_returncode(monkeypatch, fake_which):
