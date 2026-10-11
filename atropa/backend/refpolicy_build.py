@@ -22,8 +22,11 @@ rather than one "build my policy" button:
    into the source tree's own build artifacts. Zero effect on the running
    system - nothing outside the source tree is touched at all. Can take
    several minutes for a full modular build, hence streamed.
-2. install() - `make install`, PRIVILEGED (writes under
-   /etc/selinux/NAME and /usr/share/selinux/NAME). Still does NOT make
+2. install() - `make install load`, PRIVILEGED. In a modular build
+   `install` only copies the module packages to /usr/share/selinux/NAME
+   and the context files to /etc/selinux/NAME - no compiled policy, no
+   policy store; `load` (semodule -s NAME) builds those, so without it
+   there was nothing for Activate to boot into. Still does NOT make
    this the *active* policy - SELINUXTYPE in /etc/selinux/config is left
    alone, so the system keeps running on whatever policy it was using
    before this step. Low risk: worst case, files exist on disk that
@@ -49,12 +52,19 @@ rather than one "build my policy" button:
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from .privilege import CommandResult, backup_file, run_privileged, run_privileged_streaming, run_unprivileged_streaming
 from .selinux import SELINUX_CONFIG, relabel_filesystem
+
+SELINUX_ROOT = Path("/etc/selinux")
+# build.conf's NAME becomes a directory name under /etc/selinux and the
+# SELINUXTYPE value - nothing else belongs in it.
+_POLICY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
 def _make_available() -> bool:
@@ -83,16 +93,60 @@ def build(source_dir: str, on_line: Callable[[str], None]) -> CommandResult:
 
 def install(source_dir: str, on_line: Callable[[str], None]) -> CommandResult:
     """
-    `make install` - compiles (if not already done), packages, and
-    installs the base module and configured loadable modules under
-    /etc/selinux/NAME and /usr/share/selinux/NAME. Does NOT touch
-    /etc/selinux/config or load anything into the running kernel policy -
-    see activate() for that.
+    `make install load` - compiles (if not already done), packages and
+    installs the base module and configured loadable modules
+    (/usr/share/selinux/NAME, /etc/selinux/NAME), then has semodule build
+    them into NAME's own policy store, which is what writes the compiled
+    policy (/etc/selinux/NAME/policy/policy.NN) a boot into NAME loads.
+    Does NOT touch /etc/selinux/config, so the running system stays on
+    its current policy - see activate() for the switch.
     """
     if not _make_available():
         raise RuntimeError("'make' isn't installed. Install it with: pacman -S make")
     _require_source_dir(source_dir)
-    return run_privileged_streaming(["make", "-C", source_dir, "install"], on_line, timeout=3600)
+    result = run_privileged_streaming(["make", "-C", source_dir, "install", "load"], on_line, timeout=3600)
+    _return_root_owned_files(source_dir, on_line)
+    return result
+
+
+def _return_root_owned_files(source_dir: str, on_line: Callable[[str], None]) -> None:
+    """
+    make ran as root, so whatever it created inside the source tree is
+    root-owned now - and the next unprivileged Build fails on those files.
+    Hands back only files owned by root:root. -R doesn't follow symlinks
+    (and -h changes a link itself, never its target), so nothing outside
+    the tree is touched.
+    """
+    uid, gid = os.getuid(), os.getgid()
+    if uid == 0:
+        return  # Atropa itself runs as root: the files are already "yours"
+    result = run_privileged(["chown", "-R", "-h", "--from=0:0", f"{uid}:{gid}", "--", source_dir])
+    if not result.ok:
+        on_line(
+            f"Couldn't hand the files make created in {source_dir} back to you "
+            f"({result.stderr.strip() or f'exit code {result.returncode}'}) - a later Build may fail on them."
+        )
+
+
+def _installed_binary_policy(policy_name: str) -> Path | None:
+    """The compiled policy (/etc/selinux/NAME/policy/policy.NN) a boot into NAME loads, if present."""
+    policy_dir = SELINUX_ROOT / policy_name / "policy"
+    try:
+        return next((p for p in sorted(policy_dir.glob("policy.*")) if p.suffix[1:].isdigit()), None)
+    except OSError:
+        return None
+
+
+def _with_selinuxtype(config_text: str, policy_name: str) -> str:
+    """config_text with SELINUXTYPE set: the first active line replaced, or one added."""
+    lines = config_text.splitlines()
+    for index, line in enumerate(lines):
+        if re.match(r"^\s*SELINUXTYPE\s*=", line):
+            lines[index] = f"SELINUXTYPE={policy_name}"
+            break
+    else:
+        lines.append(f"SELINUXTYPE={policy_name}")
+    return "\n".join(lines) + "\n"
 
 
 def activate(policy_name: str, default_login_seuser: str = "unconfined_u") -> list[CommandResult]:
@@ -103,32 +157,65 @@ def activate(policy_name: str, default_login_seuser: str = "unconfined_u") -> li
     pass/fail for the whole sequence - unlike build()/install(), this
     genuinely has multiple independently-meaningful steps.
 
+    Refuses up front unless NAME is a plain name and a compiled policy for
+    it exists: SELINUXTYPE pointing at a missing policy leaves an
+    enforcing system unable to boot. The login mapping goes into the new
+    policy's own store (-S) before /etc/selinux/config changes, so a
+    failure there changes nothing; if scheduling the relabel fails after
+    the switch, the previous config is put back, since booting into a
+    different policy without relabelling can fail too.
+
     Deliberately does NOT reboot and does NOT touch any kernel boot
     parameter - see this module's docstring. The filesystem relabel this
     schedules only takes effect after a reboot too; both are the human's
     call to actually make, on their own schedule.
     """
-    results: list[CommandResult] = []
+    if not _POLICY_NAME_RE.match(policy_name):
+        raise ValueError(f"{policy_name!r} isn't a policy name - letters, digits, '.', '_' and '-' only")
+    if _installed_binary_policy(policy_name) is None:
+        raise RuntimeError(
+            f"No compiled policy under {SELINUX_ROOT / policy_name / 'policy'} - check the name matches "
+            "build.conf's NAME and that Install finished."
+        )
+    original_config = SELINUX_CONFIG.read_text(encoding="utf-8")
 
-    backup_file(str(SELINUX_CONFIG))
-    pattern = r"^SELINUXTYPE=.*$"
-    results.append(
-        run_privileged(["sed", "-i", "-E", f"s/{pattern}/SELINUXTYPE={policy_name}/", str(SELINUX_CONFIG)])
-    )
-    if not results[-1].ok:
-        return results
+    results: list[CommandResult] = []
 
     # Try adding the __default__ login mapping first; if one already
     # exists (common - most policies ship a default mapping of some kind),
     # `semanage login -a` fails with "already defined" and -m (modify) is
     # the correct follow-up rather than treating that as a hard failure.
-    add_result = run_privileged(["semanage", "login", "-a", "-s", default_login_seuser, "__default__"])
+    # -N: don't reload the running policy - this store isn't the active one.
+    store = ["-S", policy_name, "-N"]
+    add_result = run_privileged(["semanage", "login", *store, "-a", "-s", default_login_seuser, "__default__"])
     if add_result.ok:
         results.append(add_result)
     else:
-        results.append(run_privileged(["semanage", "login", "-m", "-s", default_login_seuser, "__default__"]))
+        results.append(
+            run_privileged(["semanage", "login", *store, "-m", "-s", default_login_seuser, "__default__"])
+        )
     if not results[-1].ok:
         return results
 
-    results.append(relabel_filesystem())
+    backup_file(str(SELINUX_CONFIG))
+    new_config = _with_selinuxtype(original_config, policy_name)
+    results.append(run_privileged(["tee", str(SELINUX_CONFIG)], input_text=new_config))
+    if not results[-1].ok:
+        return results
+
+    relabel_result = relabel_filesystem()
+    results.append(relabel_result)
+    if not relabel_result.ok:
+        restore = run_privileged(["tee", str(SELINUX_CONFIG)], input_text=original_config)
+        outcome = (
+            "put the previous /etc/selinux/config back, so the next boot still uses the old policy"
+            if restore.ok
+            else f"restoring the previous /etc/selinux/config ALSO failed ({restore.stderr.strip() or 'unknown error'}) "
+            f"- set SELINUXTYPE back by hand before rebooting"
+        )
+        results[-1] = CommandResult(
+            relabel_result.returncode,
+            relabel_result.stdout,
+            f"Couldn't schedule the relabel ({relabel_result.stderr.strip() or 'unknown error'}); {outcome}.",
+        )
     return results

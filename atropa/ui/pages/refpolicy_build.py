@@ -48,10 +48,11 @@ class RefpolicyBuildPage(BasePage):
         build_row.add_suffix(self.build_btn)
         intro_group.add(build_row)
 
-        self.install_btn = Gtk.Button(label="Install (make install)", valign=Gtk.Align.CENTER, sensitive=False)
+        self.install_btn = Gtk.Button(label="Install (make install load)", valign=Gtk.Align.CENTER, sensitive=False)
         self.install_btn.connect("clicked", lambda _b: self._on_install_clicked())
         install_row = Adw.ActionRow(
-            title="2. Install", subtitle="Writes to /etc/selinux and /usr/share/selinux - does not activate it"
+            title="2. Install",
+            subtitle="Installs the modules and builds the policy into its own store - does not activate it",
         )
         install_row.add_suffix(self.install_btn)
         intro_group.add(install_row)
@@ -128,9 +129,11 @@ class RefpolicyBuildPage(BasePage):
         source_dir = self._source_dir
         self.confirm(
             "Install this policy?",
-            f"Runs 'make install' in {source_dir} (needs authentication). Writes the compiled policy under "
-            "/etc/selinux and /usr/share/selinux, but does NOT make it the active policy - the system keeps "
-            "running whatever it's running now until you use Activate below.",
+            f"Runs 'make install load' in {source_dir} as root, so the tree's Makefile runs as root: only "
+            "install a tree you trust, since anything that can write to it can run commands as root through "
+            "this step. Installs the modules under /usr/share/selinux and /etc/selinux and builds the policy "
+            "into its own store, but does NOT make it the active policy - the system keeps running whatever "
+            "it's running now until you use Activate below.",
             "Install",
             lambda: self.run_streaming_operation(
                 "Installing policy",
@@ -156,7 +159,7 @@ class RefpolicyBuildPage(BasePage):
             "the switch and relabel to actually take effect. Make sure Install has already succeeded for "
             "this exact policy name before doing this.",
             "Activate",
-            lambda: self.run_async(
+            lambda: self.run_action(
                 lambda: refpolicy_build.activate(policy_name, login_seuser), self._on_activate_done
             ),
         )
