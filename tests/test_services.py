@@ -76,3 +76,10 @@ def test_journal_tail_passes_line_count(fake_run):
     fake_run.set_response(["journalctl", "-u", "sshd"], stdout="log lines\n")
     assert services.journal_tail("sshd", lines=50) == "log lines\n"
     assert fake_run.last_call() == ["journalctl", "-u", "sshd", "-n", "50", "--no-pager"]
+
+
+def test_stop_impact_names_what_breaks_for_critical_units():
+    assert "password prompts" in services.stop_impact("polkit.service")
+    assert "session" in services.stop_impact("user@1000.service")
+    assert "SSH" in services.stop_impact("sshd.service")
+    assert services.stop_impact("cups.service") == ""
