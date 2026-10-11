@@ -93,15 +93,36 @@ def firewall_disable() -> CommandResult:
     raise RuntimeError("No firewall backend installed")
 
 
+def _firewalld_change_port(flag: str, port: str, protocol: str) -> CommandResult:
+    """
+    Applies a permanent firewalld port change (`flag` is "--add-port" or
+    "--remove-port"). firewall-cmd talks to the running daemon and fails
+    outright ("FirewallD is not running") when it's stopped - which is
+    exactly the state Quick Setup is in when it pre-allows SSH before
+    enabling the firewall for the first time. A stopped firewalld gets the
+    same change via firewall-offline-cmd instead, which edits the permanent
+    config directly and is picked up when the daemon starts.
+    """
+    spec = f"{port}/{protocol}"
+    if run_unprivileged(["systemctl", "is-active", "firewalld"]).stdout.strip() != "active":
+        return run_privileged(["firewall-offline-cmd", f"{flag}={spec}"])
+
+    result = run_privileged(["firewall-cmd", "--permanent", flag, spec])
+    if not result.ok:
+        return result
+    # The permanent rule is written either way, but the running firewall
+    # doesn't have it until a reload succeeds - report that as the failure
+    # rather than a success that isn't in effect yet.
+    reload_result = run_privileged(["firewall-cmd", "--reload"])
+    return result if reload_result.ok else reload_result
+
+
 def firewall_allow_port(port: str, protocol: str = "tcp") -> CommandResult:
     backend = firewall_backend()
     if backend == "ufw":
         return run_privileged(["ufw", "allow", f"{port}/{protocol}"])
     if backend == "firewalld":
-        result = run_privileged(["firewall-cmd", "--permanent", "--add-port", f"{port}/{protocol}"])
-        if result.ok:
-            run_privileged(["firewall-cmd", "--reload"])
-        return result
+        return _firewalld_change_port("--add-port", port, protocol)
     raise RuntimeError("No firewall backend installed")
 
 
@@ -110,10 +131,7 @@ def firewall_deny_port(port: str, protocol: str = "tcp") -> CommandResult:
     if backend == "ufw":
         return run_privileged(["ufw", "deny", f"{port}/{protocol}"])
     if backend == "firewalld":
-        result = run_privileged(["firewall-cmd", "--permanent", "--remove-port", f"{port}/{protocol}"])
-        if result.ok:
-            run_privileged(["firewall-cmd", "--reload"])
-        return result
+        return _firewalld_change_port("--remove-port", port, protocol)
     raise RuntimeError("No firewall backend installed")
 
 

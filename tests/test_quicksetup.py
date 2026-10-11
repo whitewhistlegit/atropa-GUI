@@ -102,6 +102,35 @@ def test_apply_firewall_allows_ssh_port_before_enabling(fake_run, fake_which, mo
     assert any("2222" in arg for arg in fake_run.calls[allow_index])
 
 
+def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_which):
+    """If the SSH rule can't be added (auth dismissed, ufw error, ...), the
+    firewall must stay off - enabling deny-by-default anyway is the remote
+    lockout the allow-first ordering exists to prevent."""
+    fake_which.add("ufw")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
+    fake_run.set_response(["pkexec", "ufw", "allow"], returncode=126, stderr="Request dismissed")
+    lines: list[str] = []
+
+    result = quicksetup._apply_firewall(lines.append)
+
+    assert not result.ok
+    assert fake_run.call_containing("--force") is None
+    assert not any(call[-1] == "enable" for call in fake_run.calls)
+    assert any("Not enabling the firewall" in line for line in lines)
+
+
+def test_apply_firewall_firewalld_stopped_allows_ssh_offline_then_enables(fake_run, fake_which):
+    fake_which.add("firewall-cmd")
+    fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+
+    result = quicksetup._apply_firewall(lambda _l: None)
+
+    assert result.ok
+    allow_index = fake_run.calls.index(["pkexec", "firewall-offline-cmd", "--add-port=22/tcp"])
+    enable_index = fake_run.calls.index(["pkexec", "systemctl", "enable", "--now", "firewalld"])
+    assert allow_index < enable_index
+
+
 def test_apply_firewall_skips_when_already_active(fake_run, fake_which):
     fake_which.add("ufw")
     fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: active\n")
