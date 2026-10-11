@@ -177,7 +177,7 @@ def _set_sshd_option(key: str, value: str) -> CommandResult:
         sed_expr = f"s/{pattern}/{replacement}/I"
         result = run_privileged(["sed", "-i", "-E", sed_expr, str(SSHD_CONFIG)])
     else:
-        result = run_privileged(["bash", "-c", f"echo '{replacement}' >> {SSHD_CONFIG}"])
+        result = run_privileged(["tee", "-a", str(SSHD_CONFIG)], input_text=replacement + "\n")
 
     if not result.ok:
         return result

@@ -152,7 +152,7 @@ def test_apparmor_status_fully_enabled(fake_run, fake_which, monkeypatch, tmp_pa
 # --------------------------------------------------------------- usbguard --
 
 def test_usbguard_status_not_installed(fake_run, fake_which, monkeypatch, tmp_path):
-    monkeypatch.setattr(hardening, "Path", lambda p: tmp_path / "missing" if "usbguard" in str(p) else Path(p))
+    monkeypatch.setattr(hardening, "USBGUARD_RULES", tmp_path / "missing")
     fake_run.set_response(["systemctl", "is-active", "usbguard"], stdout="inactive\n")
     fake_run.set_response(["systemctl", "is-enabled", "usbguard"], stdout="disabled\n")
     status = hardening.usbguard_status()
@@ -165,10 +165,7 @@ def test_usbguard_status_with_policy(fake_run, fake_which, monkeypatch, tmp_path
     rules = tmp_path / "rules.conf"
     rules.write_text("allow id 1234:5678\n")
 
-    def fake_path(p):
-        return rules if "usbguard" in str(p) else Path(p)
-
-    monkeypatch.setattr(hardening, "Path", fake_path)
+    monkeypatch.setattr(hardening, "USBGUARD_RULES", rules)
     fake_run.set_response(["systemctl", "is-active", "usbguard"], stdout="active\n")
     fake_run.set_response(["systemctl", "is-enabled", "usbguard"], stdout="enabled\n")
 
@@ -178,17 +175,41 @@ def test_usbguard_status_with_policy(fake_run, fake_which, monkeypatch, tmp_path
 
 
 def test_usbguard_generate_and_enable_stops_if_generation_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=1, stderr="no devices")
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], returncode=1, stderr="no devices")
+    result = hardening.usbguard_generate_and_enable()
+    assert not result.ok
+    assert fake_run.call_containing("tee") is None
+    assert fake_run.call_containing("enable") is None
+
+
+def test_usbguard_generate_and_enable_refuses_empty_policy(fake_run, fake_which):
+    # An empty rules.conf + enforcement would block every USB device,
+    # keyboard included - must stop before writing or enabling anything.
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], returncode=0, stdout="\n")
+    result = hardening.usbguard_generate_and_enable()
+    assert not result.ok
+    assert fake_run.call_containing("tee") is None
+    assert fake_run.call_containing("enable") is None
+
+
+def test_usbguard_generate_and_enable_stops_if_write_fails(fake_run, fake_which):
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout="allow id 1d6b:0002\n")
+    fake_run.set_response(["pkexec", "tee"], returncode=1, stderr="read-only file system")
     result = hardening.usbguard_generate_and_enable()
     assert not result.ok
     assert fake_run.call_containing("enable") is None
 
 
 def test_usbguard_generate_and_enable_enables_on_success(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    policy = "allow id 1d6b:0002 name \"xHCI Host Controller\"\n"
+    fake_run.set_response(["pkexec", "usbguard", "generate-policy"], stdout=policy)
+    fake_run.set_response(["pkexec", "tee"], returncode=0)
     fake_run.set_response(["pkexec", "systemctl", "enable"], returncode=0)
     result = hardening.usbguard_generate_and_enable()
     assert result.ok
+    write_call = ["pkexec", "tee", str(hardening.USBGUARD_RULES)]
+    assert fake_run.input_for(write_call) == policy
+    assert fake_run.call_containing("bash") is None
 
 
 # --------------------------------------------------------------- auditd --
@@ -353,12 +374,15 @@ def test_set_password_complexity_policy_uses_cis_defaults(fake_run, fake_which, 
     conf_file.write_text("")
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="")
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    fake_run.set_response(["pkexec", "tee", "-a"], returncode=0)
 
     hardening.set_password_complexity_policy()
-    calls_text = " ".join(arg for call in fake_run.calls for arg in call)
-    assert "minlen = 14" in calls_text
-    assert "dcredit = -1" in calls_text
+    appended = "".join(
+        stdin for call, stdin in zip(fake_run.calls, fake_run.inputs) if call[:3] == ["pkexec", "tee", "-a"]
+    )
+    assert "minlen = 14\n" in appended
+    assert "dcredit = -1\n" in appended
+    assert fake_run.call_containing("bash") is None
 
 
 def test_set_password_complexity_policy_rejects_invalid_minlen():

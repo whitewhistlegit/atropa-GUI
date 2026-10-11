@@ -137,8 +137,8 @@ def test_set_sshd_option_replaces_existing_line(
 
     assert result.ok
     assert fake_run.call_containing("sed") is not None
-    # append form ("bash -c ... >> ...") must NOT have been used
-    assert fake_run.call_containing("bash") is None
+    # append form ("tee -a") must NOT have been used
+    assert fake_run.call_containing("-a") is None
 
 
 def test_set_sshd_option_appends_when_missing(
@@ -149,16 +149,18 @@ def test_set_sshd_option_appends_when_missing(
     monkeypatch.setattr(security, "SSHD_CONFIG", conf)
 
     fake_run.set_response(["grep", "-Ei"], stdout="")  # not found -> append path
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    fake_run.set_response(["pkexec", "tee", "-a"], returncode=0)
     fake_run.set_response(["pkexec", "sshd", "-t"], returncode=0)
     fake_run.set_response(["pkexec", "systemctl", "reload", "sshd"], returncode=0)
 
     result = security.set_ssh_port(2222)
 
     assert result.ok
-    append_call = fake_run.call_containing("bash")
-    assert append_call is not None
-    assert "Port 2222" in append_call[-1]
+    append_call = ["pkexec", "tee", "-a", str(conf)]
+    assert append_call in fake_run.calls
+    # the line goes in via stdin, never through a shell
+    assert fake_run.input_for(append_call) == "Port 2222\n"
+    assert fake_run.call_containing("bash") is None
 
 
 def test_set_sshd_option_rolls_back_on_failed_validation(
@@ -193,13 +195,14 @@ def test_set_sshd_option_no_backup_available_still_raises_but_skips_restore(
     monkeypatch.setattr(security, "SSHD_CONFIG", conf)
 
     fake_run.set_response(["grep", "-Ei"], stdout="")
-    fake_run.set_response(["pkexec", "bash", "-c"], returncode=0)
+    fake_run.set_response(["pkexec", "tee", "-a"], returncode=0)
     fake_run.set_response(["pkexec", "sshd", "-t"], returncode=1, stderr="bad config")
 
     with pytest.raises(RuntimeError, match="failed validation"):
         security.set_ssh_port(2222)
 
-    assert fake_run.call_containing("tee") is None
+    # the append itself is a `tee -a`; a restore would be a plain `tee <path>`
+    assert ["pkexec", "tee", str(conf)] not in fake_run.calls
 
 
 def test_set_sshd_option_stops_early_if_edit_command_fails(
@@ -272,7 +275,7 @@ def test_ssh_status_permit_fields_dont_collide_with_each_other_or_root_login(fak
 
 def test_set_ssh_log_level_valid_values(fake_run, fake_which):
     security.set_ssh_log_level("VERBOSE")
-    assert any("LogLevel VERBOSE" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("LogLevel VERBOSE")
 
 
 def test_set_ssh_log_level_rejects_invalid_value():
@@ -282,12 +285,12 @@ def test_set_ssh_log_level_rejects_invalid_value():
 
 def test_set_ssh_x11_forwarding(fake_run, fake_which):
     security.set_ssh_x11_forwarding(False)
-    assert any("X11Forwarding no" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("X11Forwarding no")
 
 
 def test_set_ssh_max_auth_tries(fake_run, fake_which):
     security.set_ssh_max_auth_tries(4)
-    assert any("MaxAuthTries 4" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("MaxAuthTries 4")
 
 
 def test_set_ssh_max_auth_tries_rejects_less_than_one():
@@ -297,19 +300,19 @@ def test_set_ssh_max_auth_tries_rejects_less_than_one():
 
 def test_set_ssh_ignore_rhosts(fake_run, fake_which):
     security.set_ssh_ignore_rhosts(True)
-    assert any("IgnoreRhosts yes" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("IgnoreRhosts yes")
 
 
 def test_set_ssh_hostbased_authentication(fake_run, fake_which):
     security.set_ssh_hostbased_authentication(False)
-    assert any("HostbasedAuthentication no" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("HostbasedAuthentication no")
 
 
 def test_set_ssh_permit_empty_passwords(fake_run, fake_which):
     security.set_ssh_permit_empty_passwords(False)
-    assert any("PermitEmptyPasswords no" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("PermitEmptyPasswords no")
 
 
 def test_set_ssh_permit_user_environment(fake_run, fake_which):
     security.set_ssh_permit_user_environment(False)
-    assert any("PermitUserEnvironment no" in arg for call in fake_run.calls for arg in call)
+    assert fake_run.sent("PermitUserEnvironment no")

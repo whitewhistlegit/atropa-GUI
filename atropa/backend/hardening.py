@@ -34,6 +34,7 @@ from .privilege import CommandResult, backup_file, run_privileged, run_unprivile
 
 SYSCTL_HARDENING_FILE = "/etc/sysctl.d/99-atropa-hardening.conf"
 FAILLOCK_CONF = Path("/etc/security/faillock.conf")
+USBGUARD_RULES = Path("/etc/usbguard/rules.conf")
 PAM_SYSTEM_LOGIN = Path("/etc/pam.d/system-login")
 
 # (key, recommended value, human-readable description)
@@ -199,7 +200,7 @@ def usbguard_status() -> ServiceHardeningStatus:
     installed = shutil.which("usbguard") is not None
     active = run_unprivileged(["systemctl", "is-active", "usbguard"]).stdout.strip() == "active"
     enabled = run_unprivileged(["systemctl", "is-enabled", "usbguard"]).stdout.strip() == "enabled"
-    has_policy = Path("/etc/usbguard/rules.conf").exists() and Path("/etc/usbguard/rules.conf").stat().st_size > 0
+    has_policy = USBGUARD_RULES.exists() and USBGUARD_RULES.stat().st_size > 0
     return ServiceHardeningStatus(installed=installed, active=active, enabled=enabled, extra={"has_policy": has_policy})
 
 
@@ -209,9 +210,18 @@ def usbguard_generate_and_enable() -> CommandResult:
     enables enforcement. Anything plugged in later will need approval via
     `usbguard allow-device` (or a GUI applet) - that's the point of the tool.
     """
-    generate = run_privileged(["bash", "-c", "usbguard generate-policy > /etc/usbguard/rules.conf"])
+    # Two argv-only calls instead of a `bash -c "... > rules.conf"`: generate
+    # (needs root to enumerate devices), then write the captured policy.
+    # An empty policy would block every device, keyboard included, once
+    # enforcement starts - so refuse to write/enable on empty output.
+    generate = run_privileged(["usbguard", "generate-policy"])
     if not generate.ok:
         return generate
+    if not generate.stdout.strip():
+        return CommandResult(1, "", "usbguard generate-policy produced an empty policy; not enabling enforcement")
+    write = run_privileged(["tee", str(USBGUARD_RULES)], input_text=generate.stdout)
+    if not write.ok:
+        return write
     return run_privileged(["systemctl", "enable", "--now", "usbguard"])
 
 
@@ -282,7 +292,7 @@ def _set_faillock_option(key: str, value: str) -> CommandResult:
     if check.stdout.strip():
         result = run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(FAILLOCK_CONF)])
     else:
-        result = run_privileged(["bash", "-c", f"echo '{replacement}' >> {FAILLOCK_CONF}"])
+        result = run_privileged(["tee", "-a", str(FAILLOCK_CONF)], input_text=replacement + "\n")
     return result
 
 
@@ -337,7 +347,7 @@ def _set_pwquality_option(key: str, value: str) -> CommandResult:
     check = run_unprivileged(["grep", "-E", pattern, str(PWQUALITY_CONF)])
     if check.stdout.strip():
         return run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(PWQUALITY_CONF)])
-    return run_privileged(["bash", "-c", f"echo '{replacement}' >> {PWQUALITY_CONF}"])
+    return run_privileged(["tee", "-a", str(PWQUALITY_CONF)], input_text=replacement + "\n")
 
 
 def set_password_complexity_policy(

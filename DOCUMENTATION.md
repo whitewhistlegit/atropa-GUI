@@ -82,14 +82,17 @@ consecutive privileged actions in a short window don't re-prompt every time.
 **Every subprocess call uses an argv list, never `shell=True`** — this is a
 hard rule across the whole codebase, to avoid shell-injection from anything
 user-supplied (package names, hostnames, usernames, etc.) ending up
-interpreted by a shell. Known exceptions that do pass a string to
-`["bash", "-c", ...]` (needed for `>`/`>>` redirection as root):
-`hardening.usbguard_generate_and_enable()` (fixed string), and the
-append-if-missing branch of `security._set_sshd_option()`,
-`hardening._set_faillock_option()` and `hardening._set_pwquality_option()`.
-The interpolated values there are code-controlled (ints, `yes`/`no`, or a
-validated enum such as SSH `LogLevel`), never free text — keep it that way,
-or switch them to `tee -a` with `input_text`.
+interpreted by a shell. That includes root file writes: content goes in
+over **stdin** to `tee` (overwrite) or `tee -a` (append) via `input_text`,
+never through `bash -c "echo ... >> file"` — `_set_sshd_option`,
+`_set_faillock_option`, `_set_pwquality_option` and
+`usbguard_generate_and_enable` all used `bash -c` until they were moved to
+this pattern. Caveat that still applies: the *replace* branch of those same
+setters builds a `sed -i -E "s/pattern/replacement/"` expression, so a
+value containing `/`, `&` or `\` would corrupt the edit (not execute
+anything). Their values are code-controlled today (ints, `yes`/`no`,
+validated enums); a setter that ever takes free text should use the
+read → edit in Python → `tee` round-trip `set_locale_gen_enabled` uses.
 
 **Every command is logged** — privileged *and* unprivileged — to
 `~/.local/share/atropa/actions.log` by `privilege._run()` (Python
@@ -252,7 +255,9 @@ separate, richer modules; see below). Covers:
   param (bad kernel params risk an unbootable system)
 - USBGuard — `usbguard_generate_and_enable()` **always generates a policy from
   currently-plugged-in devices before enabling enforcement**; enabling blind
-  would block the next USB replug including your own keyboard
+  would block the next USB replug including your own keyboard; it also
+  refuses to write the rules file or enable enforcement if
+  `usbguard generate-policy` returns an empty policy
 - auditd, `vulnerability_scan()` (via `arch-audit`), login lockout
   (`faillock_status`/`set_faillock_policy` — **only touches
   `/etc/security/faillock.conf`**, never auto-wires `pam_faillock` into the PAM
