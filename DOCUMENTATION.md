@@ -8,7 +8,7 @@ decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
 Current size: **~12,900 lines of Python across 23 backend modules and 22 UI
-pages, plus a 765-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
+pages, plus a 782-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -253,7 +253,9 @@ privileged read" rather than crashing.
   into a live progress dialog
 - `remove(names, purge_config=False)`, `upgrade_system`, `clean_cache`,
   `list_installed`, `list_explicit`, `list_orphans` — straightforward pacman
-  wraps (`list_orphans()` has no caller yet, see the open items in section 6)
+  wraps. The page lists `list_orphans()` under "Orphaned Packages", with a
+  remove button per package and "Remove all", which passes exactly the
+  names shown to `remove()`
 - **The SELinux package repository.** `enable_selinux_repo()` appends the
   archlinuxhardened project's `[selinux]` repository to `/etc/pacman.conf`,
   exactly as their README gives it, `SigLevel = Never` included: neither
@@ -289,13 +291,27 @@ NetworkManager (`nmcli`) only — systemd-networkd is detected
 ### Users & Groups (`users.py` / `pages/users.py`)
 Reads `/etc/passwd`/`/etc/group` directly via `pwd`/`grp` modules (unprivileged,
 always accurate); writes via `useradd`/`usermod`/`userdel`/`groupadd`/`groupdel`.
-`DEFAULT_MIN_UID = 1000` filters out system accounts by default.
+Regular accounts are the ones in `DEFAULT_MIN_UID`..`DEFAULT_MAX_UID`
+(1000-60000, the login.defs defaults); the rest are filtered out by default.
+Without the upper bound, `nobody` (65534) was listed as a regular user and
+group, delete button included.
 - `list_users(include_system=False)` / `list_groups(include_system=False)`
   (root/UID 0 is always included), `create_user`, `modify_user` (full name,
   shell, extra groups, lock/unlock), `delete_user(remove_home=False)`,
   `create_group`, `delete_group`
 - `set_password` pipes `user:pass` to `chpasswd` via **stdin**, never argv
-  (argv would leak into `ps` output)
+  (argv would leak into `ps` output). chpasswd reads one entry per line, so
+  a line break in either part is refused (a pasted two-line password would
+  have set a second account's password), as are a `:` in the username and
+  an empty password
+- `supplementary_groups(username)` and `set_groups(username, groups)`
+  (`usermod -G`: exactly these groups, next to the primary one).
+  `groups_warning()` says when that takes the account out of `ADMIN_GROUP`;
+  `group_delete_refusal(name)` refuses the root group, `ADMIN_GROUP` and
+  any account's primary group
+- The page: each user row has set password (typed twice; the button stays
+  off until both match), change groups, lock, unlock and delete. The Groups
+  list has a "New group name" row and a delete button per group
 - Guards for the one-click changes that can't be undone from Atropa:
   `lock_refusal(username)` refuses the account you're signed in with, and
   root when nobody is in `ADMIN_GROUP` (`wheel` - polkit then asks for
@@ -315,7 +331,12 @@ always accurate); writes via `useradd`/`usermod`/`userdel`/`groupadd`/`groupdel`
 one a line in the Activity log. `stop_impact(unit)` returns what stopping or
 disabling a unit breaks (polkit, D-Bus, logind, the display manager,
 networking, sshd, the firewall, auditd, ...); the page shows it in the
-confirmation it asks before stop and disable. The page renders at most
+confirmation it asks before stop, restart and disable (for a restart, as
+what applies until the unit is back - or for good if it fails to start).
+Each row also has a journal button: the last `JOURNAL_LINES = 100` lines in
+a dialog. `journal_tail()` reads as the current user and keeps journalctl's
+stderr, so its hint about who may read system messages is shown instead of
+a bare "No entries". The page renders at most
 `MAX_ROWS = 150` services and says when the list is cut short.
 
 ### Bootloader (`bootloader.py` / `pages/bootloader.py`)
@@ -429,7 +450,9 @@ separate, richer modules; see below). Covers:
   backed up, the new one is installed with mode 0600 (`usbguard-daemon`
   refuses any other), and a daemon that was already running is restarted so
   it loads it. `usbguard_status().extra["has_policy"]` is `None` when
-  `/etc/usbguard` can't be looked into
+  `/etc/usbguard` can't be looked into; the page's "Turn off" button
+  (`usbguard_disable()`, shown while the daemon is active or enabled) asks
+  first and leaves the policy file where it is
 - CIS audit rule sets (`audit_rules.py`): `active_rule_set_keys()` reads the
   loaded rules with **one** privileged `auditctl -l` for every set - the
   page used to run one per set, five password prompts on opening it - and
@@ -933,7 +956,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 765 tests across
+**There's a real pytest suite**: `tests/`, 782 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -1052,7 +1075,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (765 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (782 tests as of the latest pass, across all 23 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2111,8 +2134,32 @@ exactly one definition.
   How far this was checked: against real pacman, the repository was
   accepted, synced, and the five tool packages resolved from it; removing
   it left `pacman.conf` byte-identical. The packages are x86_64-only and
-  the machine this was written on isn't, so the install itself, and
-  building the policy with the installed tools, are unverified.
+  the machine this was written on isn't, so Quick Setup's install step and
+  building the policy with the installed tools were not run. The
+  repository itself is in use on the maintainer's x86_64 machine.
+
+- ✅ **What the README listed but no page offered** - six things, each
+  with its backend function already written and tested:
+  1. **Set a user's password** - typed twice in a dialog.
+  2. **Groups** - create and delete in the Groups list, a user's
+     memberships from their row.
+  3. **Restart a service** and 4. **its journal**, on each Services row.
+  5. **Orphaned packages** on the Packages page, removable one by one or
+     all together.
+  6. **Turn USBGuard off**, next to the button that turns it on.
+
+  The guards and refusals are in section 2 under each module. Found on the
+  way: `nobody` was listed as a regular user and group. The same change
+  closed the two packaging items (`install.sh` installs `pacman-contrib`
+  and `fakeroot`; the launcher has one main category) and gave the README
+  screenshots (`docs/screenshots/`; `tests/test_resources.py` checks that
+  every image the README shows exists).
+
+  How far this was checked: users, passwords, groups and the orphan list
+  ran for real against useradd, chpasswd, usermod, groupadd and pacman.
+  Restart, the journal and USBGuard need systemd, which wasn't available
+  where this was written: there the dialogs and the commands sent were
+  checked, not their effect.
 
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
@@ -2133,27 +2180,19 @@ exactly one definition.
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
 **Still open from the full-repo audit** (rough priority order):
-- Run the SELinux path once on x86_64: Quick Setup's repository item and
-  SELinux step through to installed tools, then Get, Build and Install on
-  the Build Policy page (see the entry above for what was and wasn't
-  checked)
+- Run the SELinux path once on x86_64 through Atropa: Quick Setup's SELinux
+  step through to installed tools (the repository itself is known to
+  work), then Get, Build and Install on the Build Policy page
+- Check Restart, the journal dialog and USBGuard's "Turn off" on a machine
+  with systemd (see the entry above)
 - Check bootloader detection on a real UEFI machine that boots GRUB: the
   fix above rests on GRUB 2.12 writing "GRUB ..." to `LoaderInfo` and on
   `bootctl --print-esp-path` answering there, neither of which could be
   run where it was written
-- UI for what the README promises but no page offers yet: setting a user's
-  password, managing groups, a service's journal, cleaning up orphan
-  packages (`pacman.list_orphans()` exists, nothing calls it), and
-  disabling USBGuard
 - CI: a GTK smoke test that builds every page under Xvfb (the backend
   suite never imports GTK), Python 3.13/3.14 in the matrix next to
   3.11/3.12, and tests that run the parsers against real config files
   rather than hand-written snippets
-- Packaging: `install.sh` doesn't install `pacman-contrib` or `fakeroot`,
-  so "Check for updates" falls back to `pacman -Qu` until they're installed
-  from the Dependencies page. `atropa.desktop` lists two main categories
-  (`Settings;System;`), which `desktop-file-validate` flags because the app
-  may show up twice in menus
 - The single privileged helper (see Architecture): one root helper per
   operation instead of one pkexec prompt per command. Its design gets
   agreed before any code. It is also where backups should move to

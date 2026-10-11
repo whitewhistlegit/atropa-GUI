@@ -12,8 +12,10 @@ sudo pacman -S --needed --noconfirm \
     python python-pip python-pipx python-gobject gtk4 libadwaita polkit \
     networkmanager
 
-echo "==> Optional hardening tools (skip any that fail, they're not required to run Atropa)..."
-sudo pacman -S --needed --noconfirm arch-audit || true
+echo "==> Optional tools (skipped if they fail, they're not required to run Atropa)..."
+echo "    arch-audit for the vulnerability scan; pacman-contrib and fakeroot so that"
+echo "    'Check for updates' can ask the mirrors without touching the package database."
+sudo pacman -S --needed --noconfirm arch-audit pacman-contrib fakeroot || true
 echo "    fail2ban, apparmor, usbguard, and audit are also supported if you install them:"
 echo "      sudo pacman -S fail2ban apparmor usbguard audit"
 echo "    SELinux denial review (Why?/Generate .te) and policy loading need audit from the"

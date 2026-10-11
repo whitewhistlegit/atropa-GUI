@@ -10,6 +10,17 @@ libadwaita. Atropa runs as your normal user and asks for authentication
 
 > Developer/internals reference: see [`DOCUMENTATION.md`](DOCUMENTATION.md).
 
+<p align="center">
+  <img src="docs/screenshots/packages.png" alt="Package Management in dark style: updates, search and orphaned packages" width="49%">
+  <img src="docs/screenshots/users.png" alt="Users &amp; Groups in dark style" width="49%">
+</p>
+<p align="center">
+  <img src="docs/screenshots/set-password.png" alt="The dialog that sets a user's password, in dark style" width="49%">
+  <img src="docs/screenshots/dependencies.png" alt="The Dependencies page in dark style" width="49%">
+</p>
+
+Atropa follows your desktop's light or dark style; these show the dark one.
+
 ## Features
 
 Each sidebar entry is a module:
@@ -41,9 +52,10 @@ Each sidebar entry is a module:
 Every config file Atropa edits is backed up first to
 `~/.local/share/atropa/backups/`, and every privileged command is logged to
 `~/.local/share/atropa/actions.log`. Changes that can lock you out or end
-your session ask first and say what they affect: stopping a service like
-the display manager or sshd, locking a password, turning the firewall on,
-changing SSH logins.
+your session ask first and say what they affect: stopping or restarting a
+service like the display manager or sshd, locking a password, taking the
+last administrator out of `wheel`, turning the firewall on, changing SSH
+logins.
 
 ## Requirements
 
@@ -77,7 +89,8 @@ cd atropa-GUI
 
 `install.sh` will:
 
-1. install system dependencies with `pacman` (needs `sudo`), plus `arch-audit` optionally;
+1. install system dependencies with `pacman` (needs `sudo`), plus the
+   optional `arch-audit`, `pacman-contrib` and `fakeroot`;
 2. install Atropa with `pipx install --system-site-packages --force .` so it
    gets its own venv but reuses the system PyGObject;
 3. copy the desktop launcher to `~/.local/share/applications/` and its icon

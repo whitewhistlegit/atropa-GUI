@@ -46,6 +46,24 @@ def test_launcher_uses_the_app_id_as_its_icon_and_window_class():
     assert entry["StartupWMClass"] == _app_id()
 
 
+def test_launcher_has_exactly_one_main_category():
+    # With two, a menu may list the app twice (desktop-file-validate says so).
+    main_categories = {
+        "AudioVideo", "Audio", "Video", "Development", "Education", "Game", "Graphics", "Network", "Office",
+        "Science", "Settings", "System", "Utility",
+    }
+    categories = [name for name in _desktop_entry()["Categories"].split(";") if name]
+    assert len([name for name in categories if name in main_categories]) == 1, categories
+
+
+def test_every_image_the_readme_shows_exists():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    sources = [part.split('"', 1)[0] for part in readme.split('src="')[1:]]
+    assert len(sources) > 1, "the README should show the logo and the screenshots"
+    for source in sources:
+        assert (ROOT / source).is_file(), source
+
+
 def test_every_icon_is_a_square_png_of_its_directory_size():
     assert _icons(), "no packaged icons found"
     for icon in _icons():

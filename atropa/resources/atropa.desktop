@@ -5,6 +5,6 @@ Comment=System control center for Arch Linux
 Exec=atropa
 Icon=org.atropa.Atropa
 Terminal=false
-Categories=Settings;System;
+Categories=Settings;Security;PackageManager;
 StartupNotify=true
 StartupWMClass=org.atropa.Atropa
