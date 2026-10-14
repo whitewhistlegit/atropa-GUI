@@ -11,14 +11,15 @@ from atropa.backend import bootloader
 
 @pytest.fixture
 def boot_env(tmp_path, monkeypatch):
-    """Nothing installed until a test creates it: ESP candidates, EFI variables and /etc/default/grub."""
+    """Nothing installed until a test creates it: ESP candidates, EFI variables, /etc/default/grub and grub.cfg."""
     env = SimpleNamespace(
         efi=tmp_path / "efi", boot=tmp_path / "boot", boot_efi=tmp_path / "boot-efi",
-        efivars=tmp_path / "efivars", grub=tmp_path / "default-grub",
+        efivars=tmp_path / "efivars", grub=tmp_path / "default-grub", grub_cfg=tmp_path / "grub.cfg",
     )
     monkeypatch.setattr(bootloader, "ESP_CANDIDATES", (env.efi, env.boot, env.boot_efi))
     monkeypatch.setattr(bootloader, "EFIVARS_DIR", env.efivars)
     monkeypatch.setattr(bootloader, "GRUB_DEFAULT_PATH", env.grub)
+    monkeypatch.setattr(bootloader, "GRUB_CFG_PATH", env.grub_cfg)
     return env
 
 
@@ -41,6 +42,18 @@ def set_efivar(env, name: str, value: str = "") -> None:
 def make_grub(env, fake_which) -> None:
     fake_which.add("grub-mkconfig")
     env.grub.write_text("GRUB_TIMEOUT=5\n")
+
+
+def unreadable(monkeypatch, path: Path) -> None:
+    """Reading `path` raises PermissionError, as a root-only file does for a normal user."""
+    read_text = Path.read_text
+
+    def guarded(self, *args, **kwargs):
+        if self == path:
+            raise PermissionError(13, "Permission denied", str(path))
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", guarded)
 
 
 def written(fake_run, path: Path) -> list[str]:
@@ -202,15 +215,79 @@ def test_systemd_boot_info_reads_a_root_only_esp_in_one_privileged_call(boot_env
 def test_grub_info_parses_timeout_and_menu_entries(boot_env, fake_which, fake_run):
     fake_which.add("grub-mkconfig")
     boot_env.grub.write_text("GRUB_TIMEOUT=10\nGRUB_DEFAULT=0\n")
-    fake_run.set_response(
-        ["grep", "-E", "^menuentry"],
-        stdout="menuentry 'Arch Linux' --class arch {\nmenuentry 'Windows' --class windows {\n",
+    boot_env.grub_cfg.write_text(
+        "menuentry 'Arch Linux' --class arch {\n"
+        "submenu 'Advanced options for Arch Linux' {\n"
+        "\tmenuentry 'Arch Linux, with Linux linux' --class arch {\n"
+        "}\n"
+        "menuentry 'Windows' --class windows {\n"
     )
 
     info = bootloader.get_info()
     assert info.kind == "grub"
     assert info.default_timeout == "10"
-    assert [e.title for e in info.entries] == ["Arch Linux", "Windows"]
+    assert [e.title for e in info.entries] == ["Arch Linux", "Windows"]  # top level only, as before
+    assert info.entries_error == ""
+
+
+def test_grub_info_unquotes_titles_and_timeout_the_way_the_shell_does(boot_env, fake_which, fake_run):
+    # Grub Customizer double-quotes titles, which used to give no entries at all;
+    # grub-mkconfig writes an apostrophe as '\''; a hand-written entry may have no
+    # space before its brace. A quoted timeout used to read as '"5"'.
+    fake_which.add("grub-mkconfig")
+    boot_env.grub.write_text('GRUB_TIMEOUT="5"\nGRUB_TIMEOUT_STYLE="menu"\n')
+    boot_env.grub_cfg.write_text(
+        "menuentry \"Arch Linux, with Linux linux-zen\" --class arch $menuentry_id_option 'gnulinux-zen' {\n"
+        "menuentry 'Bob'\\''s Arch' --class arch {\n"
+        'menuentry "Custom entry"{\n'
+        "menuentry 'Braces { inside' {\n"
+    )
+
+    info = bootloader.get_info()
+
+    assert info.default_timeout == "5"
+    assert [e.title for e in info.entries] == [
+        "Arch Linux, with Linux linux-zen", "Bob's Arch", "Custom entry", "Braces { inside",
+    ]
+
+
+def test_grub_info_reads_a_root_only_grub_cfg_with_one_privileged_grep(boot_env, fake_which, fake_run, monkeypatch):
+    # grub-mkconfig writes grub.cfg with umask 077: read as the user, the entries were always empty.
+    make_grub(boot_env, fake_which)
+    boot_env.grub_cfg.write_text("")
+    unreadable(monkeypatch, boot_env.grub_cfg)
+    fake_run.set_response(["pkexec", "grep"], stdout='menuentry "Arch Linux" --class arch {\n')
+
+    info = bootloader.get_info()
+
+    assert [e.title for e in info.entries] == ["Arch Linux"]
+    assert fake_run.last_call() == ["pkexec", "grep", "-E", "^menuentry", str(boot_env.grub_cfg)]
+
+
+def test_grub_info_keeps_the_rest_when_the_entries_cant_be_read(boot_env, fake_which, fake_run, monkeypatch):
+    make_grub(boot_env, fake_which)
+    boot_env.grub_cfg.write_text("")
+    unreadable(monkeypatch, boot_env.grub_cfg)
+    fake_run.set_response(
+        ["pkexec", "grep"], stderr="Error executing command as another user: Request dismissed", returncode=126
+    )
+
+    info = bootloader.get_info()
+
+    assert info.kind == "grub"
+    assert info.default_timeout == "5"
+    assert info.entries == []
+    assert "Request dismissed" in info.entries_error
+
+
+def test_grub_info_without_a_grub_cfg_has_no_entries_and_no_error(boot_env, fake_which, fake_run):
+    make_grub(boot_env, fake_which)
+
+    info = bootloader.get_info()
+
+    assert info.entries == []
+    assert info.entries_error == ""
+    assert fake_run.calls == []
 
 
 def test_get_info_unknown_kind(boot_env, fake_which, fake_run):

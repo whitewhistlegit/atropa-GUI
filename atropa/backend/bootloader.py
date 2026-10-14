@@ -14,6 +14,7 @@ privileged call instead of failing.
 from __future__ import annotations
 
 import re
+import shlex
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +22,7 @@ from pathlib import Path
 from .privilege import CommandResult, backup_file, run_privileged, run_unprivileged
 
 GRUB_DEFAULT_PATH = Path("/etc/default/grub")
+GRUB_CFG_PATH = Path("/boot/grub/grub.cfg")
 # Where bootctl looks for the ESP when it can't be asked, in its own order.
 ESP_CANDIDATES = (Path("/efi"), Path("/boot"), Path("/boot/efi"))
 # The Boot Loader Interface's EFI variables. LoaderInfo names the loader
@@ -44,6 +46,7 @@ class BootloaderInfo:
     kind: str  # "grub", "systemd-boot", "unknown"
     entries: list[BootEntry] = field(default_factory=list)
     default_timeout: str = ""
+    entries_error: str = ""  # why the entries couldn't be read, when they couldn't
 
 
 def _exists(path: Path) -> bool:
@@ -195,22 +198,80 @@ def _systemd_boot_info() -> BootloaderInfo:
     return BootloaderInfo(kind="systemd-boot", entries=entries, default_timeout=timeout)
 
 
+def _shell_word(value: str) -> str:
+    """A value from /etc/default/grub the way the shell reads it: GRUB_TIMEOUT="5" is 5, not "5"."""
+    try:
+        words = shlex.split(value, comments=True)
+    except ValueError:  # an unbalanced quote
+        return value.strip()
+    return words[0] if words else ""
+
+
+def _grub_menu_lines() -> list[str]:
+    """
+    grub.cfg's top-level menuentry lines. grub-mkconfig writes the file with
+    umask 077, so a normal user usually can't read it; then it's read with
+    one privileged grep - a grep rather than cat, so password hashes from a
+    01_users section stay in the file. RuntimeError when that read fails
+    too, a dismissed password prompt for one.
+    """
+    try:
+        text = GRUB_CFG_PATH.read_text(encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return []
+    except PermissionError:
+        result = run_privileged(["grep", "-E", "^menuentry", str(GRUB_CFG_PATH)])
+        if result.returncode not in (0, 1):  # 1: no entries
+            detail = result.stderr.strip() or f"exit code {result.returncode}"
+            raise RuntimeError(f"Couldn't read {GRUB_CFG_PATH}: {detail}") from None
+        text = result.stdout
+    return [line for line in text.splitlines() if line.startswith("menuentry")]
+
+
+def _grub_words(line: str) -> list[str]:
+    """
+    `line` split the way GRUB's shell-like syntax reads it: quotes removed,
+    '\\'' read as an apostrophe, and a brace written straight after the
+    title ("Custom"{) kept apart from it.
+    """
+    lexer = shlex.shlex(line, posix=True, punctuation_chars="{")
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+def _grub_entries(lines: list[str]) -> list[BootEntry]:
+    """
+    Entry titles from menuentry lines: grub-mkconfig single-quotes a title,
+    Grub Customizer double-quotes it, and a hand-written entry may have no
+    space before its brace. Splitting on "'" found no title at all in a
+    double-quoted line.
+    """
+    entries = []
+    for line in lines:
+        try:
+            words = _grub_words(line)
+        except ValueError:  # an unbalanced quote - not a line to guess at
+            continue
+        if len(words) > 1:
+            entries.append(BootEntry(title=words[1], identifier=words[1]))
+    return entries
+
+
 def _grub_info() -> BootloaderInfo:
     timeout = ""
     if _exists(GRUB_DEFAULT_PATH):
         for line in GRUB_DEFAULT_PATH.read_text().splitlines():
             if line.startswith("GRUB_TIMEOUT="):
-                timeout = line.split("=", 1)[1].strip()
+                timeout = _shell_word(line.split("=", 1)[1])
 
-    entries = []
-    result = run_unprivileged(["grep", "-E", "^menuentry", "/boot/grub/grub.cfg"])
-    for line in result.stdout.strip().splitlines():
-        # menuentry 'Arch Linux' --class arch ...
-        if "'" in line:
-            title = line.split("'")[1]
-            entries.append(BootEntry(title=title, identifier=title))
+    # A failed read of the entries leaves the rest of the page standing.
+    entries, entries_error = [], ""
+    try:
+        entries = _grub_entries(_grub_menu_lines())
+    except RuntimeError as exc:
+        entries_error = str(exc)
 
-    return BootloaderInfo(kind="grub", entries=entries, default_timeout=timeout)
+    return BootloaderInfo(kind="grub", entries=entries, default_timeout=timeout, entries_error=entries_error)
 
 
 def set_timeout(seconds: int) -> CommandResult:
@@ -286,7 +347,7 @@ def _set_systemd_boot_timeout(seconds: int) -> CommandResult:
 def regenerate_config() -> CommandResult:
     kind = detect()
     if kind == "grub":
-        return run_privileged(["grub-mkconfig", "-o", "/boot/grub/grub.cfg"])
+        return run_privileged(["grub-mkconfig", "-o", str(GRUB_CFG_PATH)])
     if kind == "systemd-boot":
         return run_privileged(["bootctl", "update"])
     raise RuntimeError("No supported bootloader detected")
