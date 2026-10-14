@@ -764,7 +764,10 @@ Built on `hostnamectl` / `timedatectl` / `localectl`:
 charmap, enabled)` (the one raw-file edit: `cat` → edit in Python → `tee`,
 backed up, then `locale-gen`), `list_keymaps`/`set_keymap`,
 `list_x11_layouts`/`set_x11_layout`. Filter lists render at most 40 matches
-(`_MAX_RENDERED_MATCHES`).
+(`_MAX_RENDERED_MATCHES`). The page shows the loaded NTP state with its
+signals suppressed and sends a click through `apply_switch()`: setting the
+switch to the loaded state used to count as a toggle, so opening the page
+with NTP on ran `timedatectl set-ntp true` behind a password prompt.
 
 ### Security Quick Setup (`quicksetup.py` / `pages/quicksetup.py`)
 `CATALOG` of `SetupItem(key, title, description, default_selected, risk_note,
