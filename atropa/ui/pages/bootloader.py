@@ -69,6 +69,11 @@ class BootloaderPage(BasePage):
             self.entries_group.add(row)
             self._entry_rows.append(row)
 
+        if info.entries_error:
+            row = Adw.ActionRow(title="Couldn't read the boot entries", subtitle=esc(info.entries_error))
+            self.entries_group.add(row)
+            self._entry_rows.append(row)
+
         return False
 
     def _on_apply_timeout(self, _btn: Gtk.Button) -> None:

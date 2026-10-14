@@ -18,6 +18,7 @@ _MAX_RENDERED_MATCHES = 40
 class SystemConfigPage(BasePage):
     def __init__(self) -> None:
         super().__init__()
+        self._suppress_signals = False
 
         # ---------------- hostname ----------------
         self.hostname_group = self.add_group("Hostname")
@@ -135,12 +136,17 @@ class SystemConfigPage(BasePage):
             return False
         self.time_status_row.set_title(esc(result.local_time or "Unknown time"))
         self.time_status_row.set_subtitle(esc(result.timezone))
+        # Showing the loaded state isn't a toggle: without this, opening the
+        # page with NTP on ran `timedatectl set-ntp true` behind a password prompt.
+        self._suppress_signals = True
         self.ntp_switch.set_active(result.ntp_service_active)
+        self._suppress_signals = False
         return False
 
-    def _on_ntp_toggled(self, _switch: Gtk.Switch, state: bool) -> bool:
-        self.run_async(lambda: system_config.set_ntp(state), self.handle_command_result)
-        return False
+    def _on_ntp_toggled(self, switch: Gtk.Switch, state: bool) -> bool:
+        if self._suppress_signals:
+            return False
+        return self.apply_switch(switch, state, lambda: system_config.set_ntp(state))
 
     def _on_timezones_loaded(self, result, error) -> bool:
         if error:

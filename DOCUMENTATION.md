@@ -8,7 +8,7 @@ decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
 Current size: **~12,900 lines of Python across 23 backend modules and 22 UI
-pages, plus a 785-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
+pages, plus a 789-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
 available in the dev sandbox this was built in, so UI code is verified via
 `py_compile` + `ruff` + the backend test suite, and visually only when the
 user runs a build on bare-metal Arch (see "Testing approach" below).
@@ -366,8 +366,17 @@ The ESP isn't assumed to be under `/boot`: `esp_path()` asks `bootctl
 --print-esp-path` and falls back to the first of `/efi`, `/boot`,
 `/boot/efi` that has a `loader/` directory. Entries are also read from
 XBOOTLDR (`bootctl --print-boot-path`), and a root-only ESP (`umask=0077`)
-is read with one privileged `grep -rH` instead of crashing. `get_info()`
-returns a `BootloaderInfo(kind, entries, default_timeout)`.
+is read with one privileged `grep -rH` instead of crashing. GRUB's entries
+are the top-level `menuentry` lines of `/boot/grub/grub.cfg`, which
+`grub-mkconfig` writes with umask 077: when it can't be read directly it is
+read with one privileged `grep` - a grep, so password hashes from a
+`01_users` section stay in the file. Titles are unquoted the way GRUB's
+shell-like syntax reads them (`shlex`): grub-mkconfig single-quotes them,
+Grub Customizer double-quotes them, and a hand-written entry may have no
+space before its `{`. A failed read leaves `entries` empty with the reason
+in `entries_error`, and the rest of the page stands. `GRUB_TIMEOUT="5"`
+reads as `5`. `get_info()` returns a
+`BootloaderInfo(kind, entries, default_timeout, entries_error)`.
 
 `set_timeout` backs the file up and edits it by content (`_with_setting()`):
 every active line for the key is replaced, else the first commented-out one
@@ -764,7 +773,10 @@ Built on `hostnamectl` / `timedatectl` / `localectl`:
 charmap, enabled)` (the one raw-file edit: `cat` → edit in Python → `tee`,
 backed up, then `locale-gen`), `list_keymaps`/`set_keymap`,
 `list_x11_layouts`/`set_x11_layout`. Filter lists render at most 40 matches
-(`_MAX_RENDERED_MATCHES`).
+(`_MAX_RENDERED_MATCHES`). The page shows the loaded NTP state with its
+signals suppressed and sends a click through `apply_switch()`: setting the
+switch to the loaded state used to count as a toggle, so opening the page
+with NTP on ran `timedatectl set-ntp true` behind a password prompt.
 
 ### Security Quick Setup (`quicksetup.py` / `pages/quicksetup.py`)
 `CATALOG` of `SetupItem(key, title, description, default_selected, risk_note,
@@ -966,7 +978,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 785 tests across
+**There's a real pytest suite**: `tests/`, 789 tests across
 one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -1085,7 +1097,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (785 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (789 tests as of the latest pass, across all 23 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
