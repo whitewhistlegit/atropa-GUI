@@ -1,9 +1,9 @@
 # Atropa — Technical Documentation
 
-This is the full technical reference for the project, written so a new session
-(with no prior context) can pick up development without re-deriving anything
-from the code. `README.md` is the user-facing quickstart; this file is the
-internals reference — architecture, every function's contract, design
+This is the full technical reference for the project, written so anyone
+willing can pick up development without re-deriving anything from the code.
+`README.md` is the user-facing quickstart; this file is the internals
+reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
@@ -2240,7 +2240,7 @@ exactly one definition.
   with `ls /usr/share/icons/Adwaita/symbolic/*/`). A name the theme lacks
   renders as a blank space with no error - `emblem-ok-symbolic`,
   `shield-symbolic` and `puzzle-piece-symbolic` all did.
-- Real install on the user's Arch machine: `./install.sh`, or for
+- Real install on an Arch machine: `./install.sh`, or for
   fast iteration, straight from source: `python3 -m atropa.main`
   (requires `python-gobject gtk4 libadwaita polkit` from pacman)
 - The user's actual test system runs **SELinux via `refpolicy-arch`** (an AUR
