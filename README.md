@@ -105,6 +105,23 @@ To uninstall: `pipx uninstall atropa`, then remove
 `~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png` and
 `/usr/share/polkit-1/actions/org.atropa.pkexec.policy`.
 
+### As a pacman package
+
+[`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) builds `atropa-git`
+from the `main` branch, so pacman tracks every installed file and
+`pacman -R atropa-git` removes them all:
+
+```bash
+sudo pacman -S --needed base-devel python-build python-installer python-pytest
+cd packaging/arch
+makepkg -si
+```
+
+Run `makepkg -si` again to update. Only pushed commits are packaged, not
+local changes. If you used `install.sh` before, undo it first (see the
+uninstall steps above): the pipx copy in `~/.local/bin` would shadow
+`/usr/bin/atropa`, and pacman won't overwrite the polkit policy it copied.
+
 ### Run from source
 
 ```bash
