@@ -723,7 +723,9 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
 - **Per-application batch review** (`build_policy_review(source="journal",
   denial_limit=500, sample_size=5, since=<unset>)`) — ported from a
   user-supplied shell script. Groups denials by **(program, source
-  domain)**, skips kernel noise (`^(systemd|kernel|audit|kworker|swapper)`),
+  domain)**, skips kernel noise (exact names: `systemd` (PID 1), `kernel`,
+  `kworker/*`, `swapper/*` - a prefix match used to hide systemd-tmpfiles,
+  systemd-coredump, auditd and the like),
   and for each group: generates a `.te`, an `audit2why` explanation, and
   compiles (but does **not** install) a `.pp`. Rationale for grouping:
   `audit2allow` produces a much better policy seeing all of a program's

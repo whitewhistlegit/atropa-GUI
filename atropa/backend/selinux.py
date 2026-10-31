@@ -575,8 +575,14 @@ def reinstall_all_approved_modules() -> CommandResult:
 # "program" is its comm= name AND its source domain: comm= is whatever name
 # the process gave itself, so the same name in two domains gets two reviews
 # rather than one module granting both domains' rules.
+#
+# Matched against the whole comm=, never as a prefix: a prefix match also
+# hid systemd-tmpfiles, systemd-coredump, systemd-logind, systemd-homed and
+# auditd - a quarter of one enforcing desktop boot's denials, and the ones
+# that break things (directories not created at boot, crashes not dumped).
+# kworker and swapper threads carry a suffix (kworker/u8:2, swapper/0).
 
-_SKIP_PROGRAMS_RE = re.compile(r"^(systemd|kernel|audit|kworker|swapper)")
+_SKIP_PROGRAMS_RE = re.compile(r"systemd|kernel|kworker/.*|swapper/.*")
 
 
 @dataclass
@@ -623,9 +629,10 @@ def build_policy_review(
     """
     Fetches denials, groups them by program, and for each program:
     generates a .te (audit2allow), an explanation (audit2why), and compiles
-    - but does not install - a .pp for review. Kernel/audit-subsystem noise
-    (systemd, kworker, etc.) is skipped since it's rarely what you want a
-    custom policy for and mostly reflects normal system operation.
+    - but does not install - a .pp for review. Kernel noise (PID 1's
+    "systemd", kworker, etc. - _SKIP_PROGRAMS_RE, exact names only) is
+    skipped since it's rarely what you want a custom policy for and mostly
+    reflects normal system operation.
 
     `since` (an ISO timestamp - typically Setup Mode's start time)
     switches the fetch from the small "recent N" window to
@@ -664,7 +671,7 @@ def build_policy_review(
             continue
         m = re.search(r'comm="([^"]+)"', line)
         prog = m.group(1) if m else "unknown"
-        if _SKIP_PROGRAMS_RE.match(prog):
+        if _SKIP_PROGRAMS_RE.fullmatch(prog):
             continue
         groups.setdefault((prog, _extract_context_type(line, "scontext")), []).append(line)
 
@@ -906,7 +913,7 @@ def group_denials(lines: list[str]) -> list[GroupedDenial]:
 
         comm_m = re.search(r'comm="([^"]+)"', line)
         program = comm_m.group(1) if comm_m else "unknown"
-        if _SKIP_PROGRAMS_RE.match(program):
+        if _SKIP_PROGRAMS_RE.fullmatch(program):
             continue
 
         scontext_type = _extract_context_type(line, "scontext")
