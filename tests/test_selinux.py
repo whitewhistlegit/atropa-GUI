@@ -1009,6 +1009,21 @@ def test_group_denials_skips_noise_programs():
     assert "myapp" in programs
 
 
+def test_group_denials_keeps_programs_that_only_share_a_noise_prefix():
+    # comm= values from an enforcing GNOME boot (cut at 15 characters, as the
+    # kernel does). A prefix match hid all of these - a quarter of that
+    # boot's denials.
+    kept = ["systemd-tmpfile", "systemd-coredum", "systemd-logind", "systemd-homed", "auditd"]
+    skipped = ["systemd", "kernel", "kworker/u8:2", "swapper/0"]
+    lines = [
+        f'avc:  denied  {{ read }} comm="{comm}" scontext=system_u:system_r:t{i}_t '
+        f"tcontext=system_u:object_r:etc_t tclass=file"
+        for i, comm in enumerate(kept + skipped)
+    ]
+    programs = {g.program for g in selinux.group_denials(lines)}
+    assert programs == set(kept)
+
+
 def test_group_denials_extracts_context_types_and_path():
     """
     _DENIAL_A only has name="a" (a bare, non-absolute name), not a real
