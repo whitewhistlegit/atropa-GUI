@@ -211,11 +211,78 @@ def test_create_keys_goes_through_pkexec(fake_run, fake_which):
     assert fake_run.last_call() == ["pkexec", "sbctl", "create-keys"]
 
 
+_VERIFY_ALL_SIGNED = (
+    '[{"file_name": "/efi/EFI/systemd/systemd-bootx64.efi", "is_signed": 1},'
+    ' {"file_name": "/boot/vmlinuz-linux", "is_signed": 1},'
+    ' {"file_name": "/efi/EFI/old/gone.efi", "is_signed": -1}]'
+)
+_VERIFY_TWO_UNSIGNED = (
+    '[{"file_name": "/efi/EFI/systemd/systemd-bootx64.efi", "is_signed": 0},'
+    ' {"file_name": "/efi/EFI/BOOT/BOOTX64.EFI", "is_signed": 0},'
+    ' {"file_name": "/efi/EFI/Linux/arch.efi", "is_signed": 1}]'
+)
+
+
 def test_enroll_keys_keeps_microsoft_keys_and_answers_the_prompt(fake_run, fake_which):
     fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_ALL_SIGNED)
     boot_security.enroll_keys()
     assert fake_run.last_call() == ["pkexec", "sbctl", "enroll-keys", "--microsoft"]
     assert fake_run.inputs[-1] == "y\n"
+
+
+def test_enroll_keys_refuses_while_boot_files_are_unsigned(fake_run, fake_which):
+    # Many firmwares enforce as soon as keys are enrolled: enrolling with an
+    # unsigned bootloader is how a machine stops booting.
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_TWO_UNSIGNED)
+    with pytest.raises(RuntimeError, match="systemd-bootx64.efi"):
+        boot_security.enroll_keys()
+    assert not any("enroll-keys" in call for call in fake_run.calls)
+
+
+def test_unsigned_boot_files_ignores_signed_and_missing(fake_run, fake_which):
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_ALL_SIGNED)
+    assert boot_security.unsigned_boot_files() == []
+    assert ["pkexec", "sbctl", "verify", "--json"] in fake_run.calls
+
+
+def test_unsigned_boot_files_reports_sbctl_failure(fake_run, fake_which):
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], returncode=1, stderr="failed to find EFI system partition")
+    with pytest.raises(RuntimeError, match="EFI system partition"):
+        boot_security.unsigned_boot_files()
+
+
+def test_sign_boot_files_signs_and_saves_each_unsigned_file(fake_run, fake_which):
+    # sign-all alone signs nothing right after create-keys: the database is
+    # empty until files are added with `sign -s`.
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_TWO_UNSIGNED)
+    result = boot_security.sign_boot_files()
+    assert result.ok
+    signs = [call for call in fake_run.calls if call[:3] == ["pkexec", "sbctl", "sign"]]
+    assert signs == [
+        ["pkexec", "sbctl", "sign", "-s", "/efi/EFI/systemd/systemd-bootx64.efi"],
+        ["pkexec", "sbctl", "sign", "-s", "/efi/EFI/BOOT/BOOTX64.EFI"],
+    ]
+
+
+def test_sign_boot_files_stops_at_the_first_failure(fake_run, fake_which):
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_TWO_UNSIGNED)
+    fake_run.set_response(["pkexec", "sbctl", "sign"], returncode=1, stderr="no keys")
+    result = boot_security.sign_boot_files()
+    assert not result.ok
+    assert sum(call[:3] == ["pkexec", "sbctl", "sign"] for call in fake_run.calls) == 1
+
+
+def test_sign_boot_files_with_nothing_unsigned_signs_nothing(fake_run, fake_which):
+    fake_which.add("sbctl")
+    fake_run.set_response(["pkexec", "sbctl", "verify"], stdout=_VERIFY_ALL_SIGNED)
+    assert boot_security.sign_boot_files().ok
+    assert not any(call[:3] == ["pkexec", "sbctl", "sign"] for call in fake_run.calls)
 
 
 def test_sign_all_goes_through_pkexec(fake_run, fake_which):

@@ -20,6 +20,7 @@ still reports the other two instead of one blank page.
 
 from __future__ import annotations
 
+import json
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -306,23 +307,80 @@ def sbctl_status() -> SbctlStatus:
 # peripherals can stop working on a dual-boot or discrete-GPU machine.
 
 
+#
+# The order matters: create keys, sign, *then* enroll. Many firmwares start
+# enforcing as soon as keys are enrolled, and an unsigned kernel or
+# bootloader then doesn't boot.
+
+
 def create_keys() -> CommandResult:
     """Create sbctl's own Secure Boot key pair (idempotent)."""
     return run_privileged(["sbctl", "create-keys"])
 
 
+def unsigned_boot_files() -> list[str]:
+    """
+    EFI files sbctl finds unsigned: its file database plus every EFI binary
+    on the ESP (`sbctl verify --json`; is_signed is 1, 0, or -1 for a
+    database entry whose file is gone - only 0 needs signing).
+
+    Raises RuntimeError when sbctl can't answer, e.g. no keys yet or no ESP.
+    """
+    result = run_privileged(["sbctl", "verify", "--json"], timeout=120)
+    if not result.ok:
+        raise RuntimeError(result.stderr.strip() or f"sbctl verify exited with status {result.returncode}")
+    try:
+        entries = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"sbctl verify didn't return JSON: {result.stdout.strip()[:160]}") from exc
+    if not isinstance(entries, list):
+        raise RuntimeError("sbctl verify returned unexpected JSON")
+    return [
+        entry["file_name"]
+        for entry in entries
+        if isinstance(entry, dict) and entry.get("is_signed") == 0 and isinstance(entry.get("file_name"), str)
+    ]
+
+
+def sign_boot_files() -> CommandResult:
+    """
+    Sign every unsigned EFI file and save it in sbctl's database (`sign -s`).
+
+    `sbctl sign-all` alone isn't enough: it only re-signs files already in
+    the database, which is empty right after create-keys. Saving them is
+    also what lets sbctl's pacman hook re-sign them after kernel and
+    bootloader updates.
+    """
+    unsigned = unsigned_boot_files()
+    if not unsigned:
+        return CommandResult(0, "Every boot file sbctl found is already signed.", "")
+    for path in unsigned:
+        result = run_privileged(["sbctl", "sign", "-s", path], timeout=120)
+        if not result.ok:
+            return result
+    return CommandResult(0, "Signed and saved: " + ", ".join(unsigned), "")
+
+
 def enroll_keys(microsoft: bool = True) -> CommandResult:
     """
-    Enroll the keys the firmware. Only works while the firmware is in setup
-    mode; sbctl asks for confirmation on stdin, so answer it.
+    Enroll the keys in the firmware. Only works while the firmware is in
+    setup mode; sbctl asks for confirmation on stdin, so answer it.
+
+    Refuses while any boot file is unsigned: enrolling first is how a
+    machine ends up refusing to boot its own kernel.
     """
+    unsigned = unsigned_boot_files()
+    if unsigned:
+        raise RuntimeError(
+            "Sign the boot files first - these are still unsigned: " + ", ".join(unsigned)
+        )
     argv = ["sbctl", "enroll-keys"]
     argv.append("--microsoft" if microsoft else "--no-microsoft")
     return run_privileged(argv, input_text="y\n")
 
 
 def sign_all() -> CommandResult:
-    """Sign every file sbctl knows about (bootloader, kernel, unified image)."""
+    """Re-sign every file already in sbctl's database (what its pacman hook runs)."""
     return run_privileged(["sbctl", "sign-all"], timeout=300)
 
 

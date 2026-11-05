@@ -40,36 +40,39 @@ class BootSecurityPage(BasePage):
 
         setup_group = self.add_group(
             "Set Up Secure Boot with sbctl",
-            "These change the machine's boot chain and firmware keys. Enrolling keys keeps Microsoft's, "
-            "so option ROMs and peripherals that rely on them keep working. The firmware must be in "
-            "setup mode for enrollment; Atropa can't put it there.",
+            "In this order: create keys, sign the boot files, then enroll. Many firmwares enforce "
+            "Secure Boot as soon as keys are enrolled, so anything unsigned at that point won't boot. "
+            "Enrolling keeps Microsoft's keys, so option ROMs and peripherals that rely on them keep "
+            "working. The firmware must be in setup mode for enrollment; Atropa can't put it there.",
         )
         self.create_keys_btn = self._action_button(
-            "Create keys",
+            "1. Create keys",
             "Create your own Secure Boot keys with sbctl?",
             "sbctl generates a key pair and a certificate under /var/lib/sbctl. Nothing is enrolled in "
             "the firmware yet, so this is safe to do now.",
             "Create",
             boot_security.create_keys,
         )
+        self.sign_btn = self._action_button(
+            "2. Sign boot files",
+            "Sign the unsigned boot files?",
+            "sbctl checks its file list and every EFI file on the ESP, then signs and saves each "
+            "unsigned one. Saved files are re-signed by sbctl's pacman hook after kernel and "
+            "bootloader updates.",
+            "Sign",
+            boot_security.sign_boot_files,
+        )
         self.enroll_keys_btn = self._action_button(
-            "Enroll keys",
+            "3. Enroll keys",
             "Enroll your keys in the firmware?",
-            "Only works while the firmware is in setup mode. sbctl enrolls your keys and keeps "
-            "Microsoft's (--microsoft), then turns Secure Boot on if the firmware allows it. A machine "
-            "that can't boot afterwards needs its firmware settings reset.",
+            "Only works while the firmware is in setup mode, and Atropa refuses while any boot file "
+            "is still unsigned. sbctl enrolls your keys and keeps Microsoft's (--microsoft). Then turn "
+            "Secure Boot on in the firmware settings. A machine that can't boot afterwards needs "
+            "Secure Boot turned off again there.",
             "Enroll",
             boot_security.enroll_keys,
         )
-        self.sign_btn = self._action_button(
-            "Sign boot files",
-            "Sign every boot file?",
-            "sbctl signs the bootloader, kernel and initramfs it finds. Do this after enrolling keys "
-            "and after every kernel or bootloader update, or the firmware won't boot them.",
-            "Sign",
-            boot_security.sign_all,
-        )
-        for button in (self.create_keys_btn, self.enroll_keys_btn, self.sign_btn):
+        for button in (self.create_keys_btn, self.sign_btn, self.enroll_keys_btn):
             setup_group.add(button)
 
         self._sbctl_installed = False
@@ -165,5 +168,5 @@ class BootSecurityPage(BasePage):
                 details.append(f"Vendor keys: {status.vendor_keys}")
             self.sbctl_row.set_subtitle(esc(" · ".join(d for d in details if d)))
 
-        for row in (self.create_keys_btn, self.enroll_keys_btn, self.sign_btn):
+        for row in (self.create_keys_btn, self.sign_btn, self.enroll_keys_btn):
             row.set_sensitive(self._sbctl_installed)
