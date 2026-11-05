@@ -41,6 +41,11 @@ sha256sums=('7856d8581a39c96dc9344ab74b6ca339bc5a32d915b3c647f40bffae74a8022d')
 
 build() {
     cd "$_pkgname-$pkgver"
+    # Start from an empty dist/: makepkg keeps $srcdir between runs and a
+    # different pkgver leaves an old wheel behind. `python -m installer`
+    # happily installs *every* wheel it is given, so dist/*.whl matching two
+    # versions makes it write usr/bin/atropa twice and fail in package().
+    rm -rf dist
     python -m build --wheel --no-isolation
 }
 
@@ -51,7 +56,12 @@ check() {
 
 package() {
     cd "$_pkgname-$pkgver"
-    python -m installer --destdir="$pkgdir" dist/*.whl
+    local wheels=(dist/*.whl)
+    if (( ${#wheels[@]} != 1 )); then
+        error "expected exactly one wheel in dist/, found ${#wheels[@]}"
+        exit 1
+    fi
+    python -m installer --destdir="$pkgdir" "${wheels[0]}"
 
     install -Dm644 atropa/resources/atropa.desktop -t "$pkgdir/usr/share/applications/"
     install -Dm644 atropa/resources/org.atropa.pkexec.policy -t "$pkgdir/usr/share/polkit-1/actions/"
