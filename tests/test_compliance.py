@@ -13,6 +13,17 @@ _REAL_EXISTS = Path.exists
 
 
 @pytest.fixture(autouse=True)
+def boot_state(monkeypatch, tmp_path):
+    """Keeps the boot/encryption/socket checks off the real firmware and /proc."""
+    from atropa.backend import boot_security
+
+    monkeypatch.setattr(boot_security, "CRYPTTAB", tmp_path / "crypttab")
+    monkeypatch.setattr(boot_security, "EFI_DIR", tmp_path / "efi")
+    monkeypatch.setattr(compliance, "PROC_NET_TCP", tmp_path / "tcp")
+    monkeypatch.setattr(compliance, "PROC_NET_TCP6", tmp_path / "tcp6")
+
+
+@pytest.fixture(autouse=True)
 def no_real_selinux_fs(monkeypatch):
     def fake_exists(self):
         if str(self) == "/sys/fs/selinux":
@@ -157,6 +168,7 @@ def test_generate_report_covers_every_check(fake_run, fake_which, monkeypatch, t
         c.name
         for c in hardening.run_audit()
         + compliance._extra_checks()
+        + compliance._boot_checks()
         + compliance._inventory_checks()
         + compliance._account_hygiene_checks()
     }
@@ -256,6 +268,107 @@ def test_save_report_to_file_writes_markdown(tmp_path, fake_run, fake_which):
     content = path.read_text()
     assert content.startswith("# Atropa Security Baseline Report")
     assert compliance.DISCLAIMER in content
+
+
+def test_boot_checks_land_in_their_own_category(fake_run, fake_which, monkeypatch, tmp_path):
+    _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path)
+    report = compliance.generate_report()
+    category = next(c for c in report.categories if c.name == "Boot & Disk Security")
+    assert {check.name for check in category.checks} == {"Disk encryption", "Secure Boot"}
+
+
+# --------------------------------------------------------------- exposure --
+
+def _signal(label: str, status: str, detail: str = "") -> compliance.ExposureSignal:
+    return compliance.ExposureSignal(label, status, detail)
+
+
+def test_exposure_unknown_when_every_signal_is_info():
+    result = compliance._exposure([_signal("Secure Boot", "info", "can't tell")])
+    assert result.level == "unknown"
+    assert "couldn't read" in result.summary
+
+
+def test_exposure_high_when_the_firewall_is_a_hard_failure():
+    result = compliance._exposure(
+        [
+            _signal("Incoming network connections", "fail", "no firewall"),
+            _signal("Root filesystem encryption", "pass", "luks"),
+            _signal("Remote login (SSH)", "pass", "none"),
+        ]
+    )
+    assert result.level == "high"
+
+
+def test_exposure_high_when_the_disk_is_unencrypted():
+    result = compliance._exposure(
+        [
+            _signal("Incoming network connections", "pass", "active"),
+            _signal("Root filesystem encryption", "fail", "plain partition"),
+        ]
+    )
+    assert result.level == "high"
+
+
+def test_exposure_moderate_for_one_warning():
+    result = compliance._exposure(
+        [
+            _signal("Incoming network connections", "pass", "active"),
+            _signal("Secure Boot", "warn", "disabled"),
+        ]
+    )
+    assert result.level == "moderate"
+
+
+def test_exposure_low_when_everything_holds():
+    result = compliance._exposure(
+        [
+            _signal("Incoming network connections", "pass", "active"),
+            _signal("Root filesystem encryption", "pass", "luks"),
+            _signal("Secure Boot", "pass", "enabled"),
+            _signal("Listening TCP sockets", "info", "no data"),
+        ]
+    )
+    assert result.level == "low"
+
+
+def test_listening_ports_parses_proc_tables(monkeypatch, tmp_path):
+    # /proc/net/tcp: state 0A is LISTEN; the port is hex in the local address.
+    tcp = tmp_path / "tcp"
+    tcp.write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        "   0: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1\n"
+        "   1: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 2\n"
+        "   2: 0100007F:1F90 0100007F:C001 01 00000000:00000000 00:00000000 00000000     0        0 3\n"
+    )
+    monkeypatch.setattr(compliance, "PROC_NET_TCP", tcp)
+    monkeypatch.setattr(compliance, "PROC_NET_TCP6", tmp_path / "tcp6")
+    # 8080 is bound to 127.0.0.1, so it isn't part of the network exposure.
+    assert compliance._listening_tcp_ports() == [22]
+
+
+def test_listening_ports_unreadable_is_unknown(monkeypatch, tmp_path):
+    monkeypatch.setattr(compliance, "PROC_NET_TCP", tmp_path / "missing")
+    monkeypatch.setattr(compliance, "PROC_NET_TCP6", tmp_path / "missing6")
+    assert compliance._listening_tcp_ports() is None
+
+
+def test_render_markdown_includes_the_exposure_section():
+    report = compliance.ComplianceReport(
+        generated_at="now",
+        hostname="host",
+        categories=[],
+        overall_score=1.0,
+        scored_check_count=0,
+        total_check_count=0,
+        exposure=compliance.Exposure(
+            "low", "Nothing exposed.", [compliance.ExposureSignal("Secure Boot", "pass", "on")]
+        ),
+    )
+    markdown = compliance.render_markdown_report(report)
+    assert "## Exposure — Low" in markdown
+    assert compliance.EXPOSURE_NOTE in markdown
+    assert "| Secure Boot | PASS | on |" in markdown
 
 
 def test_total_check_count_counts_every_check_in_the_report(fake_run, fake_which, monkeypatch, tmp_path):

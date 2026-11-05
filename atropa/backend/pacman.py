@@ -16,6 +16,7 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from .privilege import (
     CommandResult,
@@ -361,3 +362,252 @@ def disable_selinux_repo() -> CommandResult:
         return CommandResult(0, "not enabled in pacman.conf", "")
     backup_file(str(PACMAN_CONF))
     return run_privileged(["tee", str(PACMAN_CONF)], input_text=_without_section(original, SELINUX_REPO_NAME))
+
+
+# --------------------------------------------------- pacman.conf options --
+
+_ACTIVE_COLOR_RE = re.compile(r"^\s*Color\s*$")
+_COMMENTED_COLOR_RE = re.compile(r"^\s*#\s*Color\s*$")
+_PARALLEL_RE = re.compile(r"^\s*(?:#\s*)?ParallelDownloads\s*=")
+_ACTIVE_PARALLEL_RE = re.compile(r"^\s*ParallelDownloads\s*=\s*(\d+)")
+_COMMENTED_MULTILIB_RE = re.compile(r"^\s*#\s*\[multilib\]\s*$")
+_COMMENTED_SECTION_RE = re.compile(r"^\s*#\s*\[[^\]]+\]\s*$")
+_COMMENTED_INCLUDE_RE = re.compile(r"^\s*#\s*(?:Include|Server)\s*=")
+
+
+@dataclass
+class PacmanSettings:
+    color: bool = False
+    parallel_downloads: int | None = None
+    multilib: bool = False
+
+
+def _read_conf() -> str:
+    try:
+        return PACMAN_CONF.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Couldn't read {PACMAN_CONF}: {exc}") from exc
+
+
+def _indent_of(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def _join(lines: list[str], original: str) -> str:
+    return "\n".join(lines) + ("\n" if original.endswith("\n") else "")
+
+
+def _options_bounds(lines: list[str]) -> tuple[int, int] | None:
+    start = None
+    for index, line in enumerate(lines):
+        match = _SECTION_RE.match(line)
+        if match is None:
+            continue
+        if start is not None:
+            return start, index
+        if match.group(1) == "options":
+            start = index + 1
+    if start is None:
+        return None
+    return start, len(lines)
+
+
+def _active_section_range(lines: list[str], name: str) -> tuple[int, int] | None:
+    start = None
+    for index, line in enumerate(lines):
+        match = _SECTION_RE.match(line)
+        if match is None:
+            continue
+        if start is not None:
+            return start, index
+        if match.group(1) == name:
+            start = index
+    if start is None:
+        return None
+    return start, len(lines)
+
+
+def _with_color(text: str, enabled: bool) -> str:
+    lines = text.splitlines()
+    bounds = _options_bounds(lines)
+    if bounds is None:
+        raise RuntimeError("pacman.conf has no [options] section")
+    start, end = bounds
+    active = None
+    commented = None
+    for index in range(start, end):
+        if _ACTIVE_COLOR_RE.match(lines[index]):
+            active = index
+            break
+        if commented is None and _COMMENTED_COLOR_RE.match(lines[index]):
+            commented = index
+
+    if enabled:
+        if active is not None:
+            return text
+        if commented is not None:
+            lines[commented] = f"{_indent_of(lines[commented])}Color"
+        else:
+            lines.insert(start, "Color")
+    else:
+        if active is None:
+            return text
+        lines[active] = f"{_indent_of(lines[active])}#{lines[active].strip()}"
+    return _join(lines, text)
+
+
+def _with_parallel_downloads(text: str, count: int) -> str:
+    if not 1 <= count <= 20:
+        raise ValueError("ParallelDownloads must be between 1 and 20")
+    lines = text.splitlines()
+    bounds = _options_bounds(lines)
+    if bounds is None:
+        raise RuntimeError("pacman.conf has no [options] section")
+    start, end = bounds
+    target = None
+    for index in range(start, end):
+        if _PARALLEL_RE.match(lines[index]):
+            target = index
+            break
+
+    new_line = f"ParallelDownloads = {count}"
+    if target is not None:
+        lines[target] = f"{_indent_of(lines[target])}{new_line}"
+    else:
+        lines.insert(start, new_line)
+    return _join(lines, text)
+
+
+def _with_multilib(text: str, enabled: bool) -> str:
+    lines = text.splitlines()
+    active = _active_section_range(lines, "multilib")
+
+    if enabled:
+        if active is not None:
+            return text
+        # Standard pacman.conf ships the block commented out; uncomment it in
+        # place so the file keeps the stock layout.
+        for index, line in enumerate(lines):
+            if not _COMMENTED_MULTILIB_RE.match(line):
+                continue
+            lines[index] = f"{_indent_of(line)}[multilib]"
+            cursor = index + 1
+            while cursor < len(lines):
+                if _SECTION_RE.match(lines[cursor]) or _COMMENTED_SECTION_RE.match(lines[cursor]):
+                    break
+                if _COMMENTED_INCLUDE_RE.match(lines[cursor]):
+                    content = lines[cursor].strip()[1:].lstrip()
+                    lines[cursor] = f"{_indent_of(lines[cursor])}{content}"
+                cursor += 1
+            return _join(lines, text)
+
+        base = text.rstrip("\n")
+        return base + "\n\n[multilib]\nInclude = /etc/pacman.d/mirrorlist\n"
+
+    if active is None:
+        return text
+    start, end = active
+    for index in range(start, end):
+        stripped = lines[index].strip()
+        if stripped and not stripped.startswith("#"):
+            lines[index] = f"{_indent_of(lines[index])}#{stripped}"
+    return _join(lines, text)
+
+
+def read_config() -> PacmanSettings:
+    """Current Color, ParallelDownloads and [multilib] state."""
+    text = _read_conf()
+    lines = text.splitlines()
+    color = False
+    parallel_downloads = None
+    bounds = _options_bounds(lines)
+    if bounds is not None:
+        start, end = bounds
+        for line in lines[start:end]:
+            if _ACTIVE_COLOR_RE.match(line):
+                color = True
+            match = _ACTIVE_PARALLEL_RE.match(line)
+            if match:
+                parallel_downloads = int(match.group(1))
+    return PacmanSettings(
+        color=color,
+        parallel_downloads=parallel_downloads,
+        multilib="multilib" in _sections_in(text),
+    )
+
+
+def _check_color(enabled: bool) -> str:
+    result = run_unprivileged(["pacman-conf", "Color"])
+    if not result.ok:
+        return result.stderr.strip() or f"pacman-conf exited with {result.returncode}"
+    expected = "Color" if enabled else ""
+    actual = result.stdout.strip()
+    if actual != expected:
+        return f"pacman-conf reports {actual or 'no Color'}"
+    return ""
+
+
+def _check_parallel_downloads(count: int) -> str:
+    result = run_unprivileged(["pacman-conf", "ParallelDownloads"])
+    if not result.ok:
+        return result.stderr.strip() or f"pacman-conf exited with {result.returncode}"
+    actual = result.stdout.strip()
+    if actual != str(count):
+        return f"pacman-conf reports {actual or 'no ParallelDownloads'}"
+    return ""
+
+
+def _check_multilib(enabled: bool) -> str:
+    result = run_unprivileged(["pacman-conf", "--repo-list"])
+    if not result.ok:
+        return result.stderr.strip() or f"pacman-conf exited with {result.returncode}"
+    repos = {line.strip() for line in result.stdout.splitlines() if line.strip()}
+    if ("multilib" in repos) != enabled:
+        return f"pacman-conf lists: {', '.join(sorted(repos)) or 'no repositories'}"
+    return ""
+
+
+def _write_and_validate(original: str, updated: str, check: Callable[[], str]) -> CommandResult:
+    backup_file(str(PACMAN_CONF))
+    result = run_privileged(["tee", str(PACMAN_CONF)], input_text=updated)
+    if not result.ok:
+        return result
+
+    try:
+        problem = check()
+    except PrivilegeError:
+        return result  # no pacman-conf to validate with
+    if not problem:
+        return result
+
+    restore = run_privileged(["tee", str(PACMAN_CONF)], input_text=original)
+    if restore.ok:
+        raise RuntimeError(f"pacman couldn't read the new pacman.conf ({problem}). Restored the previous one.")
+    raise RuntimeError(
+        f"pacman couldn't read the new pacman.conf ({problem}), and restoring the previous one ALSO failed "
+        f"({restore.stderr.strip() or 'unknown error'}) - restore it from Activity & Backups before using pacman."
+    )
+
+
+def set_color(enabled: bool) -> CommandResult:
+    original = _read_conf()
+    updated = _with_color(original, enabled)
+    if updated == original:
+        return CommandResult(0, f"Color is already {'on' if enabled else 'off'}", "")
+    return _write_and_validate(original, updated, lambda: _check_color(enabled))
+
+
+def set_parallel_downloads(count: int) -> CommandResult:
+    original = _read_conf()
+    updated = _with_parallel_downloads(original, count)
+    if updated == original:
+        return CommandResult(0, f"ParallelDownloads is already {count}", "")
+    return _write_and_validate(original, updated, lambda: _check_parallel_downloads(count))
+
+
+def set_multilib(enabled: bool) -> CommandResult:
+    original = _read_conf()
+    updated = _with_multilib(original, enabled)
+    if updated == original:
+        return CommandResult(0, f"multilib is already {'enabled' if enabled else 'disabled'}", "")
+    return _write_and_validate(original, updated, lambda: _check_multilib(enabled))

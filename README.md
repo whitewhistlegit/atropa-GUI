@@ -21,23 +21,29 @@ libadwaita. Atropa runs as your normal user and asks for authentication
 
 Atropa follows your desktop's light or dark style; these show the dark one.
 
+The sidebar groups modules into **Core**, **Security** and **Maintenance**,
+with a search box that also matches feature words (try "firewall" or
+"backup"). `Ctrl+K` / `Ctrl+F` focus search, `Esc` clears it, `F5` refreshes
+the current page, and the header menu has both actions plus **About**.
+
 ## Features
 
 Each sidebar entry is a module:
 
 | Module | What it does |
 |---|---|
-| **Package Management** | Pending updates (checked without touching the package database), full system upgrade (live output), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
+| **Package Management** | Pending updates (checked without touching the package database), full system upgrade (live output), post-upgrade health checks (failed units, reboot, microcode), pacman.conf toggles (color, parallel downloads, multilib), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
 | **System** | Hostname, timezone/NTP, locale (incl. `locale.gen`), console keymap and X11 layout |
 | **Network** | NetworkManager devices, Wi-Fi, static IP/DHCP (systemd-networkd is detected but read-only) |
 | **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
 | **Services** | systemd units: start/stop/restart/enable/disable, journal tail |
 | **Bootloader** | GRUB / systemd-boot detection, entries, timeout |
-| **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard. Can also add the unsigned SELinux package repository, locked behind the administrator password |
+| **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard. On a desktop with no SSH server it opens no ports, skips fail2ban, and shows a desktop baseline instead. Can also add the unsigned SELinux package repository, locked behind the administrator password |
 | **Security Profiles** | Export this machine's security posture to JSON and import it elsewhere, per-section |
 | **Security** | Firewall (ufw or firewalld), SSH hardening with validate-before-reload and automatic rollback, sudoers syntax check |
 | **Hardening** | Kernel sysctl hardening, fail2ban, USBGuard, auditd + CIS audit rule sets, login lockout, password complexity, `arch-audit` vulnerability scan, security audit score |
-| **Compliance Report** | Categorized, scored report modeled on CIS DIL categories, exportable as Markdown (not an official CIS assessment) |
+| **Encryption & Secure Boot** | LUKS root detection, firmware Secure Boot state, sbctl key creation/enrollment/signing (behind confirmations) |
+| **Compliance Report** | Posture report with an exposure summary (firewall, SSH, listening sockets, LUKS, Secure Boot) on top of the CIS-style categories, exportable as Markdown (not an official CIS assessment) |
 | **Inventory & Hygiene** | Read-only scans for unneeded network services and account/file hygiene issues |
 | **File Integrity** | AIDE baseline/check/timer management (AIDE itself is AUR-only; install it first) |
 | **AppArmor** | Profile modes, capability/network rule toggles, denial review with rule suggestions |
@@ -45,17 +51,27 @@ Each sidebar entry is a module:
 | **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
 | **SELinux: Denial Review** | Setup Mode, grouped and classified denials, one-click `restorecon`, policy generation |
 | **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
+| **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |
+| **Disk Health** | SMART health (one-click root read where the kernel requires it), filesystem usage, `fstrim.timer`, journal/cache/coredump cleanup |
+| **Firmware** | fwupd devices and updates, streamed |
+| **Mirrors** | Rank Arch mirrors with `reflector` and replace the mirrorlist (backed up first) |
+| **Power** | Power profiles, battery charge limits, zram swap, hibernation feasibility |
+| **Flatpak** | Installed apps, updates, unused-runtime cleanup |
 | **Dependencies** | Which external tools each module needs, with install buttons for the ones `pacman` can install |
 | **Add-ons** | Enable/disable declarative TOML plugins (see below) |
 | **Activity & Backups** | Log of every privileged command, automatic config-file backups with restore, migration from old ArchYaST data |
 
 Every config file Atropa edits is backed up first to
 `~/.local/share/atropa/backups/`, and every privileged command is logged to
-`~/.local/share/atropa/actions.log`. Changes that can lock you out or end
-your session ask first and say what they affect: stopping or restarting a
-service like the display manager or sshd, locking a password, taking the
-last administrator out of `wheel`, turning the firewall on, changing SSH
-logins.
+`~/.local/share/atropa/actions.log`. Commands are always invoked as an
+argument list through `pkexec`/`sudo` - never through a shell - so a package
+name, username or mirror URL cannot turn into a second command. The first
+privileged action asks for the password; polkit then remembers it for its keep
+window (five minutes by default), so a multi-step change asks once. Changes that
+can lock you out or end your session ask first and say what they affect:
+stopping or restarting a service like the display manager or sshd, locking a
+password, taking the last administrator out of `wheel`, turning the firewall
+on, changing SSH logins.
 
 ## Requirements
 
@@ -151,6 +167,10 @@ python3 -m py_compile atropa/*.py atropa/ui/*.py atropa/ui/pages/*.py atropa/bac
 ruff check .
 python3 -m pytest -q
 ```
+
+The suite is 1,035 tests across every backend module and the privileged helper. It fakes the one
+subprocess boundary (`privilege._subprocess_run`) rather than mocking each
+module, so the code under test is the same code that runs on the machine.
 
 CI (`.github/workflows/ci.yml`) runs the same three steps on Python 3.11 and
 3.12. Architecture, design decisions and the change history are in

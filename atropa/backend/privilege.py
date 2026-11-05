@@ -29,6 +29,12 @@ from typing import Callable
 
 LOG_PATH = Path.home() / ".local" / "share" / "atropa" / "actions.log"
 
+# Installed by install.sh / the PKGBUILD, root-owned. When it exists, every
+# privileged call goes through it instead of running the tool directly, so
+# pkexec picks up the annotated `auth_admin_keep` action and one password
+# covers a whole operation instead of one prompt per command.
+HELPER_PATH = Path("/usr/lib/atropa/atropa-helper")
+
 BACKUP_DIR = Path.home() / ".local" / "share" / "atropa" / "backups"
 BACKUP_MANIFEST = BACKUP_DIR / "manifest.jsonl"
 
@@ -186,20 +192,38 @@ def run_unprivileged(argv: list[str], input_text: str | None = None, timeout: in
     return _run(argv, input_text=input_text, timeout=timeout)
 
 
+def helper_available() -> bool:
+    """True when the root-owned helper is installed and executable."""
+    try:
+        return HELPER_PATH.is_file() and os.access(HELPER_PATH, os.X_OK)
+    except OSError:
+        return False
+
+
 def _resolve_privileged_prefix() -> list[str]:
     """
     Picks the pkexec/sudo prefix for a privileged command, or raises if
     neither is available. Shared by run_privileged() and
     run_privileged_streaming() so both stay in sync.
+
+    With the helper installed the prefix ends in its path: pkexec then
+    matches the helper's polkit action (allow_active=auth_admin_keep), so
+    the first authentication is remembered for the next few minutes. Without
+    it - a source checkout, or an install that skipped install.sh - the old
+    per-command pkexec behavior is kept rather than failing outright.
     """
     if shutil.which("pkexec"):
-        return ["pkexec"]
-    if shutil.which("sudo"):
-        return ["sudo", "-A"]
-    raise PrivilegeError(
-        "Neither pkexec nor sudo is available. Install 'polkit' to use "
-        "privileged actions in Atropa."
-    )
+        prefix = ["pkexec"]
+    elif shutil.which("sudo"):
+        prefix = ["sudo", "-A"]
+    else:
+        raise PrivilegeError(
+            "Neither pkexec nor sudo is available. Install 'polkit' to use "
+            "privileged actions in Atropa."
+        )
+    if helper_available():
+        return prefix + [str(HELPER_PATH)]
+    return prefix
 
 
 def run_privileged(argv: list[str], input_text: str | None = None, timeout: int = 600) -> CommandResult:

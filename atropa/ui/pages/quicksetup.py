@@ -14,6 +14,13 @@ from atropa.ui.pages import BasePage, esc
 
 _LOCKED_TOOLTIP = "Unlock with the administrator password before selecting this"
 
+_STATUS_ICON = {
+    "pass": "object-select-symbolic",
+    "warn": "dialog-warning-symbolic",
+    "fail": "dialog-error-symbolic",
+    "info": "dialog-information-symbolic",
+}
+
 
 class QuickSetupPage(BasePage):
     def __init__(self) -> None:
@@ -86,6 +93,17 @@ class QuickSetupPage(BasePage):
 
             self.checklist_group.add(row)
 
+        # Shown only on a machine without sshd: the server-shaped checklist
+        # doesn't fit a desktop, so this states what actually keeps a
+        # single-user laptop safe instead of pretending the same steps apply.
+        self.desktop_group = self.add_group(
+            "Desktop Baseline",
+            "This machine has no SSH server, so the SSH-facing steps above are skipped. These are "
+            "the things that matter on a single-user desktop instead - all read-only status.",
+        )
+        self.desktop_group.set_visible(False)
+        self._desktop_rows: list[Adw.ActionRow] = []
+
         self._update_selected_count()
         self.refresh()
 
@@ -94,17 +112,53 @@ class QuickSetupPage(BasePage):
         self.selected_count_label.set_label(f"{n} of {len(self._checkboxes)}")
 
     def refresh(self) -> None:
-        self.run_async(lambda: (quicksetup.status_summary(), pacman.selinux_repo_enabled()), self._on_status_loaded)
+        self.run_async(
+            lambda: (
+                quicksetup.status_summary(),
+                pacman.selinux_repo_enabled(),
+                quicksetup.desktop_baseline(),
+            ),
+            self._on_status_loaded,
+        )
 
     def _on_status_loaded(self, result, error) -> bool:
         if error:
             self.notify(f"Couldn't check current status: {error}", is_error=True)
             return False
-        summary, repo_enabled = result
+        summary, repo_enabled, desktop = result
         for key, label in self._status_labels.items():
             label.set_label(summary.get(key, "?"))
         self.repo_remove_btn.set_visible(repo_enabled)
+        self._render_desktop_baseline(desktop)
         return False
+
+    def _render_desktop_baseline(self, desktop) -> None:
+        self.clear_rows(self.desktop_group, self._desktop_rows)
+        self._desktop_rows = []
+        self.desktop_group.set_visible(desktop.applies)
+
+        # fail2ban protects a remote login that doesn't exist here; leave it
+        # visible but unticked and insensitive so the checklist doesn't offer
+        # something the backend will refuse.
+        fail2ban = self._checkboxes.get("fail2ban")
+        if fail2ban is not None:
+            if desktop.applies:
+                fail2ban.set_active(False)
+                fail2ban.set_sensitive(False)
+                fail2ban.set_tooltip_text("Skipped: no SSH server is installed")
+            else:
+                fail2ban.set_sensitive(True)
+                fail2ban.set_tooltip_text("")
+            self._update_selected_count()
+
+        if not desktop.applies:
+            return
+
+        for check in desktop.checks:
+            row = Adw.ActionRow(title=esc(check.title), subtitle=esc(check.detail))
+            row.add_prefix(Gtk.Image.new_from_icon_name(_STATUS_ICON.get(check.status, "dialog-question-symbolic")))
+            self.desktop_group.add(row)
+            self._desktop_rows.append(row)
 
     def _selected_keys(self) -> list[str]:
         return [key for key, cb in self._checkboxes.items() if cb.get_active()]

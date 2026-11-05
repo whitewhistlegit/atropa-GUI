@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import account_hygiene, hardening, inventory, security
+from . import account_hygiene, boot_security, hardening, inventory, security
 
 DISCLAIMER = (
     "This report is modeled on common CIS-style security benchmark categories "
@@ -46,12 +46,25 @@ _CATEGORY_MAP: dict[str, str] = {
     "auditd": "Logging & Auditing",
     "Kernel sysctl hardening": "Kernel & Network Hardening",
     "Known CVEs (arch-audit)": "Patch Management",
+    "Disk encryption": "Boot & Disk Security",
+    "Secure Boot": "Boot & Disk Security",
 }
 
 # pass/warn/fail contribute to the score; "info" checks (feature not
 # installed and genuinely optional, e.g. AppArmor when the user runs
 # SELinux instead) are excluded entirely rather than scored as a failure.
 _SCORE = {"pass": 1.0, "warn": 0.5, "fail": 0.0}
+
+# Read directly (no `ss` dependency) so the exposure summary works on a bare
+# install. Tests redirect both to empty files - /proc/net/tcp is live.
+PROC_NET_TCP = Path("/proc/net/tcp")
+PROC_NET_TCP6 = Path("/proc/net/tcp6")
+
+EXPOSURE_NOTE = (
+    "The percentage is the share of Atropa's posture checks that hold, read as exposure: "
+    "100% means nothing Atropa checked is currently exposing this machine. It is not a "
+    "CIS score, an audit result, or a promise that the machine is unbreakable."
+)
 
 
 @dataclass
@@ -62,6 +75,20 @@ class CategoryScore:
 
 
 @dataclass
+class ExposureSignal:
+    label: str
+    status: str  # "pass" | "warn" | "fail" | "info"
+    detail: str
+
+
+@dataclass
+class Exposure:
+    level: str  # "low" | "moderate" | "high" | "unknown"
+    summary: str
+    signals: list[ExposureSignal] = field(default_factory=list)
+
+
+@dataclass
 class ComplianceReport:
     generated_at: str
     hostname: str
@@ -69,6 +96,9 @@ class ComplianceReport:
     overall_score: float  # 0.0-1.0
     scored_check_count: int
     total_check_count: int
+    # Default keeps older callers (and tests that build a report by hand)
+    # working without knowing about the exposure framing.
+    exposure: Exposure = field(default_factory=lambda: Exposure("unknown", ""))
 
 
 def _extra_checks() -> list:
@@ -116,8 +146,171 @@ def _account_hygiene_checks() -> list:
     return [hardening.AuditCheck(f.title, f.status, f.detail) for f in account_hygiene.scan_all()]
 
 
+def _boot_checks() -> list:
+    """Encryption and Secure Boot - reusing boot_security's own verdicts."""
+    return [
+        hardening.AuditCheck(check.name, check.status, check.detail)
+        for check in boot_security.security_checks()
+    ]
+
+
+def _is_loopback(local_address: str) -> bool:
+    """
+    /proc/net/tcp stores the address little-endian, so 127.0.0.1 is
+    "0100007F". A service bound only to loopback is not part of the
+    machine's network exposure, and counting it would make every desktop
+    with a local helper look "moderate".
+    """
+    host = local_address.rsplit(":", 1)[0]
+    try:
+        value = int(host, 16)
+    except ValueError:
+        return False
+    if len(host) <= 8:  # IPv4: the low byte is 127
+        return value & 0xFF == 0x7F
+    return value == 1  # IPv6 ::1
+
+
+def _listening_tcp_ports() -> list[int] | None:
+    """
+    Ports in LISTEN state on non-loopback addresses, straight from /proc (no
+    `ss` dependency). None when neither table could be read, so the summary
+    says "unknown" instead of claiming zero open ports on a machine where
+    /proc isn't accessible.
+    """
+    ports: set[int] = set()
+    readable = False
+    for path in (PROC_NET_TCP, PROC_NET_TCP6):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        readable = True
+        for line in text.splitlines()[1:]:
+            fields = line.split()
+            if len(fields) < 4 or fields[3].upper() != "0A":
+                continue
+            if _is_loopback(fields[1]):
+                continue
+            try:
+                ports.add(int(fields[1].rsplit(":", 1)[-1], 16))
+            except ValueError:
+                continue
+    return sorted(ports) if readable else None
+
+
+def _check_named(checks: list, name: str):
+    return next((check for check in checks if check.name == name), None)
+
+
+def _exposure_signals(checks: list) -> list[ExposureSignal]:
+    """
+    The handful of facts that decide how exposed this machine is, in plain
+    terms - not a second audit. Each signal reuses a verdict the report
+    already computed, except the listening-socket count, which is its own
+    cheap read.
+    """
+    signals: list[ExposureSignal] = []
+
+    firewall = _check_named(checks, "Firewall")
+    if firewall is not None:
+        signals.append(ExposureSignal("Incoming network connections", firewall.status, firewall.detail))
+
+    # SSH gets its own wording rather than the audit's: "key-only login" is a
+    # pass in a CIS-style audit but still a reachable login surface, which is
+    # exactly the distinction this framing is about.
+    root_login = _check_named(checks, "SSH root login")
+    password_auth = _check_named(checks, "SSH password auth")
+    if root_login is not None:
+        if root_login.status == "info":
+            signals.append(
+                ExposureSignal(
+                    "Remote login (SSH)",
+                    "pass",
+                    "No SSH server is installed, so nothing accepts remote logins.",
+                )
+            )
+        elif root_login.status == "fail":
+            signals.append(ExposureSignal("Remote login (SSH)", "fail", root_login.detail))
+        elif password_auth is not None and password_auth.status in ("warn", "fail"):
+            signals.append(
+                ExposureSignal(
+                    "Remote login (SSH)",
+                    "warn",
+                    f"An SSH server accepts password logins over the network ({password_auth.detail}).",
+                )
+            )
+        else:
+            signals.append(
+                ExposureSignal(
+                    "Remote login (SSH)",
+                    "warn",
+                    "An SSH server is reachable over the network, even with keys only - that login "
+                    "surface is not exposed by a desktop with no remote access.",
+                )
+            )
+
+    ports = _listening_tcp_ports()
+    if ports is None:
+        signals.append(
+            ExposureSignal("Listening TCP sockets", "info", "Couldn't read /proc/net/tcp.")
+        )
+    elif not ports:
+        signals.append(ExposureSignal("Listening TCP sockets", "pass", "No TCP sockets are listening."))
+    else:
+        shown = ", ".join(str(port) for port in ports[:8]) + ("…" if len(ports) > 8 else "")
+        signals.append(
+            ExposureSignal(
+                "Listening TCP sockets",
+                "warn",
+                f"{len(ports)} socket(s) listening on a non-loopback address ({shown}). Any of them "
+                "is reachable unless the firewall blocks it.",
+            )
+        )
+
+    for label, name in (
+        ("Root filesystem encryption", "Disk encryption"),
+        ("Secure Boot", "Secure Boot"),
+    ):
+        check = _check_named(checks, name)
+        if check is not None:
+            signals.append(ExposureSignal(label, check.status, check.detail))
+
+    return signals
+
+
+def _exposure(signals: list[ExposureSignal]) -> Exposure:
+    if not signals or all(signal.status == "info" for signal in signals):
+        return Exposure("unknown", "Atropa couldn't read enough of this machine to judge exposure.", signals)
+
+    fails = sum(1 for signal in signals if signal.status == "fail")
+    warns = sum(1 for signal in signals if signal.status == "warn")
+    critical = any(
+        signal.status == "fail" and signal.label in ("Incoming network connections", "Root filesystem encryption")
+        for signal in signals
+    )
+
+    if critical or fails >= 3:
+        level = "high"
+        summary = (
+            "Something that directly exposes this machine is open: an unfiltered network, an "
+            "unencrypted disk, or several smaller gaps at once."
+        )
+    elif fails or warns:
+        level = "moderate"
+        summary = (
+            "The machine isn't wide open, but at least one door is: a reachable service, a disabled "
+            "boot safeguard, or a policy that only partly holds."
+        )
+    else:
+        level = "low"
+        summary = "Nothing Atropa checked is currently exposing this machine in a meaningful way."
+
+    return Exposure(level, summary, signals)
+
+
 def generate_report() -> ComplianceReport:
-    checks = hardening.run_audit() + _extra_checks()
+    checks = hardening.run_audit() + _extra_checks() + _boot_checks()
 
     by_category: dict[str, list] = {}
     for check in checks:
@@ -154,6 +347,7 @@ def generate_report() -> ComplianceReport:
         # Every check in the report - this used to count only the run_audit()
         # ones, so the header could claim "29 scored checks, 3 total".
         total_check_count=sum(len(cat_checks) for cat_checks in by_category.values()),
+        exposure=_exposure(_exposure_signals(checks)),
     )
 
 
@@ -168,7 +362,20 @@ def render_markdown_report(report: ComplianceReport) -> str:
         f"- Overall score: {report.overall_score * 100:.0f}% ({report.scored_check_count} scored checks, "
         f"{report.total_check_count} total)",
         "",
+        f"## Exposure — {report.exposure.level.capitalize()}",
+        "",
+        f"> {EXPOSURE_NOTE}",
+        "",
+        report.exposure.summary,
+        "",
     ]
+    if report.exposure.signals:
+        lines.append("| Signal | Status | Detail |")
+        lines.append("|---|---|---|")
+        for signal in report.exposure.signals:
+            detail = signal.detail.replace("|", "\\|").replace("\n", " ")
+            lines.append(f"| {signal.label} | {signal.status.upper()} | {detail} |")
+        lines.append("")
     for category in report.categories:
         score_text = f"{category.score * 100:.0f}%" if category.score is not None else "N/A"
         lines.append(f"## {category.name} — {score_text}")

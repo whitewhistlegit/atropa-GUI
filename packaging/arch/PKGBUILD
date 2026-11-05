@@ -1,7 +1,7 @@
 # Maintainer: whitewhistlegit <dusdamian4@gmail.com>
 pkgname=atropa-git
 _pkgname=atropa-GUI
-pkgver=0.1.0.r58.g3004b5a
+pkgver=0.1.0.r64.ge70f1ad
 pkgrel=1
 pkgdesc="A YaST-inspired system control center for Arch Linux"
 arch=('any')
@@ -26,6 +26,14 @@ optdepends=(
     'apparmor: AppArmor profile management'
     'usbguard: USB device allow-listing'
     'audit: audit logging and SELinux denial review'
+    'reflector: rank pacman mirrors'
+    'fwupd: firmware devices and updates'
+    'smartmontools: SMART disk health'
+    'sbctl: Secure Boot key creation, enrollment and signing'
+    'mokutil: fallback Secure Boot state check'
+    'power-profiles-daemon: power profile switching'
+    'zram-generator: zram swap configuration'
+    'flatpak: Flatpak app updates and cleanup'
 )
 provides=('atropa')
 conflicts=('atropa')
@@ -55,6 +63,9 @@ package() {
 
     install -Dm644 atropa/resources/atropa.desktop -t "$pkgdir/usr/share/applications/"
     install -Dm644 atropa/resources/org.atropa.pkexec.policy -t "$pkgdir/usr/share/polkit-1/actions/"
+    # The one program pkexec runs: root-owned, fixed path, annotated in the
+    # policy above with auth_admin_keep.
+    install -Dm755 atropa/helper.py "$pkgdir/usr/lib/atropa/atropa-helper"
     local icon
     for icon in atropa/resources/icons/hicolor/*/apps/org.atropa.Atropa.png; do
         install -Dm644 "$icon" "$pkgdir/usr/share/icons/${icon#atropa/resources/icons/}"

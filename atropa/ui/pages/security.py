@@ -54,9 +54,9 @@ class SecurityPage(BasePage):
 
         self.rules_group = self.add_group("Active Rules")
 
-        ssh_group = self.add_group("SSH Hardening")
+        self.ssh_group = self.add_group("SSH Hardening")
         self.ssh_status_row = Adw.ActionRow(title="Checking SSH status…")
-        ssh_group.add(self.ssh_status_row)
+        self.ssh_group.add(self.ssh_status_row)
 
         # A combo, not a switch: "off" used to mean both "no" and the OpenSSH
         # default "prohibit-password", so getting from one to the other meant
@@ -64,18 +64,18 @@ class SecurityPage(BasePage):
         self.root_login_row = Adw.ComboRow(title="Root login over SSH")
         self.root_login_row.set_model(Gtk.StringList.new([label for _value, label in ROOT_LOGIN_CHOICES]))
         self.root_login_row.connect("notify::selected", self._on_root_login_selected)
-        ssh_group.add(self.root_login_row)
+        self.ssh_group.add(self.root_login_row)
 
         self.password_auth_row = Adw.SwitchRow(title="Allow password authentication (vs. keys only)")
         self.password_auth_row.connect("notify::active", self._on_password_auth_toggled)
-        ssh_group.add(self.password_auth_row)
+        self.ssh_group.add(self.password_auth_row)
 
         self.ssh_port_row = Adw.SpinRow.new_with_range(1, 65535, 1)
         self.ssh_port_row.set_title("SSH port")
         apply_port_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
         apply_port_btn.connect("clicked", self._on_apply_ssh_port)
         self.ssh_port_row.add_suffix(apply_port_btn)
-        ssh_group.add(self.ssh_port_row)
+        self.ssh_group.add(self.ssh_port_row)
 
         self.max_auth_tries_row = Adw.SpinRow.new_with_range(1, 20, 1)
         self.max_auth_tries_row.set_title("Max auth tries")
@@ -83,7 +83,7 @@ class SecurityPage(BasePage):
         apply_tries_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
         apply_tries_btn.connect("clicked", self._on_apply_max_auth_tries)
         self.max_auth_tries_row.add_suffix(apply_tries_btn)
-        ssh_group.add(self.max_auth_tries_row)
+        self.ssh_group.add(self.max_auth_tries_row)
 
         self.log_level_row = Adw.ActionRow(title="Log level", subtitle="CIS recommends INFO or VERBOSE")
         info_btn = Gtk.Button(label="INFO", valign=Gtk.Align.CENTER)
@@ -92,29 +92,39 @@ class SecurityPage(BasePage):
         verbose_btn.connect("clicked", lambda _b: self._on_set_log_level("VERBOSE"))
         self.log_level_row.add_suffix(info_btn)
         self.log_level_row.add_suffix(verbose_btn)
-        ssh_group.add(self.log_level_row)
+        self.ssh_group.add(self.log_level_row)
 
         self.x11_forwarding_row = Adw.SwitchRow(title="Allow X11 forwarding")
         self.x11_forwarding_row.connect("notify::active", self._on_x11_forwarding_toggled)
-        ssh_group.add(self.x11_forwarding_row)
+        self.ssh_group.add(self.x11_forwarding_row)
 
         self.ignore_rhosts_row = Adw.SwitchRow(
             title="Ignore .rhosts/.shosts files", subtitle="CIS recommends on - these are a legacy, weaker trust mechanism"
         )
         self.ignore_rhosts_row.connect("notify::active", self._on_ignore_rhosts_toggled)
-        ssh_group.add(self.ignore_rhosts_row)
+        self.ssh_group.add(self.ignore_rhosts_row)
 
         self.hostbased_auth_row = Adw.SwitchRow(title="Allow host-based authentication")
         self.hostbased_auth_row.connect("notify::active", self._on_hostbased_auth_toggled)
-        ssh_group.add(self.hostbased_auth_row)
+        self.ssh_group.add(self.hostbased_auth_row)
 
         self.permit_empty_passwords_row = Adw.SwitchRow(title="Allow empty passwords")
         self.permit_empty_passwords_row.connect("notify::active", self._on_permit_empty_passwords_toggled)
-        ssh_group.add(self.permit_empty_passwords_row)
+        self.ssh_group.add(self.permit_empty_passwords_row)
 
         self.permit_user_environment_row = Adw.SwitchRow(title="Allow user environment overrides")
         self.permit_user_environment_row.connect("notify::active", self._on_permit_user_environment_toggled)
-        ssh_group.add(self.permit_user_environment_row)
+        self.ssh_group.add(self.permit_user_environment_row)
+
+        # Everything sshd_config-shaped, so one switch in _on_ssh_loaded can
+        # put the whole group out of reach on a machine with no SSH server -
+        # a desktop shouldn't be offered SSH hardening it can't apply.
+        self._ssh_controls = [
+            self.root_login_row, self.password_auth_row, self.ssh_port_row,
+            self.max_auth_tries_row, self.log_level_row, self.x11_forwarding_row,
+            self.ignore_rhosts_row, self.hostbased_auth_row,
+            self.permit_empty_passwords_row, self.permit_user_environment_row,
+        ]
 
         sudo_group = self.add_group("Sudo")
         self.sudo_row = Adw.ActionRow(title="sudoers syntax check")
@@ -172,8 +182,15 @@ class SecurityPage(BasePage):
         self._suppress_signals = True
         if not status.installed:
             self.ssh_status_row.set_title("OpenSSH is not installed")
+            self.ssh_group.set_description(
+                esc("There is no SSH server on this machine, so there is nothing to harden here. "
+                    "Install 'openssh' first if you need remote access.")
+            )
         else:
             self.ssh_status_row.set_title(f"sshd is {'running' if status.running else 'stopped'}")
+            self.ssh_group.set_description("")
+        for control in self._ssh_controls:
+            control.set_sensitive(status.installed)
         if status.unreadable_includes:
             self.ssh_status_row.set_subtitle(
                 esc(f"Couldn't read {', '.join(status.unreadable_includes)} - sshd may use different values than shown")

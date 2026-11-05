@@ -1,6 +1,7 @@
 """Tests for atropa.backend.privilege — the core run/backup/log layer."""
 from __future__ import annotations
 
+import ast
 import json
 import os
 import subprocess
@@ -609,3 +610,84 @@ def test_list_backups_marks_what_restore_file_takes(privilege_paths, fake_run, f
     assert [(e["original_path"], e["restorable"]) for e in entries] == [
         ("/etc/default/grub", False), ("/etc/sudoers", False), ("/etc/ssh/sshd_config", True),
     ]
+
+
+# --------------------------------------------------------- no shell anywhere --
+
+_PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "atropa"
+
+
+def test_no_module_starts_a_command_through_a_shell():
+    """
+    The whole safety model rests on argument lists: a package name or a
+    username must never be able to turn into `; rm -rf /`. Grep for
+    "shell=True" would match this repo's own docstrings, so walk the AST
+    instead and inspect the actual call keywords.
+    """
+    offenders = []
+    for path in sorted(_PACKAGE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if name in {"Popen", "run", "call", "check_call", "check_output"}:
+                for keyword in node.keywords:
+                    if keyword.arg == "shell" and isinstance(keyword.value, ast.Constant) and keyword.value.value:
+                        offenders.append(f"{path}:{node.lineno} shell={keyword.value.value!r}")
+            if (
+                isinstance(func, ast.Attribute)
+                and func.attr in {"system", "popen"}
+                and isinstance(func.value, ast.Name)
+                and func.value.id == "os"
+            ):
+                offenders.append(f"{path}:{node.lineno} os.{func.attr}()")
+    assert offenders == [], f"shell execution found: {offenders}"
+
+
+# ------------------------------------------------------- privileged helper --
+
+def _installed_helper(tmp_path):
+    path = tmp_path / "atropa-helper"
+    path.write_text("#!/usr/bin/python3\n", encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
+def test_run_privileged_goes_through_the_helper_when_installed(tmp_path, monkeypatch, fake_run, fake_which):
+    helper = _installed_helper(tmp_path)
+    monkeypatch.setattr(privilege, "HELPER_PATH", helper)
+
+    privilege.run_privileged(["true"])
+
+    assert fake_run.last_call() == ["pkexec", str(helper), "true"]
+
+
+def test_missing_helper_keeps_the_old_per_command_pkexec(tmp_path, monkeypatch, fake_run, fake_which):
+    monkeypatch.setattr(privilege, "HELPER_PATH", tmp_path / "missing")
+
+    privilege.run_privileged(["true"])
+
+    assert fake_run.last_call() == ["pkexec", "true"]
+
+
+def test_a_non_executable_helper_is_ignored(tmp_path, monkeypatch, fake_run, fake_which):
+    helper = _installed_helper(tmp_path)
+    helper.chmod(0o644)
+    monkeypatch.setattr(privilege, "HELPER_PATH", helper)
+
+    privilege.run_privileged(["true"])
+
+    assert fake_run.last_call() == ["pkexec", "true"]
+
+
+def test_helper_is_used_with_the_sudo_fallback_too(tmp_path, monkeypatch, fake_run, fake_which):
+    helper = _installed_helper(tmp_path)
+    monkeypatch.setattr(privilege, "HELPER_PATH", helper)
+    fake_which.discard("pkexec")
+    fake_which.add("sudo")
+
+    privilege.run_privileged(["true"])
+
+    assert fake_run.last_call() == ["sudo", "-A", str(helper), "true"]

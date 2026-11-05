@@ -51,6 +51,8 @@ class BasePage(Gtk.Box):
         self.toast_overlay.set_hexpand(True)
 
         self.preferences_page = Adw.PreferencesPage()
+        # Hooks the page surface up to the refinements in resources/style.css.
+        self.preferences_page.add_css_class("atropa-page")
         self.toast_overlay.set_child(self.preferences_page)
 
         self._action_running = False
@@ -336,8 +338,9 @@ class BasePage(Gtk.Box):
         danger_label: str,
         on_confirm: Callable[[], None],
         on_cancel: Callable[[], None] | None = None,
+        destructive: bool = True,
     ) -> None:
-        """Show a destructive-action confirmation dialog before running on_confirm().
+        """Show a confirmation dialog before running on_confirm().
 
         on_cancel is optional and rarely needed - most callers have nothing
         to undo since nothing was applied to the widget yet. It exists for
@@ -357,7 +360,8 @@ class BasePage(Gtk.Box):
         dialog.set_body_use_markup(False)
         dialog.add_response("cancel", "Cancel")
         dialog.add_response("confirm", danger_label)
-        dialog.set_response_appearance("confirm", Adw.ResponseAppearance.DESTRUCTIVE)
+        appearance = Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.SUGGESTED
+        dialog.set_response_appearance("confirm", appearance)
         dialog.set_default_response("cancel")
         dialog.set_close_response("cancel")
 

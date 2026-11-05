@@ -77,3 +77,15 @@ def test_icons_are_shipped_as_package_data():
     patterns = pyproject["tool"]["setuptools"]["package-data"]["atropa"]
     packaged = {path for pattern in patterns for path in (ROOT / "atropa").glob(pattern)}
     assert set(_icons()) <= packaged
+
+
+def test_stylesheet_exists_and_is_shipped_as_package_data():
+    # A missing stylesheet is not fatal at runtime (theme.load_stylesheet
+    # returns quietly), so catch the packaging mistake here instead of
+    # discovering it as a silently unstyled release.
+    stylesheet = RESOURCES / "style.css"
+    assert stylesheet.is_file(), stylesheet
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    patterns = pyproject["tool"]["setuptools"]["package-data"]["atropa"]
+    packaged = {path for pattern in patterns for path in (ROOT / "atropa").glob(pattern)}
+    assert stylesheet in packaged

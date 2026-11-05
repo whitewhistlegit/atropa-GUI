@@ -113,6 +113,8 @@ def test_apply_firewall_allows_every_port_sshd_listens_on(fake_run, fake_which, 
     monkeypatch.setattr(security, "SSHD_CONFIG", conf)
     fake_which.add("ufw")
     fake_which.add("sshd")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
     fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
 
     assert quicksetup._apply_firewall(lambda _l: None).ok
@@ -123,11 +125,19 @@ def test_apply_firewall_allows_every_port_sshd_listens_on(fake_run, fake_which, 
     assert all(fake_run.calls.index(["pkexec", "ufw", "allow", spec]) < enable_index for spec in allowed)
 
 
-def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_which):
+def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_which, monkeypatch, tmp_path):
     """If the SSH rule can't be added (auth dismissed, ufw error, ...), the
     firewall must stay off - enabling deny-by-default anyway is the remote
     lockout the allow-first ordering exists to prevent."""
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
     fake_which.add("ufw")
+    fake_which.add("sshd")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
     fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
     fake_run.set_response(["pkexec", "ufw", "allow"], returncode=126, stderr="Request dismissed")
     lines: list[str] = []
@@ -140,9 +150,17 @@ def test_apply_firewall_does_not_enable_when_allowing_ssh_fails(fake_run, fake_w
     assert any("Not enabling the firewall" in line for line in lines)
 
 
-def test_apply_firewall_firewalld_stopped_allows_ssh_offline_then_enables(fake_run, fake_which):
+def test_apply_firewall_firewalld_stopped_allows_ssh_offline_then_enables(fake_run, fake_which, monkeypatch, tmp_path):
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
     fake_which.add("firewall-cmd")
+    fake_which.add("sshd")
     fake_run.set_response(["systemctl", "is-active", "firewalld"], stdout="inactive\n", returncode=3)
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
 
     result = quicksetup._apply_firewall(lambda _l: None)
 
@@ -168,9 +186,32 @@ def test_apply_firewall_stops_if_install_fails(fake_run, fake_which):
     assert fake_run.call_containing("enable") is None
 
 
+def test_apply_firewall_desktop_opens_no_ports(fake_run, fake_which):
+    """With no sshd there is nothing to keep reachable, so the firewall goes
+    on without the server-shaped port-22 exception."""
+    fake_which.add("ufw")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
+    lines: list[str] = []
+
+    result = quicksetup._apply_firewall(lines.append)
+
+    assert result.ok
+    assert fake_run.call_containing("allow") is None
+    assert any("No SSH server is running" in line for line in lines)
+
+
 # --------------------------------------------------------------- fail2ban --
 
-def test_apply_fail2ban_installs_enables_and_protects_ssh(fake_run, fake_which):
+def test_apply_fail2ban_installs_enables_and_protects_ssh(fake_run, fake_which, monkeypatch, tmp_path):
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("sshd")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
     fake_run.set_response(["pkexec", "pacman", "-S", "--needed", "--noconfirm", "fail2ban"], returncode=0)
     fake_run.set_response(["systemctl", "is-active", "fail2ban"], stdout="inactive\n")
     fake_run.set_response(["systemctl", "is-enabled", "fail2ban"], stdout="disabled\n")
@@ -183,14 +224,33 @@ def test_apply_fail2ban_installs_enables_and_protects_ssh(fake_run, fake_which):
     assert any("jail.d" in arg for call in fake_run.calls for arg in call)
 
 
-def test_apply_fail2ban_skips_install_when_already_present(fake_run, fake_which):
+def test_apply_fail2ban_skips_install_when_already_present(fake_run, fake_which, monkeypatch, tmp_path):
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("sshd")
     fake_which.add("fail2ban-client")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
     fake_run.set_response(["systemctl", "is-active", "fail2ban"], stdout="active\n")
     fake_run.set_response(["pkexec", "tee", "/etc/fail2ban/jail.d/sshd.local"], returncode=0)
     fake_run.set_response(["pkexec", "systemctl", "restart", "fail2ban"], returncode=0)
 
     quicksetup._apply_fail2ban(lambda _l: None)
     assert fake_run.call_containing("pacman") is None
+
+
+def test_apply_fail2ban_is_skipped_without_an_ssh_server(fake_run, fake_which):
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
+    lines: list[str] = []
+
+    result = quicksetup._apply_fail2ban(lines.append)
+
+    assert result.ok
+    assert fake_run.call_containing("pacman") is None
+    assert any("no remote login to protect" in line for line in lines)
 
 
 # --------------------------------------------------------------- sysctl --
@@ -527,3 +587,58 @@ def test_status_summary_faillock_reports_pam_wiring_state(monkeypatch, tmp_path,
     monkeypatch.setattr(hardening, "PAM_SYSTEM_LOGIN", tmp_path / "nonexistent")
     summary = quicksetup.status_summary()
     assert "manual step required" in summary["faillock"]
+
+
+# ------------------------------------------------------ desktop baseline --
+#
+# The desktop profile isn't another apply step: it's a read-only statement of
+# what keeps a laptop safe when the server-shaped checklist doesn't fit.
+
+def test_desktop_baseline_applies_and_reports_the_three_desktop_facts(
+    fake_run, fake_which, monkeypatch, tmp_path
+):
+    from atropa.backend import boot_security
+
+    monkeypatch.setattr(boot_security, "EFI_DIR", tmp_path / "efi")
+    monkeypatch.setattr(boot_security, "CRYPTTAB", tmp_path / "crypttab")
+    fake_which.add("ufw")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: active\n")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
+    fake_run.set_response(["findmnt"], stdout="/dev/mapper/root\n")
+    fake_run.set_response(["lsblk"], stdout="root crypt\n")
+
+    baseline = quicksetup.desktop_baseline()
+
+    assert baseline.applies is True
+    assert baseline.sshd_installed is False
+    by_title = {check.title: check for check in baseline.checks}
+    assert by_title["Firewall"].status == "pass"
+    assert by_title["Disk encryption"].status == "pass"
+    assert by_title["Secure Boot"].status == "info"  # no EFI -> "doesn't apply"
+    assert by_title["SSH hardening"].status == "pass"
+
+
+def test_desktop_baseline_does_not_apply_when_an_ssh_server_exists(
+    fake_run, fake_which, monkeypatch, tmp_path
+):
+    from atropa.backend import boot_security, security
+
+    monkeypatch.setattr(boot_security, "EFI_DIR", tmp_path / "efi")
+    monkeypatch.setattr(boot_security, "CRYPTTAB", tmp_path / "crypttab")
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("sshd")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="active\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    fake_run.set_response(["findmnt"], returncode=1, stderr="findmnt broke")
+
+    baseline = quicksetup.desktop_baseline()
+
+    assert baseline.applies is False
+    assert baseline.sshd_installed is True
+    by_title = {check.title: check for check in baseline.checks}
+    assert by_title["SSH hardening"].status == "warn"
+    # One failed check must not blank the rest of the baseline.
+    assert by_title["Disk encryption"].status == "info"
+    assert by_title["Firewall"].status in {"pass", "warn", "fail", "info"}
