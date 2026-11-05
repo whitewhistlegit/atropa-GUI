@@ -139,5 +139,5 @@ Seen when its generated modules were reviewed in the Arch test VM,
 - [x] Do a full `makepkg -si` with the real `python-build`,
       `python-installer` and `python-pytest` from pacman (done in a fresh
       Arch VM, 2026-10-31).
-- [ ] Tag releases and add a stable (non-`-git`) PKGBUILD that builds from
-      the release tarball.
+- [x] Tag releases and add a stable (non-`-git`) PKGBUILD that builds from
+      the release tarball (`v0.2.0` + `packaging/arch/atropa/PKGBUILD`).

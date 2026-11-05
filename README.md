@@ -111,34 +111,50 @@ cd atropa-GUI
 
 1. install system dependencies with `pacman` (needs `sudo`), plus the
    optional `arch-audit`, `pacman-contrib` and `fakeroot`;
-2. install Atropa with `pipx install --system-site-packages --force .` so it
+2. install the privileged helper to `/usr/lib/atropa/atropa-helper` and its
+   polkit action to `/usr/share/polkit-1/actions/` - without these, Atropa
+   still works but asks for the password on every privileged command;
+3. install Atropa with `pipx install --system-site-packages --force .` so it
    gets its own venv but reuses the system PyGObject;
-3. copy the desktop launcher to `~/.local/share/applications/` and its icon
-   to `~/.local/share/icons/hicolor/`;
-4. install the polkit policy to `/usr/share/polkit-1/actions/`.
+4. copy the desktop launcher and icons into the user's `.local` tree.
 
 Then launch **Atropa** from your app menu, or run `atropa` (open a new
 terminal first if `pipx ensurepath` just updated your `PATH`).
 
 To uninstall: `pipx uninstall atropa`, then remove
 `~/.local/share/applications/atropa.desktop`,
-`~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png` and
-`/usr/share/polkit-1/actions/org.atropa.pkexec.policy`.
+`~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png`,
+`/usr/share/polkit-1/actions/org.atropa.pkexec.policy` and
+`/usr/lib/atropa/atropa-helper`.
 
 ### As a pacman package
 
 [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD) builds `atropa-git`
 from the `main` branch, so pacman tracks every installed file and
-`pacman -R atropa-git` removes them all:
+`pacman -R atropa-git` removes them all. For a reproducible install of a
+tagged release, [`packaging/arch/atropa/PKGBUILD`](packaging/arch/atropa/PKGBUILD)
+builds the `0.2.0` tarball with a pinned checksum instead of the git head:
 
 ```bash
 sudo pacman -S --needed base-devel python-build python-installer python-pytest
-cd packaging/arch
+```
+
+Then build either variant:
+
+```bash
+cd packaging/arch          # atropa-git, tracks main
 makepkg -si
 ```
 
-Run `makepkg -si` again to update. Only pushed commits are packaged, not
-local changes. If you used `install.sh` before, undo it first (see the
+or:
+
+```bash
+cd packaging/arch/atropa   # atropa 0.2.0, pinned release tarball
+makepkg -si
+```
+
+Run `makepkg -si` again to update. Only pushed commits are packaged by the
+`-git` variant, not local changes. If you used `install.sh` before, undo it first (see the
 uninstall steps above): the pipx copy in `~/.local/bin` would shadow
 `/usr/bin/atropa`, and pacman won't overwrite the polkit policy it copied.
 

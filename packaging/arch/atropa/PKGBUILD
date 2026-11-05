@@ -1,0 +1,65 @@
+# Maintainer: whitewhistlegit <dusdamian4@gmail.com>
+# Stable package built from the GitHub release tarball. packaging/arch/PKGBUILD
+# is the -git variant; this one pins a checksum so an install is reproducible.
+pkgname=atropa
+_pkgname=atropa-GUI
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="A YaST-inspired system control center for Arch Linux"
+arch=('any')
+url="https://github.com/whitewhistlegit/atropa-GUI"
+license=('GPL-3.0-or-later')
+depends=('python' 'python-gobject' 'gtk4' 'libadwaita' 'polkit' 'pacman' 'systemd')
+makedepends=('python-build' 'python-installer' 'python-setuptools' 'python-wheel')
+checkdepends=('python-pytest')
+optdepends=(
+    'networkmanager: Network page (connections, Wi-Fi, static IP)'
+    'pacman-contrib: check for updates without touching the package database'
+    'fakeroot: needed by checkupdates'
+    'arch-audit: vulnerability scan'
+    'grub: regenerate GRUB configuration'
+    'ufw: firewall management'
+    'firewalld: firewall management (alternative to ufw)'
+    'openssh: SSH hardening toggles'
+    'sudo: fallback privilege escalation and sudoers checking'
+    'fail2ban: ban IPs after repeated failed logins'
+    'apparmor: AppArmor profile management'
+    'usbguard: USB device allow-listing'
+    'audit: audit logging and SELinux denial review'
+    'reflector: rank pacman mirrors'
+    'fwupd: firmware devices and updates'
+    'smartmontools: SMART disk health'
+    'sbctl: Secure Boot key creation, enrollment and signing'
+    'mokutil: fallback Secure Boot state check'
+    'power-profiles-daemon: power profile switching'
+    'zram-generator: zram swap configuration'
+    'flatpak: Flatpak app updates and cleanup'
+)
+conflicts=('atropa-git')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('9ad32a637d1e2b659d4527dc5fa3501206053a84a0885406009495f5b8e6911b')
+
+build() {
+    cd "$_pkgname-$pkgver"
+    python -m build --wheel --no-isolation
+}
+
+check() {
+    cd "$_pkgname-$pkgver"
+    python -m pytest
+}
+
+package() {
+    cd "$_pkgname-$pkgver"
+    python -m installer --destdir="$pkgdir" dist/*.whl
+
+    install -Dm644 atropa/resources/atropa.desktop -t "$pkgdir/usr/share/applications/"
+    install -Dm644 atropa/resources/org.atropa.pkexec.policy -t "$pkgdir/usr/share/polkit-1/actions/"
+    # The one program pkexec runs: root-owned, fixed path, annotated in the
+    # policy above with auth_admin_keep.
+    install -Dm755 atropa/helper.py "$pkgdir/usr/lib/atropa/atropa-helper"
+    local icon
+    for icon in atropa/resources/icons/hicolor/*/apps/org.atropa.Atropa.png; do
+        install -Dm644 "$icon" "$pkgdir/usr/share/icons/${icon#atropa/resources/icons/}"
+    done
+}
