@@ -9,6 +9,8 @@ rather than Atropa shipping a duplicate one.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -18,6 +20,20 @@ from gi.repository import Adw, Gtk  # noqa: E402
 
 from atropa.backend import aide
 from atropa.ui.pages import BasePage, esc
+
+# Showing every changed path of a big diff would turn the page into a wall
+# of rows; the counts already say how much there is. The full list stays in
+# the check log.
+_CHANGE_LIMIT = 60
+
+_KIND_LABELS = {"added": "ADDED", "removed": "REMOVED", "changed": "CHANGED"}
+
+
+def _format_when(value: str) -> str:
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return value
 
 
 class AidePage(BasePage):
@@ -47,6 +63,7 @@ class AidePage(BasePage):
         # remove()-with-a-swallowed-exception, so refresh() never risks
         # stacking duplicate rows or silently masking a real removal bug.
         self._status_rows: list[Adw.ActionRow] = []
+        self._timer_subtitle = ""
 
         self.check_group = self.add_group(
             "Run a check",
@@ -60,6 +77,29 @@ class AidePage(BasePage):
         self.check_group.add(self.check_summary_row)
         self.update_baseline_row: Adw.ActionRow | None = None
 
+        # The list of changed paths used to exist only inside the streaming
+        # dialog, which is gone as soon as the check finishes. Keeping the
+        # parsed result on disk makes the page answer "what changed?" the
+        # next time it's opened, not just "how many".
+        self.last_check_group = self.add_group(
+            "Last check",
+            "The saved result of the most recent check - it survives closing Atropa. Re-baselining clears it, "
+            "because those changes become the new normal.",
+        )
+        self.last_check_row = Adw.ActionRow(title="No check recorded yet")
+        self.last_check_group.add(self.last_check_row)
+        self._change_rows: list[Adw.ActionRow] = []
+
+        self.config_group = self.add_group(
+            "Configuration",
+            "Validates /etc/aide.conf and everything it includes, without walking the filesystem.",
+        )
+        self.config_row = Adw.ActionRow(title="aide.conf", subtitle="Not validated this session")
+        self.validate_btn = Gtk.Button(label="Validate", valign=Gtk.Align.CENTER)
+        self.validate_btn.connect("clicked", self._on_validate_config)
+        self.config_row.add_suffix(self.validate_btn)
+        self.config_group.add(self.config_row)
+
         self._last_check_output = ""
 
         self.refresh()
@@ -68,6 +108,7 @@ class AidePage(BasePage):
 
     def refresh(self) -> None:
         self.run_async(aide.get_status, self._on_status)
+        self.run_async(aide.load_check_record, self._on_record_loaded)
 
     def _on_status(self, status, error) -> bool:
         self.clear_rows(self.status_group, self._status_rows)
@@ -85,9 +126,13 @@ class AidePage(BasePage):
             self.status_group.add(row)
             self._status_rows.append(row)
             self.check_btn.set_sensitive(False)
+            self.validate_btn.set_sensitive(False)
+            self.init_btn.set_sensitive(False)
             return False
 
-        self.installed_row.set_subtitle(esc(f"Config file: {'present' if status.config_exists else 'missing'} at {aide.CONFIG_FILE}"))
+        self.installed_row.set_subtitle(
+            esc(f"Config file: {'present' if status.config_exists else 'missing'} at {aide.CONFIG_FILE}")
+        )
         self.status_group.add(self.installed_row)
         self._status_rows.append(self.installed_row)
 
@@ -112,10 +157,13 @@ class AidePage(BasePage):
         if status.timer_unit:
             state = "active" if status.timer_active else "inactive"
             enabled = "enabled at boot" if status.timer_enabled else "not enabled at boot"
-            self.timer_row.set_subtitle(esc(f"{status.timer_unit} - {state}, {enabled}"))
+            self._timer_subtitle = f"{status.timer_unit} - {state}, {enabled}"
+            self.timer_row.set_subtitle(esc(self._timer_subtitle))
             self.timer_btn.set_label("Disable" if status.timer_active or status.timer_enabled else "Enable")
             self.timer_btn.set_sensitive(True)
+            self.run_async(lambda: aide.timer_details(status.timer_unit), self._on_timer_details)
         else:
+            self._timer_subtitle = ""
             self.timer_row.set_subtitle(
                 "No AIDE timer unit found - the AUR package usually ships one; check its post-install message"
             )
@@ -125,13 +173,82 @@ class AidePage(BasePage):
 
         return False
 
+    def _on_timer_details(self, details, error) -> bool:
+        if error or details is None or not self._timer_subtitle:
+            return False
+        if details.next_run:
+            self.timer_row.set_subtitle(esc(f"{self._timer_subtitle} · next run {details.next_run}"))
+        elif details.last_run:
+            self.timer_row.set_subtitle(esc(f"{self._timer_subtitle} · last run {details.last_run}"))
+        else:
+            self.timer_row.set_subtitle(esc(f"{self._timer_subtitle} · no next run scheduled"))
+        return False
+
+    # -- last check -------------------------------------------------------------
+
+    def _on_record_loaded(self, record, error) -> bool:
+        if error:
+            return False
+        self._render_record(record)
+        return False
+
+    def _render_record(self, record: aide.CheckRecord | None) -> None:
+        self.clear_rows(self.last_check_group, self._change_rows)
+        self._change_rows = []
+
+        if record is None:
+            self.last_check_row.set_title("No check recorded yet")
+            self.last_check_row.set_subtitle("Run a check to see what changed")
+            return
+
+        when = _format_when(record.checked_at)
+        summary = record.summary
+        if summary is None:
+            self.last_check_row.set_title("Last check didn't produce a summary")
+            self.last_check_row.set_subtitle(esc(f"{when} - see the check log for AIDE's raw output"))
+            return
+        if summary.clean:
+            self.last_check_row.set_title("Clean - no changes detected")
+            self.last_check_row.set_subtitle(esc(when))
+            return
+
+        self.last_check_row.set_title(
+            f"{summary.added} added, {summary.removed} removed, {summary.changed} changed"
+        )
+        self.last_check_row.set_subtitle(esc(f"Checked {when}"))
+
+        for entry in record.entries[:_CHANGE_LIMIT]:
+            row = Adw.ActionRow(title=esc(entry.path))
+            if entry.detail:
+                row.set_subtitle(esc(entry.detail))
+            row.add_suffix(Gtk.Label(label=_KIND_LABELS[entry.kind], css_classes=["dim-label"]))
+            self.last_check_group.add(row)
+            self._change_rows.append(row)
+
+        remaining = len(record.entries) - _CHANGE_LIMIT
+        if remaining > 0:
+            row = Adw.ActionRow(
+                title=esc(f"… and {remaining} more changed path{'s' if remaining != 1 else ''}"),
+                subtitle="The full list is in the check log",
+            )
+            self.last_check_group.add(row)
+            self._change_rows.append(row)
+
     # -- initialize / re-initialize baseline -----------------------------------
 
     def _on_initialize_clicked(self) -> None:
-        self.run_streaming_operation("Initializing AIDE baseline", aide.initialize_baseline, self._on_init_done)
+        self.run_streaming_operation("Initializing AIDE baseline", aide.initialize_baseline, self._on_baseline_done)
 
-    def _on_init_done(self, result, error) -> bool:
-        return self.handle_command_result(result, error, success_message="Baseline initialized")
+    def _on_baseline_done(self, result, error) -> bool:
+        # A fresh baseline makes the saved check stale by definition - its
+        # "changes" are exactly what was just accepted as the new normal.
+        succeeded = error is None and getattr(result, "ok", False)
+        if succeeded:
+            aide.clear_check_record()
+        handled = self.handle_command_result(result, error, success_message="Baseline updated")
+        if succeeded:
+            self._render_record(None)
+        return handled
 
     # -- run check --------------------------------------------------------------
 
@@ -144,12 +261,20 @@ class AidePage(BasePage):
             return False
 
         self._last_check_output = result.stdout if result is not None else ""
-        summary = aide.parse_check_summary(self._last_check_output, result.returncode if result is not None else None)
+        record = aide.build_check_record(
+            self._last_check_output, result.returncode if result is not None else None
+        )
+        try:
+            aide.save_check_record(record)
+        except OSError as exc:
+            self.notify(f"Check finished, but the result couldn't be saved: {exc}", is_error=True)
 
         if self.update_baseline_row is not None:
             self.check_group.remove(self.update_baseline_row)
             self.update_baseline_row = None
 
+        self._render_record(record)
+        summary = record.summary
         if summary is None:
             self.check_summary_row.set_title("Check finished, but no summary could be parsed")
             self.check_summary_row.set_subtitle("See the log above for AIDE's raw output")
@@ -183,7 +308,27 @@ class AidePage(BasePage):
         )
 
     def _run_update_baseline(self) -> None:
-        self.run_streaming_operation("Updating AIDE baseline", aide.update_baseline, self._on_init_done)
+        self.run_streaming_operation("Updating AIDE baseline", aide.update_baseline, self._on_baseline_done)
+
+    # -- config validation ------------------------------------------------------
+
+    def _on_validate_config(self, _btn: Gtk.Button) -> None:
+        self.config_row.set_subtitle("Validating…")
+        self.run_action(aide.check_config, self._on_config_validated)
+
+    def _on_config_validated(self, result, error) -> bool:
+        if error:
+            self.config_row.set_subtitle(esc(f"Couldn't validate: {error}"))
+            self.notify(f"Couldn't validate aide.conf: {error}", is_error=True)
+            return False
+        output = (result.stdout or result.stderr).strip()
+        if result.ok:
+            self.config_row.set_subtitle(esc(output or "Parses cleanly, including its includes"))
+            self.notify("AIDE configuration is valid")
+        else:
+            self.config_row.set_subtitle(esc(f"Invalid: {output[:300]}"))
+            self.notify("AIDE configuration has errors", is_error=True)
+        return False
 
     # -- timer --------------------------------------------------------------
 

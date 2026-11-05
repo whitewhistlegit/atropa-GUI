@@ -258,3 +258,185 @@ def test_initialize_baseline_promotes_through_a_root_only_db_dir(monkeypatch, fa
         ["pkexec", "cp", first, first.replace(".new", "")],
         ["pkexec", "cp", second, second.replace(".new", "")],
     ]
+
+
+# ------------------------------------------------------- check report ----
+
+REPORT = """Start timestamp: 2026-11-05 03:00:00 +0100 (AIDE 0.18.8)
+
+Added entries:
+--------------------
+f++++++++++++++++: /etc/new.conf
+d++++++++++++++++: /opt/newdir
+
+Removed entries:
+--------------------
+f----------------: /etc/old.conf
+
+Changed entries:
+--------------------
+f > ... : /etc/passwd
+d = ... : /var/lib
+
+Detailed information about changes:
+--------------------
+File: /etc/passwd
+  Size     : 1234
+
+Summary:
+  Total number of entries:\t100
+  Added entries:\t\t2
+  Removed entries:\t\t1
+  Changed entries:\t\t2
+"""
+
+
+def test_parse_check_entries_reads_each_section():
+    entries = aide.parse_check_entries(REPORT)
+
+    assert [(entry.kind, entry.path) for entry in entries] == [
+        ("added", "/etc/new.conf"),
+        ("added", "/opt/newdir"),
+        ("removed", "/etc/old.conf"),
+        ("changed", "/etc/passwd"),
+        ("changed", "/var/lib"),
+    ]
+
+
+def test_parse_check_entries_keeps_the_marker_column_as_detail():
+    entries = aide.parse_check_entries(REPORT)
+    assert entries[0].detail == "++++++++++++++++"
+    assert entries[4].detail == "= ..."
+
+
+def test_parse_check_entries_ignores_the_summary_counts_and_detailed_block():
+    paths = [entry.path for entry in aide.parse_check_entries(REPORT)]
+    assert "/etc/passwd" in paths
+    assert "1234" not in paths  # the "Size : 1234" line of the detailed block
+
+
+def test_parse_check_entries_clean_output_has_none():
+    assert aide.parse_check_entries("AIDE found NO differences between database and filesystem. Looks okay!!\n") == []
+
+
+def test_parse_check_entries_handles_paths_with_spaces():
+    output = "Added entries:\n--------------------\nf++++++++++++++++: /opt/my file.conf\n"
+    assert aide.parse_check_entries(output)[0].path == "/opt/my file.conf"
+
+
+def test_build_check_record_combines_summary_entries_and_time():
+    record = aide.build_check_record(REPORT, when="2026-11-05T03:01:02+01:00")
+    assert record.checked_at == "2026-11-05T03:01:02+01:00"
+    assert record.summary.added == 2
+    assert record.summary.changed == 2
+    assert len(record.entries) == 5
+    assert record.clean is False
+
+
+def test_build_check_record_clean_run_is_clean():
+    record = aide.build_check_record("AIDE found NO differences between database and filesystem.\n", returncode=0)
+    assert record.clean is True
+    assert record.entries == []
+
+
+# ------------------------------------------------------ last-check state --
+
+def test_save_and_load_check_record_roundtrip(tmp_path, monkeypatch):
+    path = tmp_path / "aide_last_check.json"
+    monkeypatch.setattr(aide, "LAST_CHECK_FILE", path)
+    record = aide.build_check_record(REPORT, when="2026-11-05T03:01:02+01:00")
+
+    aide.save_check_record(record)
+
+    assert aide.load_check_record() == record
+
+
+def test_load_check_record_missing_is_none(tmp_path, monkeypatch):
+    monkeypatch.setattr(aide, "LAST_CHECK_FILE", tmp_path / "nope.json")
+    assert aide.load_check_record() is None
+
+
+def test_load_check_record_corrupt_is_none(tmp_path, monkeypatch):
+    path = tmp_path / "bad.json"
+    path.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(aide, "LAST_CHECK_FILE", path)
+    assert aide.load_check_record() is None
+
+
+def test_load_check_record_drops_unknown_entry_kinds(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_text(
+        '{"checked_at": "now", "summary": null, "entries": ['
+        '{"kind": "deleted", "path": "/etc/x"},'
+        '{"kind": "added", "path": "/etc/y"}]}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(aide, "LAST_CHECK_FILE", path)
+
+    record = aide.load_check_record()
+
+    assert [entry.path for entry in record.entries] == ["/etc/y"]
+
+
+def test_clear_check_record_removes_the_file(tmp_path, monkeypatch):
+    path = tmp_path / "state.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(aide, "LAST_CHECK_FILE", path)
+    aide.clear_check_record()
+    assert not path.exists()
+
+
+# ------------------------------------------------------- config check ----
+
+def test_check_config_runs_aide_config_check_as_root(fake_run):
+    fake_run.set_response(["pkexec", "aide", "--config-check"], stdout="")
+    result = aide.check_config()
+    assert result.ok
+    assert fake_run.last_call() == ["pkexec", "aide", "--config-check"]
+
+
+def test_check_config_reports_a_bad_config(fake_run):
+    fake_run.set_response(
+        ["pkexec", "aide", "--config-check"],
+        stderr="/etc/aide.conf:12: unknown rule",
+        returncode=1,
+    )
+    result = aide.check_config()
+    assert not result.ok
+    assert "unknown rule" in result.stderr
+
+
+# -------------------------------------------------------- timer details --
+
+def test_timer_details_parses_systemctl_show(fake_run):
+    fake_run.set_response(
+        ["systemctl", "show", "aide.timer"],
+        stdout=(
+            "NextElapseUSecRealtime=Thu 2026-11-06 00:00:00 CET\n"
+            "LastTriggerUSec=Wed 2026-11-05 00:00:00 CET\n"
+            "Result=success\n"
+        ),
+    )
+
+    details = aide.timer_details("aide.timer")
+
+    assert details.next_run == "Thu 2026-11-06 00:00:00 CET"
+    assert details.last_run == "Wed 2026-11-05 00:00:00 CET"
+    assert details.result == "success"
+
+
+def test_timer_details_unset_properties_are_empty(fake_run):
+    fake_run.set_response(["systemctl", "show", "aide.timer"], stdout="NextElapseUSecRealtime=\n")
+    details = aide.timer_details("aide.timer")
+    assert details.next_run == ""
+    assert details.last_run == ""
+
+
+def test_timer_details_failure_is_an_error(fake_run):
+    fake_run.set_response(["systemctl", "show", "aide.timer"], stderr="Unit aide.timer not found", returncode=1)
+    try:
+        aide.timer_details("aide.timer")
+    except RuntimeError as exc:
+        assert "not found" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")

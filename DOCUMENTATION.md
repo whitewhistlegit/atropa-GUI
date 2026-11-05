@@ -7,8 +7,8 @@ reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~18,000 lines of Python across 31 backend modules, 29 UI
-pages and one root helper, plus a 1,036-test pytest suite (~11,100 lines).** CI has no GTK4/libadwaita
+Current size: **~18,300 lines of Python across 31 backend modules, 29 UI
+pages and one root helper, plus a 1,053-test pytest suite (~11,300 lines).** CI has no GTK4/libadwaita
 available, so UI code is checked there with `py_compile` + `ruff` + the backend
 test suite; visually it is reviewed on a desktop that has GTK4, where the same
 code renders with the bundled stylesheet (see "Testing approach" below).
@@ -590,6 +590,28 @@ duplication). No `install()` function on purpose.
   can take minutes.
 - `enable_timer(unit)` / `disable_timer(unit)` - operate on whatever
   `detect_timer_unit()` found, never a hardcoded name.
+- `parse_check_entries(output)` - the added/removed/changed *paths* from
+  AIDE's report, not just the counts. Section-aware (blank line or the
+  next header ends a list), so the summary's "Added entries:" counts and
+  the "Detailed information about changes" attribute block are never
+  mistaken for paths; each entry keeps AIDE's marker column
+  (`f++++++++++++++++`) as detail.
+- `build_check_record()` / `save_check_record()` / `load_check_record()` /
+  `clear_check_record()` - the last check (timestamp, summary, paths) is
+  saved to `~/.local/share/atropa/aide_last_check.json`, so "what changed?"
+  survives closing the streaming dialog or the app. Writes are atomic
+  (temp file + replace), a corrupt/missing file is just "no record", and
+  unknown entry kinds are dropped rather than crashing the page.
+  Re-baselining clears it, because those changes are now the new normal.
+- `check_config()` - `aide --config-check` through pkexec: validates
+  `/etc/aide.conf` and every Include without walking the filesystem.
+- `timer_details(unit)` - `systemctl show --property=NextElapseUSecRealtime,
+  LastTriggerUSec,Result`, parsed as key=value rather than
+  `list-timers`' moving columns; empty values mean "not scheduled", never a
+  fabricated date.
+- The page grew a "Last check" group (saved summary + up to 60 changed
+  paths with ADDED/REMOVED/CHANGED labels, then "… and N more"), a
+  "Configuration" validate action, and the timer row's next/last run.
 - UI's "Update baseline" action requires an explicit `self.confirm()`
   with copy stating it accepts everything currently reported as normal -
   deliberate friction, not an oversight.
@@ -1175,7 +1197,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 1036 tests across
+**There's a real pytest suite**: `tests/`, 1053 tests across
 one file per `backend/` module (all 31), plus `test_pacman_config.py`,
 `test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
@@ -1342,7 +1364,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (1036 tests as of the latest pass, across all 31 `backend/` modules, one
+- ✅ A real pytest suite (1053 tests as of the latest pass, across all 31 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -1561,6 +1583,19 @@ exactly one definition.
   `set_active()` for programmatically setting a switch. Both were
   caught by checking existing code for precedent before trusting an
   API I couldn't run, not by inspection alone.
+
+- ✅ **File Integrity page expanded past counts.** The page used to say
+  "3 changed" and forget which files as soon as the streaming dialog
+  closed. Now `aide.parse_check_entries()` reads the report's
+  added/removed/changed sections into paths (with AIDE's marker column),
+  `build/save/load/clear_check_record()` persists the last check to
+  `~/.local/share/atropa/aide_last_check.json`, and the page shows a
+  "Last check" group that survives restarts - up to 60 paths labelled
+  ADDED/REMOVED/CHANGED, then "… and N more". Re-baselining clears it,
+  since those changes are accepted as the new normal. Also added
+  `aide --config-check` behind a Validate button (fast, pkexec) and
+  `timer_details()` (systemctl show properties) so the timer row says when
+  the next check runs instead of only active/inactive.
 
 - ✅ **`makepkg` check() is host-independent now.** The suite had a fresh
   failure mode only after installation: with `/usr/lib/atropa/atropa-helper`
@@ -2483,7 +2518,7 @@ exactly one definition.
   on every machine, server-shaped default included), skips fail2ban, and
   shows a read-only desktop baseline (firewall, encryption, Secure Boot)
   instead of pretending the server checklist fits.
-  Every new backend module has its own pytest file (224 new tests); the
+  Every new backend module has its own pytest file (241 new tests); the
   environment couldn't run any of the tools for real (no fwupd, no battery,
   no Secure Boot on the sandbox), so command parsing is tested against
   documented output shapes and the pages are deliberately conservative about
