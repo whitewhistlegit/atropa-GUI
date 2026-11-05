@@ -46,6 +46,7 @@ from atropa.ui.pages.inventory_hygiene import InventoryHygienePage  # noqa: E402
 from atropa.ui.pages.mirrors import MirrorsPage  # noqa: E402
 from atropa.ui.pages.network import NetworkPage  # noqa: E402
 from atropa.ui.pages.packages import PackagesPage  # noqa: E402
+from atropa.ui.pages.pacnew import PacnewPage  # noqa: E402
 from atropa.ui.pages.plugin_page import PluginPage  # noqa: E402
 from atropa.ui.pages.power import PowerPage  # noqa: E402
 from atropa.ui.pages.profiles import ProfilesPage  # noqa: E402
@@ -156,6 +157,10 @@ MODULES = [
     Module(
         "refpolicy_build", "SELinux: Build Policy", "system-run-symbolic", RefpolicyBuildPage,
         "Build and install a policy tree", "security",
+    ),
+    Module(
+        "pacnew", "Config Changes", "document-revert-symbolic", PacnewPage,
+        "Review .pacnew and .pacsave files after upgrades", "maintenance",
     ),
     Module(
         "boot_report", "Boot Report", "dialog-warning-symbolic", BootReportPage,

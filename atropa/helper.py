@@ -114,10 +114,17 @@ COPY_DEST_DIRS = ("/var/lib/aide/", "/etc/atropa/plugins/")
 
 SAFE_PATH = ("/usr/bin", "/usr/sbin", "/bin", "/sbin")
 
+# Where pacman leaves .pacnew/.pacsave files. A constant so tests can point
+# the two operations at a temporary tree.
+ETC_ROOT = "/etc"
+
 # Commands handled by this module rather than executed (or refused): they
 # either write content themselves or validate every path before exec.
 FILE_COMMANDS = frozenset(
-    {"tee", "install", "replace-in-file", "cp", "mkdir", "touch", "rm", "chown", "sed"}
+    {
+        "tee", "install", "replace-in-file", "cp", "mkdir", "touch", "rm", "chown", "sed",
+        "pacnew-apply", "pacnew-remove",
+    }
 )
 
 _MODE_RE = re.compile(r"^[0-7]{3,4}$")
@@ -285,6 +292,59 @@ def _checked_chown(argv: list[str]) -> list[str]:
     return ["chown", *argv[1:]]
 
 
+# ------------------------------------------------------------- .pacnew files --
+
+
+def _pacnew_candidate(path: str) -> str:
+    """
+    A root-owned file ending .pacnew/.pacsave under /etc that is not itself a
+    symlink. These two operations exist instead of a general write because
+    pacman leaves them for *any* /etc config, not just the files Atropa
+    manages - the capability is bounded by "a .pacnew already exists here",
+    which an unprivileged user cannot create in /etc.
+    """
+    target = _normal(path)
+    if not target.startswith(ETC_ROOT.rstrip("/") + "/"):
+        raise Refused(f"{target} isn't under {ETC_ROOT}")
+    if not target.endswith((".pacnew", ".pacsave")):
+        raise Refused(f"{target} isn't a .pacnew/.pacsave file")
+    if os.path.islink(target) or not os.path.isfile(target):
+        raise Refused(f"{target} isn't a regular file")
+    return os.path.realpath(target)
+
+
+def _pacnew_live(candidate: str) -> str:
+    live = candidate[: -len(".pacnew")] if candidate.endswith(".pacnew") else candidate[: -len(".pacsave")]
+    if live == ETC_ROOT or not live.startswith(ETC_ROOT.rstrip("/") + "/"):
+        raise Refused(f"{live!r} isn't a live file under {ETC_ROOT}")
+    if os.path.islink(live):
+        raise Refused(f"{live} is a symlink; refusing to replace it")
+    return live
+
+
+def _pacnew_apply(argv: list[str]) -> int:
+    if len(argv) != 2:
+        raise Refused("pacnew-apply takes exactly one path")
+    candidate = _pacnew_candidate(argv[1])
+    live = _pacnew_live(candidate)
+    with open(candidate, "rb") as handle:
+        data = handle.read()
+    mode = os.stat(candidate).st_mode & 0o7777
+    fd = os.open(live, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+    os.chmod(live, mode)
+    return 0
+
+
+def _pacnew_remove(argv: list[str]) -> int:
+    if len(argv) != 2:
+        raise Refused("pacnew-remove takes exactly one path")
+    candidate = _pacnew_candidate(argv[1])
+    os.unlink(candidate)
+    return 0
+
+
 # -------------------------------------------------------------- file writing --
 
 
@@ -407,6 +467,10 @@ def handle(argv: list[str], data: bytes = b"") -> int | None:
         return _exec(_system_binary("chown"), validated)
     if program == "sed":
         raise Refused("sed isn't allowed; use replace-in-file")
+    if program == "pacnew-apply":
+        return _pacnew_apply(argv)
+    if program == "pacnew-remove":
+        return _pacnew_remove(argv)
 
     return None  # an allowlisted bare command: main() execs it
 

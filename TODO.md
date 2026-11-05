@@ -9,15 +9,15 @@ reasoning for the existing items are in
 Rough priority order. The first three cover most of what breaks on a
 single-user Arch machine.
 
-- [ ] **`.pacnew` / `.pacsave` handling** - list them, diff each against the
-      live file, and keep, replace or merge. Back up through the existing
-      backup mechanism first.
+- [x] **`.pacnew` / `.pacsave` handling** - list them, diff each against the
+      live file, and keep or replace (merging is a manual edit). Backed up
+      through the existing backup mechanism first.
 - [ ] **Snapshot before upgrade, with rollback** - Snapper or Timeshift on
       Btrfs: snapshot automatically before a full upgrade or a risky
       change, and offer booting the previous snapshot. (Also an existing
       TODO, below.)
 - [ ] **Upgrade checks**
-  - [ ] Before: show recent Arch news items that need manual steps.
+  - [x] Before: show recent Arch news items that need manual steps.
   - [x] After: list failed units (`systemctl --failed`).
   - [x] Say "reboot needed" when the running kernel no longer matches the
         installed one.
@@ -79,9 +79,10 @@ single-user Arch machine.
 - [ ] Check bootloader detection on a real UEFI machine that boots GRUB
       (relies on GRUB 2.12 writing "GRUB ..." to `LoaderInfo` and on
       `bootctl --print-esp-path` answering there).
-- [ ] CI: a GTK smoke test that builds every page under Xvfb, Python
-      3.13/3.14 in the matrix next to 3.11/3.12, and parser tests against
-      real config files rather than hand-written snippets.
+- [x] CI: a GTK smoke test that builds every page under Xvfb, Python
+      3.13/3.14 in the matrix next to 3.11/3.12.
+- [ ] CI: parser tests against real config files rather than hand-written
+      snippets.
 - [x] **Single privileged helper** - one root-owned helper
       (`/usr/lib/atropa/atropa-helper`) with an `auth_admin_keep` polkit
       action, so one password covers an operation instead of one prompt per

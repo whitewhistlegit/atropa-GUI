@@ -357,3 +357,83 @@ def test_policy_covers_every_path_the_backend_manages():
     ]
     for path in managed:
         assert helper.checked_write_path(path), path
+
+
+# --------------------------------------------------------------- .pacnew ----
+
+def _pacnew_tree(tmp_path, monkeypatch):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    monkeypatch.setattr(helper, "ETC_ROOT", str(etc))
+    return etc
+
+
+def test_pacnew_apply_replaces_the_live_file_and_keeps_its_mode(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    live = etc / "pacman.conf"
+    live.write_text("old\n")
+    candidate = etc / "pacman.conf.pacnew"
+    candidate.write_text("new\n")
+    candidate.chmod(0o600)
+
+    assert helper.handle(["pacnew-apply", str(candidate)]) == 0
+    assert live.read_text() == "new\n"
+    assert stat.S_IMODE(live.stat().st_mode) == 0o600
+    assert candidate.exists()  # the review step keeps it until the user removes it
+
+
+def test_pacnew_apply_creates_a_missing_live_file_from_a_pacsave(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    saved = etc / "removed.conf.pacsave"
+    saved.write_text("saved\n")
+
+    helper.handle(["pacnew-apply", str(saved)])
+
+    assert (etc / "removed.conf").read_text() == "saved\n"
+
+
+def test_pacnew_remove_deletes_only_the_candidate(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    live = etc / "x.conf"
+    live.write_text("live\n")
+    candidate = etc / "x.conf.pacnew"
+    candidate.write_text("new\n")
+
+    assert helper.handle(["pacnew-remove", str(candidate)]) == 0
+    assert not candidate.exists()
+    assert live.read_text() == "live\n"
+
+
+def test_pacnew_operations_refuse_other_files(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    other = etc / "x.conf"
+    other.write_text("x\n")
+    with pytest.raises(helper.Refused, match=".pacnew"):
+        helper.handle(["pacnew-apply", str(other)])
+    with pytest.raises(helper.Refused, match=".pacnew"):
+        helper.handle(["pacnew-remove", str(other)])
+
+
+def test_pacnew_refuses_a_symlinked_candidate(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    target = etc / "real.pacnew"
+    target.write_text("x\n")
+    link = etc / "link.pacnew"
+    link.symlink_to(target)
+
+    with pytest.raises(helper.Refused, match="regular file"):
+        helper.handle(["pacnew-apply", str(link)])
+
+
+def test_pacnew_refuses_to_replace_a_symlinked_live_file(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    real = etc / "real.conf"
+    real.write_text("x\n")
+    live = etc / "live.conf"
+    live.symlink_to(real)
+    candidate = etc / "live.conf.pacnew"
+    candidate.write_text("new\n")
+
+    with pytest.raises(helper.Refused, match="symlink"):
+        helper.handle(["pacnew-apply", str(candidate)])
+    assert real.read_text() == "x\n"

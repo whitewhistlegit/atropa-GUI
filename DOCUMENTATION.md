@@ -7,8 +7,8 @@ reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~18,600 lines of Python across 31 backend modules, 29 UI
-pages and one root helper, plus a 1,073-test pytest suite (~11,500 lines).** CI has no GTK4/libadwaita
+Current size: **~19,400 lines of Python across 33 backend modules, 30 UI
+pages and one root helper, plus a 1,159-test pytest suite (~12,100 lines).** CI has no GTK4/libadwaita
 available, so UI code is checked there with `py_compile` + `ruff` + the backend
 test suite; visually it is reviewed on a desktop that has GTK4, where the same
 code renders with the bundled stylesheet (see "Testing approach" below).
@@ -151,6 +151,12 @@ where almost all of the write-anything risk lived.
   `/.autorelabel`, `rm` only the legacy `/etc/archyast`, and `chown` only
   hands files back to the invoking user inside that user's home - never
   `/etc/shadow` to someone.
+- `pacnew-apply` / `pacnew-remove` are the one way to touch configs Atropa
+  doesn't manage: both require a regular `*.pacnew`/`*.pacsave` file under
+  `/etc` (which an unprivileged user cannot create there), and applying
+  copies the candidate over its live sibling, refusing symlinked targets.
+  That is how the Config Changes page can legitimately touch any /etc file
+  without reopening "write anywhere".
 - `tests/test_helper.py` has a coverage test that walks the backend's own
   path constants and fails if a managed file is missing from `WRITE_FILES`.
   Adding a file Atropa writes therefore requires adding it to the policy.
@@ -381,6 +387,15 @@ non-executable helper silently restores the old per-command behavior.
   (`coreutils-selinux`, `pam-selinux`, `systemd-selinux`, `sudo-selinux`,
   ... or `base-selinux` for all of them) conflict with the official ones
   and only go in when someone installs them by name.
+
+- **Arch news before upgrading.** The Packages page's "Before Upgrading"
+  group calls `news.check()`: fetch `https://archlinux.org/feeds/news/`,
+  keep items published after the last `starting full system upgrade` line
+  in `/var/log/pacman.log`, and list up to ten with dates and an Open
+  button. User-triggered (no network when the page opens), read-only, no
+  root. Failures land in `NewsReport.error` and are shown as one line
+  instead of a blank section; the feed parser is tested with an injected
+  `fetch`, so CI never touches the network.
 
 ### Network (`network.py` / `pages/network.py`)
 NetworkManager (`nmcli`) only — systemd-networkd is detected
@@ -1082,6 +1097,27 @@ operation with `flatpak list --system` rather than assumed, so per-user
 installs don't prompt and system installs do. "No updates" is an empty list,
 not an error.
 
+### Config Changes (`pacnew.py` / `pages/pacnew.py`)
+
+- `scan() -> list[PacnewEntry]` walks `/etc` for `*.pacnew`/`*.pacsave`,
+  derives the live path, and records whether the live side still exists.
+  Unreadable subdirectories are skipped (one root-only corner must not hide
+  every other pending config); an unreadable `/etc` itself raises.
+- `diff_text(entry)` is a unified diff of live vs candidate via `difflib` -
+  no shelling out, and a missing live file diffs as empty so a `.pacsave`
+  reads as "all new".
+- `apply_new(entry)` backs the live file up first (`backup_file()`), then
+  calls the helper's `pacnew-apply`; `discard(entry)` calls
+  `pacnew-remove`. Both go through the helper's bounded `.pacnew` support
+  (see the operation-level helper section): the helper only touches a
+  regular, non-symlinked `*.pacnew`/`*.pacsave` under `/etc`, which an
+  unprivileged user cannot create.
+- The page lists each candidate with **Show diff** (monospaced dialog),
+  **Use new version** / **Restore saved config**, and **Keep current**
+  (delete the candidate). Replacing asks first and says the backup is made.
+  Merging is deliberately manual: Atropa shows the two versions and lets
+  you edit, rather than pretending a three-way merge is safe to automate.
+
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
 required, note)`; `check_all() -> list[DependencyStatus]`,
@@ -1259,8 +1295,8 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 1073 tests across
-one file per `backend/` module (all 31), plus `test_pacman_config.py`,
+**There's a real pytest suite**: `tests/`, 1159 tests across
+one file per `backend/` module (all 33), plus `test_pacman_config.py`,
 `test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -1308,6 +1344,14 @@ they were invisible to hand-written fixtures because the fixtures shared the
 parser's assumption. Where a tool or device was missing (fwupd, a battery
 charge threshold, Secure Boot firmware), the output shapes stay
 documentation-based and say so in section 5.
+
+CI has two jobs: the backend matrix (Python 3.11-3.14, no GTK) and a GTK
+smoke job that installs the distro PyGObject and builds every page under
+`xvfb-run`. `tests/test_ui_smoke.py` uses `ATROPA_UI_SMOKE=1`, which makes
+`BasePage.run_async()` a no-op, so constructing a page never shells out -
+the test checks widget construction, not backend behavior. Pages that need
+a display skip themselves when `DISPLAY` is unset, which is why the backend
+matrix can run the same suite.
 
 `tests/test_resources.py` is the one file that isn't about a backend module.
 The app icon is wired by name in three places - `APP_ID` in `main.py` (the
@@ -1426,7 +1470,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (1073 tests as of the latest pass, across all 31 `backend/` modules, one
+- ✅ A real pytest suite (1159 tests as of the latest pass, across all 31 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2580,11 +2624,42 @@ exactly one definition.
   on every machine, server-shaped default included), skips fail2ban, and
   shows a read-only desktop baseline (firewall, encryption, Secure Boot)
   instead of pretending the server checklist fits.
-  Every new backend module has its own pytest file (261 new tests); the
+  Every new backend module has its own pytest file (347 new tests); the
   environment couldn't run any of the tools for real (no fwupd, no battery,
   no Secure Boot on the sandbox), so command parsing is tested against
   documented output shapes and the pages are deliberately conservative about
   actions.
+
+- ✅ **`.pacnew`/`.pacsave` handling** (new `backend/pacnew.py` + the
+  Config Changes page) - the top item on the single-user desktop TODO.
+  `scan()` walks `/etc`, `diff_text()` builds a unified diff with difflib
+  (no shell, missing live side reads as all-new), and applying a candidate
+  backs up the live file and goes through the helper's bounded
+  `pacnew-apply` operation. The page offers Show diff, Use new version /
+  Restore saved config, and Keep current; merging stays a manual edit
+  rather than an unsafe automated three-way merge. The helper operations
+  only accept an existing regular `*.pacnew`/`*.pacsave` under `/etc`,
+  which an unprivileged user cannot create, so this does not reopen the
+  "write any /etc file" hole phase 1 closed.
+
+- ✅ **Arch news before upgrading** (new `backend/news.py`, the Packages
+  page's "Before Upgrading" group) - fetches the Arch news RSS, keeps items
+  published after the last `starting full system upgrade` line in
+  `/var/log/pacman.log`, and lists them with dates and an Open link. Never
+  fetched when the page opens, never raises (failures become one line), and
+  the parser tests inject the feed so CI stays offline. Completes the
+  "Before: recent Arch news" upgrade check.
+
+- ✅ **CI can see the UI now.** A separate `gtk-smoke` job installs the
+  distro PyGObject + Xvfb and constructs every one of the 30 pages under
+  `xvfb-run`; `ATROPA_UI_SMOKE=1` turns `BasePage.run_async()` into a no-op
+  so building a page never shells out on a runner. The backend matrix also
+  grew 3.13/3.14. This is the CI item that the repo audit asked for - and
+  it would have caught the GTK-API mistakes previously found by eye.
+
+- ✅ **Version 0.2.0** - first tagged release after the desktop-module,
+  helper and exposure work, with a stable `atropa` PKGBUILD that builds
+  from the release tarball instead of the git head.
 
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2

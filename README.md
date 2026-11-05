@@ -32,7 +32,7 @@ Each sidebar entry is a module:
 
 | Module | What it does |
 |---|---|
-| **Package Management** | Pending updates (checked without touching the package database), full system upgrade (live output), post-upgrade health checks (failed units, reboot, microcode), pacman.conf toggles (color, parallel downloads, multilib), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
+| **Package Management** | Pending updates (checked without touching the package database), Arch-news check before upgrading, full system upgrade (live output), post-upgrade health checks (failed units, reboot, microcode), pacman.conf toggles (color, parallel downloads, multilib), search repo + AUR (via `paru`/`yay` if installed), install/remove, orphans, cache cleanup |
 | **System** | Hostname, timezone/NTP, locale (incl. `locale.gen`), console keymap and X11 layout |
 | **Network** | NetworkManager devices, Wi-Fi, static IP/DHCP (systemd-networkd is detected but read-only) |
 | **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
@@ -51,6 +51,7 @@ Each sidebar entry is a module:
 | **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
 | **SELinux: Denial Review** | Setup Mode, grouped and classified denials, one-click `restorecon`, policy generation |
 | **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
+| **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
 | **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |
 | **Disk Health** | SMART health (one-click root read where the kernel requires it), filesystem usage, `fstrim.timer`, journal/cache/coredump cleanup |
 | **Firmware** | fwupd devices and updates, streamed |
@@ -171,7 +172,7 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,073 tests across every backend module and the privileged helper. It fakes the one
+The suite is 1,159 tests across every backend module and the privileged helper. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.
 
