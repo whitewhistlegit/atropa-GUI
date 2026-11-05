@@ -131,7 +131,7 @@ def set_mode(enforcing: bool, persistent: bool = True) -> CommandResult:
         backup_file(str(SELINUX_CONFIG))
         value = "enforcing" if enforcing else "permissive"
         pattern = r"^SELINUX=.*$"
-        result = run_privileged(["sed", "-i", "-E", f"s/{pattern}/SELINUX={value}/", str(SELINUX_CONFIG)])
+        result = run_privileged(["replace-in-file", str(SELINUX_CONFIG), pattern, f"SELINUX={value}"])
     return result
 
 

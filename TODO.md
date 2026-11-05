@@ -87,11 +87,17 @@ single-user Arch machine.
       action, so one password covers an operation instead of one prompt per
       command. The helper runs a bare-name allowlist of tools, never a
       shell.
-- [ ] **Operation-level helper API and root-owned backups** - replace the
-      command allowlist with one helper entry point per operation; move
-      backups to root-owned storage at the same time (anything running as
-      the user can currently change a backup in
-      `~/.local/share/atropa/backups`).
+- [x] **Helper phase 1: file operations** - `tee`/`install`/`replace-in-file`
+      are performed by the helper against an exact path policy; `sed` is
+      refused; `cp`/`mkdir`/`touch`/`rm`/`chown` validate their paths.
+      A policy-coverage test keeps `WRITE_FILES` in sync with the backend.
+- [ ] **Helper phase 2: typed operations** - `service`, `package`, `user`,
+      and a read policy for `cat`/`grep`, so the command allowlist
+      (systemctl, pacman, useradd, ...) can be deleted.
+- [ ] **Root-owned backups** - move `~/.local/share/atropa/backups` to
+      root-owned storage with a root-owned manifest, written/restored by the
+      helper. Today anything running as the user can change a backup's
+      contents in `~/.local/share/atropa/backups`.
 
 ## SELinux Denial Review
 

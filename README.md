@@ -67,7 +67,10 @@ Every config file Atropa edits is backed up first to
 argument list through `pkexec`/`sudo` - never through a shell - so a package
 name, username or mirror URL cannot turn into a second command. The first
 privileged action asks for the password; polkit then remembers it for its keep
-window (five minutes by default), so a multi-step change asks once. Changes that
+window (five minutes by default), so a multi-step change asks once. Because
+that authorization is cached, the helper does not run a generic shell or
+`sed`: file writes are performed by the helper against an exact allowlist of
+paths Atropa manages, and `sed` is refused outright. Changes that
 can lock you out or end your session ask first and say what they affect:
 stopping or restarting a service like the display manager or sshd, locking a
 password, taking the last administrator out of `wheel`, turning the firewall
@@ -168,7 +171,7 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,053 tests across every backend module and the privileged helper. It fakes the one
+The suite is 1,072 tests across every backend module and the privileged helper. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.
 

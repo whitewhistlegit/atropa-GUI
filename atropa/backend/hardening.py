@@ -417,7 +417,7 @@ def _set_faillock_option(key: str, value: str) -> CommandResult:
     replacement = f"{key} = {value}"
     check = run_unprivileged(["grep", "-E", pattern, str(FAILLOCK_CONF)])
     if check.stdout.strip():
-        result = run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(FAILLOCK_CONF)])
+        result = run_privileged(["replace-in-file", str(FAILLOCK_CONF), pattern, replacement])
     else:
         result = _append_line(FAILLOCK_CONF, replacement)
     return result
@@ -476,7 +476,7 @@ def _set_pwquality_option(key: str, value: str) -> CommandResult:
     replacement = f"{key} = {value}"
     check = run_unprivileged(["grep", "-E", pattern, str(PWQUALITY_CONF)])
     if check.stdout.strip():
-        return run_privileged(["sed", "-i", "-E", f"s/{pattern}/{replacement}/", str(PWQUALITY_CONF)])
+        return run_privileged(["replace-in-file", str(PWQUALITY_CONF), pattern, replacement])
     return _append_line(PWQUALITY_CONF, replacement)
 
 

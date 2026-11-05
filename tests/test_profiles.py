@@ -331,7 +331,7 @@ def test_import_ssh_applies_each_setting(fake_run, fake_which, privilege_paths, 
     conf.write_text("PermitRootLogin yes\nPasswordAuthentication yes\nPort 22\n")
     monkeypatch.setattr(security, "SSHD_CONFIG", conf)
     fake_run.set_response(["grep", "-Ei"], stdout="PermitRootLogin yes\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
     fake_run.set_response(["pkexec", "sshd", "-t"], returncode=0)
     fake_run.set_response(["pkexec", "systemctl", "reload", "sshd"], returncode=0)
 
@@ -354,7 +354,7 @@ def test_import_ssh_invalid_port_is_skipped_not_crashed(fake_run, fake_which, pr
 
 
 def _sshd_edits(fake_run) -> list[list[str]]:
-    return [c for c in fake_run.calls if c[:2] in (["pkexec", "sed"], ["pkexec", "bash"], ["pkexec", "sshd"])]
+    return [c for c in fake_run.calls if c[:2] in (["pkexec", "replace-in-file"], ["pkexec", "bash"], ["pkexec", "sshd"])]
 
 
 def test_import_ssh_leaves_unknown_settings_alone(fake_run, fake_which):

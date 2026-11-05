@@ -7,8 +7,8 @@ reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~18,300 lines of Python across 31 backend modules, 29 UI
-pages and one root helper, plus a 1,053-test pytest suite (~11,300 lines).** CI has no GTK4/libadwaita
+Current size: **~18,600 lines of Python across 31 backend modules, 29 UI
+pages and one root helper, plus a 1,072-test pytest suite (~11,500 lines).** CI has no GTK4/libadwaita
 available, so UI code is checked there with `py_compile` + `ruff` + the backend
 test suite; visually it is reviewed on a desktop that has GTK4, where the same
 code renders with the bundled stylesheet (see "Testing approach" below).
@@ -116,7 +116,69 @@ real and worth stating: during the keep window anything running as the
 invoking user can run those allowlisted tools as root without another
 prompt. That is the same power pkexec already granted, only cached. The
 longer-term direction in the TODO is one helper entry point per *operation*
-with a narrow API, rather than a command allowlist.
+with a narrow API, rather than a command allowlist. Phase 1 (file operations
+with a path policy, and no `sed`) is in place; see "Operation-level
+privileged helper" below for the threat model and the remaining phases.
+
+### Operation-level privileged helper (design)
+
+Phase 1 is implemented; phases 2 and 3 are the remaining TODO.
+
+**Why breadth matters now.** `auth_admin_keep` caches the authorization, so
+the helper's reach is what an attacker with a user-level foothold gets
+silently for the keep window. A generic "run any of these tools" allowlist
+plus cached root is a much bigger primitive than the same list with a
+password prompt on every call. The file-manipulating half was therefore
+moved from "exec the tool" to "the helper performs the operation", which is
+where almost all of the write-anything risk lived.
+
+**Phase 1 (shipped).**
+- `tee`, `tee -a` and `install -m MODE /dev/stdin FILE` are performed by the
+  helper itself: it reads stdin, resolves the destination, refuses
+  relative paths, `..` and symlinked targets, and only then opens the file
+  (no `tee` binary to point elsewhere).
+- `replace-in-file PATH PATTERN REPLACEMENT` replaces `sed -i` in the three
+  places it was used (faillock.conf, pwquality.conf, SELinux config). `sed`
+  is refused outright: a sed script can write any file (`w /etc/sudoers`),
+  so allowing it would defeat the path policy.
+- Destinations come from `WRITE_FILES` (exact files Atropa edits or restores
+  over) plus `WRITE_DIRS` (AppArmor profiles, audit rules, Atropa's plugin
+  directory, the AIDE database, the legacy plugin tree), with two narrow
+  patterns: systemd-boot's `loader/loader.conf` on whatever ESP was found,
+  and a battery's `/sys/.../charge_control_end_threshold`.
+- `cp`, `mkdir`, `touch`, `rm` and `chown` validate their paths before
+  exec'ing. `mkdir` only creates Atropa's own directories, `touch` only
+  `/.autorelabel`, `rm` only the legacy `/etc/archyast`, and `chown` only
+  hands files back to the invoking user inside that user's home - never
+  `/etc/shadow` to someone.
+- `tests/test_helper.py` has a coverage test that walks the backend's own
+  path constants and fails if a managed file is missing from `WRITE_FILES`.
+  Adding a file Atropa writes therefore requires adding it to the policy.
+
+**What a cached authorization can still do.** `cat`/`grep` can still read
+any root-readable file the app names (including `/etc/shadow`, which the
+account scan genuinely needs), and the command allowlist still includes
+`systemctl`, `pacman`, the user/group tools, `visudo`, `sshd` and the
+firewall/AppArmor/SELinux tools with broad arguments. A local process during
+the keep window could, for example, start any installed unit, install a
+package from an enabled repository, or create a user. That is phase 2.
+
+**Phase 2 - typed operations.** Replace the remaining allowlist with verbs
+such as `service <start|stop|restart|enable> <unit>`, `package
+<install|remove> <names...>`, `user <add|modify|delete> <validated fields>`
+and a read policy for `cat`. Each verb validates its parameters in the
+helper and constructs the argv itself, so the cached window can only do
+operations Atropa offers - not arbitrary argument combinations of a
+privileged tool. The command allowlist is deleted once every caller is
+migrated; the same `FILE_COMMANDS`/`ALLOWED` split makes that migration
+incremental.
+
+**Phase 3 - root-owned backups.** Move `~/.local/share/atropa/backups` to a
+root-owned directory with a root-owned manifest, and have the helper do the
+copy/restore. Today `restore_file()` only writes to files Atropa backs up,
+but the backup *contents* are user-writable: a compromised user could plant
+a modified backup and rely on the admin restoring it. The helper already has
+the write policy needed to verify a restore target.
 
 **Timeouts hold, even for a child that runs as root.** Commands start in
 `privilege._subprocess_run()`, which has `subprocess.run()`'s interface but
@@ -1197,7 +1259,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 1053 tests across
+**There's a real pytest suite**: `tests/`, 1072 tests across
 one file per `backend/` module (all 31), plus `test_pacman_config.py`,
 `test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
@@ -1364,7 +1426,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (1053 tests as of the latest pass, across all 31 `backend/` modules, one
+- ✅ A real pytest suite (1072 tests as of the latest pass, across all 31 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2518,7 +2580,7 @@ exactly one definition.
   on every machine, server-shaped default included), skips fail2ban, and
   shows a read-only desktop baseline (firewall, encryption, Secure Boot)
   instead of pretending the server checklist fits.
-  Every new backend module has its own pytest file (241 new tests); the
+  Every new backend module has its own pytest file (260 new tests); the
   environment couldn't run any of the tools for real (no fwupd, no battery,
   no Secure Boot on the sandbox), so command parsing is tested against
   documented output shapes and the pages are deliberately conservative about
