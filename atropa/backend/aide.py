@@ -43,10 +43,12 @@ meantime.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 from .privilege import CommandResult, path_exists, run_privileged, run_privileged_streaming, run_unprivileged
@@ -57,6 +59,11 @@ DB_NEW_CANDIDATES = ["/var/lib/aide/aide.db.new.gz", "/var/lib/aide/aide.db.new"
 
 # Checked in this order, first match wins - see module docstring.
 TIMER_CANDIDATES = ["aidecheck.timer", "aide.timer", "aide-check.timer"]
+
+# Last check's summary and changed paths, kept between launches so the page
+# still says something useful after the streaming dialog is gone. Per-user
+# state (the check itself runs as root, but the UI writes this).
+LAST_CHECK_FILE = Path.home() / ".local" / "share" / "atropa" / "aide_last_check.json"
 
 
 def is_installed() -> bool:
@@ -216,6 +223,215 @@ def parse_check_summary(output: str, returncode: int | None = None) -> CheckSumm
     if _NO_DIFFERENCES_RE.search(output) or returncode == 0:
         return CheckSummary(added=0, removed=0, changed=0)
     return None
+
+
+# --------------------------------------------------------------- report --
+
+
+@dataclass
+class CheckEntry:
+    """One path AIDE reported, with the change category the report put it in."""
+
+    kind: str  # "added" | "removed" | "changed"
+    path: str
+    detail: str = ""  # AIDE's marker column ("f++++++++++++++++", "f > ...")
+
+
+@dataclass
+class CheckRecord:
+    checked_at: str  # ISO 8601, local timezone
+    summary: CheckSummary | None
+    entries: list[CheckEntry] = field(default_factory=list)
+
+    @property
+    def clean(self) -> bool | None:
+        return None if self.summary is None else self.summary.clean
+
+
+_SECTION_HEADERS = {
+    "added entries:": "added",
+    "removed entries:": "removed",
+    "changed entries:": "changed",
+}
+
+# AIDE prints one line per changed object in the list sections:
+#   f++++++++++++++++: /etc/new.conf
+#   f > ... : /etc/passwd
+# The first character is the file type; the path starts at the "/" after the
+# colon. Everything before it is the marker column worth showing as detail.
+_ENTRY_RE = re.compile(r"^(?P<flag>[a-zA-Z])(?P<detail>[^:]*):\s*(?P<path>/\S.*)$")
+
+
+def parse_check_entries(output: str) -> list[CheckEntry]:
+    """
+    The added/removed/changed *paths* from aide --check's report, in the
+    order AIDE printed them.
+
+    Deliberately section-aware: the summary block repeats the words "Added
+    entries:" with a count, and the "Detailed information about changes"
+    section lists attributes (not paths). Inside a list section a blank line
+    or the next header ends it, so neither the summary nor the detailed
+    block is mistaken for a path.
+    """
+    entries: list[CheckEntry] = []
+    kind: str | None = None
+    for raw in (output or "").splitlines():
+        line = raw.strip()
+        if not line:
+            kind = None  # list sections are separated from the next by a blank line
+            continue
+        lowered = line.lower()
+        if lowered in _SECTION_HEADERS:
+            kind = _SECTION_HEADERS[lowered]
+            continue
+        if line.endswith(":"):
+            # "Summary:", "Detailed information about changes:", ...
+            kind = None
+            continue
+        if kind is None:
+            continue
+        match = _ENTRY_RE.match(line)
+        if match is None:
+            continue
+        entries.append(
+            CheckEntry(kind=kind, path=match.group("path").strip(), detail=match.group("detail").strip())
+        )
+    return entries
+
+
+def build_check_record(output: str, returncode: int | None = None, when: str | None = None) -> CheckRecord:
+    """Everything the page keeps from one check: counts, paths, and when it ran."""
+    return CheckRecord(
+        checked_at=when or datetime.now().astimezone().isoformat(timespec="seconds"),
+        summary=parse_check_summary(output, returncode),
+        entries=parse_check_entries(output),
+    )
+
+
+def save_check_record(record: CheckRecord) -> None:
+    """Write the last check's state; a UI convenience, never authoritative."""
+    payload = {
+        "checked_at": record.checked_at,
+        "summary": None
+        if record.summary is None
+        else {
+            "added": record.summary.added,
+            "removed": record.summary.removed,
+            "changed": record.summary.changed,
+        },
+        "entries": [
+            {"kind": entry.kind, "path": entry.path, "detail": entry.detail}
+            for entry in record.entries
+        ],
+    }
+    LAST_CHECK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = LAST_CHECK_FILE.with_suffix(".json.tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(LAST_CHECK_FILE)
+
+
+def load_check_record() -> CheckRecord | None:
+    """The saved last check, or None when there isn't a usable one."""
+    try:
+        data = json.loads(LAST_CHECK_FILE.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    checked_at = data.get("checked_at")
+    if not isinstance(checked_at, str) or not checked_at:
+        return None
+
+    summary = None
+    raw_summary = data.get("summary")
+    if isinstance(raw_summary, dict):
+        try:
+            summary = CheckSummary(
+                added=int(raw_summary["added"]),
+                removed=int(raw_summary["removed"]),
+                changed=int(raw_summary["changed"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            summary = None
+
+    entries = []
+    raw_entries = data.get("entries")
+    if isinstance(raw_entries, list):
+        for item in raw_entries[:5000]:
+            if not isinstance(item, dict):
+                continue
+            kind = item.get("kind")
+            path = item.get("path")
+            if kind not in {"added", "removed", "changed"} or not isinstance(path, str) or not path:
+                continue
+            detail = item.get("detail")
+            entries.append(CheckEntry(kind, path, detail if isinstance(detail, str) else ""))
+
+    return CheckRecord(checked_at=checked_at, summary=summary, entries=entries)
+
+
+def clear_check_record() -> None:
+    """Forget the last check (used after re-baselining makes it stale)."""
+    try:
+        LAST_CHECK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------- configuration --
+
+
+def check_config() -> CommandResult:
+    """
+    `aide --config-check` validates the config (including every Include)
+    without walking the filesystem. Root because included files can be
+    root-only; it is fast, so the page runs it as a normal action rather
+    than a streaming one.
+    """
+    return run_privileged(["aide", "--config-check"], timeout=120)
+
+
+# ------------------------------------------------------------ timer info --
+
+
+@dataclass
+class TimerDetails:
+    next_run: str = ""
+    last_run: str = ""
+    result: str = ""
+
+
+def timer_details(unit: str) -> TimerDetails:
+    """
+    systemd's own next/last trigger timestamps for the package's timer.
+
+    `systemctl list-timers` is column-aligned and awkward to parse; the
+    property interface returns key=value lines that don't move around
+    between systemd releases. Unset properties come back empty, which the
+    page shows as "not scheduled" rather than a fabricated date.
+    """
+    result = run_unprivileged(
+        [
+            "systemctl", "show", unit,
+            "--property=NextElapseUSecRealtime",
+            "--property=LastTriggerUSec",
+            "--property=Result",
+        ],
+        timeout=20,
+    )
+    if not result.ok:
+        raise RuntimeError(result.stderr.strip() or f"systemctl show {unit} exited with status {result.returncode}")
+
+    values: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return TimerDetails(
+        next_run=values.get("NextElapseUSecRealtime", ""),
+        last_run=values.get("LastTriggerUSec", ""),
+        result=values.get("Result", ""),
+    )
 
 
 def enable_timer(unit: str) -> CommandResult:
