@@ -19,6 +19,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gdk, Gio, Gtk  # noqa: E402
 
 from atropa.ui.main_window import AtropaWindow  # noqa: E402
+from atropa.ui.theme import load_stylesheet  # noqa: E402
 
 APP_ID = "org.atropa.Atropa"
 
@@ -41,6 +42,7 @@ class AtropaApplication(Adw.Application):
         display = Gdk.Display.get_default()
         if display is not None:
             Gtk.IconTheme.get_for_display(display).add_search_path(str(ICONS_DIR))
+            load_stylesheet(display)
         Gtk.Window.set_default_icon_name(APP_ID)
 
     def on_activate(self, app: Adw.Application) -> None:

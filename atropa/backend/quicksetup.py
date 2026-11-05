@@ -31,7 +31,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Callable
 
-from . import hardening, pacman, security, selinux
+from . import boot_security, hardening, pacman, security, selinux
 from .privilege import CommandResult
 
 
@@ -45,6 +45,22 @@ class SetupItem:
     locked: bool = False  # can't be selected until the administrator password has unlocked it
 
 
+@dataclass
+class BaselineCheck:
+    """One read-only fact in the desktop baseline - nothing here is applied."""
+
+    title: str
+    status: str  # "pass" | "warn" | "fail" | "info"
+    detail: str
+
+
+@dataclass
+class DesktopBaseline:
+    applies: bool  # True when sshd isn't installed: the server-shaped steps don't fit
+    sshd_installed: bool
+    checks: list[BaselineCheck]
+
+
 CATALOG: list[SetupItem] = [
     SetupItem(
         "firewall", "Firewall",
@@ -52,7 +68,8 @@ CATALOG: list[SetupItem] = [
     ),
     SetupItem(
         "fail2ban", "fail2ban",
-        "Installs fail2ban if missing, enables it, and configures an SSH jail.",
+        "Installs fail2ban if missing, enables it, and configures an SSH jail. Skipped on a "
+        "desktop with no SSH server - there's no remote login to protect.",
     ),
     SetupItem(
         "sysctl", "Kernel sysctl hardening",
@@ -131,20 +148,28 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
         return CommandResult(0, "already active", "")
 
     ssh = security.ssh_status()
-    # Every port sshd listens on - Port lines accumulate, and ListenAddress
-    # can name its own - not just the first one.
-    ports = (ssh.ports or ["22"]) if ssh.installed else ["22"]
-    for port in ports:
-        on_line(f"Allowing SSH (port {port}) before enabling the firewall, so this doesn't lock you out...")
-        allow_result = security.firewall_allow_port(port)
-        if not allow_result.ok:
-            # Enabling deny-by-default without the SSH rule in place is exactly
-            # the remote lockout this ordering exists to prevent - stop here.
-            on_line(
-                f"Couldn't allow SSH port {port}: {allow_result.stderr.strip() or 'unknown error'}. "
-                "Not enabling the firewall, so SSH access isn't cut off."
-            )
-            return allow_result
+    if ssh.installed and ssh.running:
+        # Every port sshd listens on - Port lines accumulate, and
+        # ListenAddress can name its own - not just the first one.
+        ports = ssh.ports or ["22"]
+        for port in ports:
+            on_line(f"Allowing SSH (port {port}) before enabling the firewall, so this doesn't lock you out...")
+            allow_result = security.firewall_allow_port(port)
+            if not allow_result.ok:
+                # Enabling deny-by-default without the SSH rule in place is
+                # exactly the remote lockout this ordering exists to prevent -
+                # stop here.
+                on_line(
+                    f"Couldn't allow SSH port {port}: {allow_result.stderr.strip() or 'unknown error'}. "
+                    "Not enabling the firewall, so SSH access isn't cut off."
+                )
+                return allow_result
+    else:
+        # A desktop with no SSH server needs no hole punched in its firewall.
+        # Opening 22 here anyway was a server-shaped default leaking into a
+        # single-user machine: an unnecessary listening surface, on the port
+        # every scanner tries first.
+        on_line("No SSH server is running - enabling the firewall with no incoming ports opened.")
 
     on_line("Enabling firewall...")
     result = security.firewall_enable()
@@ -154,6 +179,15 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
 
 def _apply_fail2ban(on_line: Callable[[str], None]) -> CommandResult:
     on_line("=== fail2ban ===")
+    # fail2ban's value here is the SSH jail. On a desktop without sshd there
+    # is nothing it could ban, so don't install a daemon that can only sit
+    # idle - the user can still add it deliberately from the Security page.
+    if not security.ssh_status().installed:
+        on_line(
+            "No SSH server is installed - skipping fail2ban, since there's no remote login to protect. "
+            "Install OpenSSH first if you want SSH access."
+        )
+        return CommandResult(0, "skipped: no SSH server", "")
     if shutil.which("fail2ban-client") is None:
         on_line("Installing fail2ban...")
         result = pacman.install(["fail2ban"])
@@ -361,9 +395,15 @@ def _selinux_line() -> str:
     return sl.mode.capitalize() if sl.available else "Not enabled at kernel level"
 
 
+def _fail2ban_line() -> str:
+    if not security.ssh_status().installed:
+        return "Skipped - no SSH server installed"
+    return _service_line(hardening.fail2ban_status())
+
+
 _STATUS_LINES: dict[str, Callable[[], str]] = {
     "firewall": _firewall_line,
-    "fail2ban": lambda: _service_line(hardening.fail2ban_status()),
+    "fail2ban": _fail2ban_line,
     "sysctl": _sysctl_line,
     "faillock": _faillock_line,
     "apparmor": lambda: _service_line(hardening.apparmor_status()),
@@ -372,6 +412,79 @@ _STATUS_LINES: dict[str, Callable[[], str]] = {
     "selinux_repo": lambda: "Enabled (unsigned)" if pacman.selinux_repo_enabled() else "Not enabled",
     "selinux": _selinux_line,
 }
+
+
+def desktop_baseline() -> DesktopBaseline:
+    """
+    The laptop/desktop-shaped counterpart to the server baseline above.
+
+    It is deliberately read-only: it states what is already true (firewall,
+    encryption, Secure Boot) instead of adding another set of apply steps.
+    The one thing it changes elsewhere is that the checklist stops opening
+    SSH and stops offering fail2ban when no SSH server is installed.
+    """
+    try:
+        ssh_installed = security.ssh_status().installed
+    except Exception:  # noqa: BLE001 - can't tell means "don't claim desktop-only"
+        ssh_installed = True
+
+    checks: list[BaselineCheck] = []
+
+    try:
+        firewall = security.firewall_status()
+        if firewall.backend == "none":
+            checks.append(BaselineCheck(
+                "Firewall", "fail",
+                "No firewall is installed - every listening socket is reachable from the network.",
+            ))
+        elif firewall.active:
+            checks.append(BaselineCheck(
+                "Firewall", "pass", f"{firewall.backend} is active, blocking unsolicited incoming connections.",
+            ))
+        else:
+            checks.append(BaselineCheck(
+                "Firewall", "warn", f"{firewall.backend} is installed but inactive.",
+            ))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(BaselineCheck("Firewall", "info", f"Couldn't check: {exc}"))
+
+    try:
+        encryption = boot_security.encryption_status()
+        if encryption.encrypted is True:
+            checks.append(BaselineCheck("Disk encryption", "pass", encryption.detail))
+        elif encryption.encrypted is False:
+            checks.append(BaselineCheck("Disk encryption", "fail", encryption.detail))
+        else:
+            checks.append(BaselineCheck("Disk encryption", "info", encryption.detail))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(BaselineCheck("Disk encryption", "info", f"Couldn't check: {exc}"))
+
+    try:
+        secure_boot = boot_security.secure_boot_status()
+        if secure_boot.supported is False:
+            checks.append(BaselineCheck("Secure Boot", "info", secure_boot.detail))
+        elif secure_boot.enabled is True:
+            checks.append(BaselineCheck("Secure Boot", "pass", secure_boot.detail))
+        elif secure_boot.enabled is False:
+            checks.append(BaselineCheck("Secure Boot", "warn", secure_boot.detail))
+        else:
+            checks.append(BaselineCheck("Secure Boot", "info", secure_boot.detail))
+    except Exception as exc:  # noqa: BLE001
+        checks.append(BaselineCheck("Secure Boot", "info", f"Couldn't check: {exc}"))
+
+    if ssh_installed:
+        checks.append(BaselineCheck(
+            "SSH hardening", "warn",
+            "OpenSSH is installed, so this machine isn't purely a desktop: harden it on the Security page "
+            "(root login, password auth, port) instead of relying on the desktop baseline.",
+        ))
+    else:
+        checks.append(BaselineCheck(
+            "SSH hardening", "pass",
+            "OpenSSH isn't installed, so there is no remote login surface to harden.",
+        ))
+
+    return DesktopBaseline(applies=not ssh_installed, sshd_installed=ssh_installed, checks=checks)
 
 
 def status_summary() -> dict[str, str]:

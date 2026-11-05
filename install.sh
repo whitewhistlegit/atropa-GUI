@@ -12,12 +12,20 @@ sudo pacman -S --needed --noconfirm \
     python python-pip python-pipx python-gobject gtk4 libadwaita polkit \
     networkmanager
 
+echo "==> Installing the privileged helper and its polkit action..."
+sudo install -Dm755 atropa/helper.py /usr/lib/atropa/atropa-helper
+sudo install -Dm644 atropa/resources/org.atropa.pkexec.policy \
+    /usr/share/polkit-1/actions/org.atropa.pkexec.policy
+
 echo "==> Optional tools (skipped if they fail, they're not required to run Atropa)..."
 echo "    arch-audit for the vulnerability scan; pacman-contrib and fakeroot so that"
 echo "    'Check for updates' can ask the mirrors without touching the package database."
 sudo pacman -S --needed --noconfirm arch-audit pacman-contrib fakeroot || true
 echo "    fail2ban, apparmor, usbguard, and audit are also supported if you install them:"
 echo "      sudo pacman -S fail2ban apparmor usbguard audit"
+echo "    Desktop extras: reflector (mirrors), smartmontools (SMART), fwupd (firmware),"
+echo "    sbctl + mokutil (Secure Boot), power-profiles-daemon, zram-generator, flatpak:"
+echo "      sudo pacman -S reflector smartmontools fwupd sbctl mokutil power-profiles-daemon zram-generator flatpak"
 echo "    SELinux denial review (Why?/Generate .te) and policy loading need audit from the"
 echo "    official repos, plus SELinux's userspace tools, which Arch only has in the AUR:"
 echo "      sudo pacman -S audit"

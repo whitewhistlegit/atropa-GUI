@@ -18,36 +18,40 @@ single-user Arch machine.
       TODO, below.)
 - [ ] **Upgrade checks**
   - [ ] Before: show recent Arch news items that need manual steps.
-  - [ ] After: list failed units (`systemctl --failed`).
-  - [ ] Say "reboot needed" when the running kernel no longer matches the
+  - [x] After: list failed units (`systemctl --failed`).
+  - [x] Say "reboot needed" when the running kernel no longer matches the
         installed one.
-  - [ ] Check for the right CPU microcode package (`intel-ucode` /
+  - [x] Check for the right CPU microcode package (`intel-ucode` /
         `amd-ucode`).
-- [ ] **pacman configuration** - rank mirrors with `reflector`, and offer
-      toggles for `ParallelDownloads`, `Color` and `[multilib]`.
-- [ ] **"What went wrong this boot" page** - errors from this boot, failed
+- [x] **pacman configuration** - toggles for `ParallelDownloads`, `Color`
+      and `[multilib]`, backed up and validated with `pacman-conf`.
+- [x] **Mirror ranking** - rank mirrors with `reflector`.
+- [x] **"What went wrong this boot" page** - errors from this boot, failed
       units and recent crashes (`coredumpctl`), rather than a raw journal
       tail. (Supersedes the plain journal viewer below.)
-- [ ] **Firmware updates via `fwupd`** - list devices, refresh metadata,
+- [x] **Firmware updates via `fwupd`** - list devices, refresh metadata,
       apply updates.
-- [ ] **Disk encryption and Secure Boot status** - report whether root is on
+- [x] **Disk encryption and Secure Boot status** - report whether root is on
       LUKS; set up and sign with `sbctl`. Feed both into the security audit
       score.
-- [ ] **Disk health and space** - SMART status, enable `fstrim.timer`, and
+- [x] **Disk health and space** - SMART status, enable `fstrim.timer`, and
       cleanup beyond the pacman cache (journal size, `~/.cache`, coredumps).
-- [ ] **Power and memory** - `power-profiles-daemon` or TLP, laptop battery
-      charge limits, zram swap, sleep/hibernate settings.
-- [ ] **Flatpak** - updates and removing unused runtimes, next to the
+- [x] **Power and memory** - `power-profiles-daemon` or TLP, laptop battery
+      charge limits, zram swap. Sleep/hibernate state is reported.
+- [ ] **Sleep/hibernate configuration** - lid-close behaviour and hibernate
+      delay in `logind.conf`; applying it needs a logind restart, which can
+      end the graphical session, so it stays a manual edit for now.
+- [x] **Flatpak** - updates and removing unused runtimes, next to the
       pacman page.
 
 ### Desktop focus for existing modules
 
-- [ ] **Desktop profile in Security Quick Setup** - when `sshd` isn't
+- [x] **Desktop profile in Security Quick Setup** - when `sshd` isn't
       installed, skip fail2ban and SSH hardening and offer a desktop
       baseline: firewall on with no incoming connections, encryption check,
       Secure Boot.
-- [ ] Move **Users & Groups** lower in the sidebar.
-- [ ] Frame the **audit score** around how exposed this machine is, rather
+- [x] Move **Users & Groups** lower in the sidebar.
+- [x] Frame the **audit score** around how exposed this machine is, rather
       than a CIS enterprise audit.
 
 ## Existing TODO (from DOCUMENTATION.md)
@@ -61,7 +65,7 @@ single-user Arch machine.
       start).
 - [ ] **Btrfs snapshots / Timeshift integration** (see "Snapshot before
       upgrade" above).
-- [ ] **Journal/log viewer** (see "What went wrong this boot" above).
+- [x] **Journal/log viewer** - superseded by the Boot Report page.
 - [ ] **Kernel management** - multiple kernels, `mkinitcpio`, headers. Keep
       a fallback kernel alongside snapshots.
 
@@ -78,10 +82,15 @@ single-user Arch machine.
 - [ ] CI: a GTK smoke test that builds every page under Xvfb, Python
       3.13/3.14 in the matrix next to 3.11/3.12, and parser tests against
       real config files rather than hand-written snippets.
-- [ ] **Single privileged helper** - one root helper per operation instead
-      of one pkexec prompt per command; agree on the design before any
-      code. Move backups to root-owned storage at the same time (anything
-      running as the user can currently change a backup in
+- [x] **Single privileged helper** - one root-owned helper
+      (`/usr/lib/atropa/atropa-helper`) with an `auth_admin_keep` polkit
+      action, so one password covers an operation instead of one prompt per
+      command. The helper runs a bare-name allowlist of tools, never a
+      shell.
+- [ ] **Operation-level helper API and root-owned backups** - replace the
+      command allowlist with one helper entry point per operation; move
+      backups to root-owned storage at the same time (anything running as
+      the user can currently change a backup in
       `~/.local/share/atropa/backups`).
 
 ## SELinux Denial Review

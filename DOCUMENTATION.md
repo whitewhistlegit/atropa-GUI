@@ -7,11 +7,11 @@ reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~12,900 lines of Python across 23 backend modules and 22 UI
-pages, plus a 789-test pytest suite (~8,200 lines).** No GTK4/libadwaita is
-available in the dev sandbox this was built in, so UI code is verified via
-`py_compile` + `ruff` + the backend test suite, and visually only when the
-user runs a build on bare-metal Arch (see "Testing approach" below).
+Current size: **~18,000 lines of Python across 31 backend modules, 29 UI
+pages and one root helper, plus a 1,035-test pytest suite (~11,100 lines).** CI has no GTK4/libadwaita
+available, so UI code is checked there with `py_compile` + `ruff` + the backend
+test suite; visually it is reviewed on a desktop that has GTK4, where the same
+code renders with the bundled stylesheet (see "Testing approach" below).
 
 ---
 
@@ -22,7 +22,9 @@ atropa/
   main.py                     GTK4 + libadwaita Adw.Application entry point (app ID org.atropa.Atropa)
   ui/
     main_window.py             Adw.NavigationSplitView sidebar + Gtk.Stack of pages;
-                               MODULES list = sidebar order; lazy page construction
+                               MODULES = Module(key, title, icon, page, tagline,
+                               section); sections group the sidebar; lazy page construction
+    theme.py                   loads resources/style.css at application priority
     pages/
       __init__.py               BasePage (shared scaffolding) + esc() markup helper
       packages.py, system_config.py, network.py, users.py, services.py,
@@ -38,17 +40,23 @@ atropa/
     bootloader.py, security.py, hardening.py, audit_rules.py, apparmor.py,
     selinux.py, refpolicy_build.py, aide.py, inventory.py,
     account_hygiene.py, compliance.py, quicksetup.py, profiles.py,
-    dependencies.py, plugins.py, plugin_registry.py, migration.py
+    dependencies.py, plugins.py, plugin_registry.py, migration.py,
+    system_health.py            read-only post-upgrade checks (units/kernel/microcode)
                                  all GTK-free, pure subprocess wrappers
   resources/
     atropa.desktop            app launcher
+    style.css                 visual refinement layer (Adwaita named colours only)
     icons/hicolor/<N>x<N>/apps/org.atropa.Atropa.png
                               the logo as the app icon, 16 to 256 px
-    org.atropa.pkexec.policy  polkit policy for nicer auth prompts
+    org.atropa.pkexec.policy  polkit action annotated with the helper path,
+                              allow_active=auth_admin_keep (remembered auth)
+  helper.py                   installed as /usr/lib/atropa/atropa-helper: the
+                              one program pkexec runs, allowlisted, no shell
 tests/                          pytest suite, one test_<module>.py per backend module
-                                (plus test_resources.py for the app icon)
+                                (plus test_helper.py and test_resources.py)
 examples/plugins/example-plugin/manifest.toml   reference plugin manifest (parsed by a test)
-install.sh                      Arch installer (pacman deps + pipx + launcher + icon + polkit policy)
+install.sh                      Arch installer (pacman deps + helper + polkit policy
+                                + pipx + launcher + icon)
 .github/workflows/ci.yml        py_compile + ruff + pytest on Python 3.11/3.12
 ```
 
@@ -66,7 +74,7 @@ wrapper around a `subprocess` call (via `privilege.py`), returning either a
 - Every backend function is independently testable by faking the one
   function that starts commands (`privilege._subprocess_run`) — no display
   server, no GTK, no root needed.
-- `ui/pages/*.py` never shells out directly; it only calls into `backend/`.
+- `ui/pages/*.py` never runs a command directly; it only calls into `backend/`.
 
 ### Privilege model
 The app runs as a normal user, never as root. `backend/privilege.py` is the
@@ -77,20 +85,38 @@ run_unprivileged(argv, input_text=None, timeout=120)   # current user
 run_privileged(argv, input_text=None, timeout=600)     # via pkexec (falls back to sudo -A)
 ```
 
-`run_privileged` prepends `pkexec` to the argv and shells out — this pops a
-**native polkit auth dialog** scoped to that one command; there's no
-persistent root session and no setuid binary.
+`run_privileged` prepends `pkexec` to the argv and runs it as an argument
+list - never through a shell, so nothing in a package name, username or URL
+can become a second command. This pops a **native polkit auth dialog** scoped
+to that one command; there's no persistent root session and no setuid binary.
+`tests/test_privilege.py` enforces the no-shell rule by walking the AST of
+every module (a grep would match the docstring that says "never shell=True").
 
-**The shipped polkit policy is not actually in effect.** `resources/org.atropa.pkexec.policy`
-declares an `org.atropa.pkexec.run` action with `allow_active = auth_admin_keep`,
-but pkexec only switches to a custom action when it carries an
-`org.freedesktop.policykit.exec.path` annotation naming the program being run
-(pkexec(1)). This one has none, so every call uses the generic
-`org.freedesktop.policykit.exec` action, which asks for the password every time -
-one prompt per privileged *primitive* (`sed`, `tee`, `systemctl`, ...), not per
-operation. The planned fix is a single privileged helper invoked once per
-operation; annotating generic binaries like `tee`/`bash` with `auth_admin_keep`
-is not a safe shortcut (it would make them passwordless root for the keep window).
+**Authorization is remembered, per helper rather than per command.**
+pkexec picks a polkit action from the program it runs. Running every tool
+directly (`pkexec tee`, `pkexec systemctl`, ...) hit polkit's generic
+`org.freedesktop.policykit.exec` action, which always asks: a single
+configuration change meant half a dozen password prompts, and no policy could
+remember them. `atropa/helper.py` is now installed root-owned at
+`/usr/lib/atropa/atropa-helper`, and `resources/org.atropa.pkexec.policy`
+annotates exactly that path with
+`org.freedesktop.policykit.exec.path` and `allow_active=auth_admin_keep`.
+`privilege.py` prefixes privileged calls with the helper when it exists, so
+one authentication covers polkit's keep window (five minutes by default) for
+the whole operation. The helper takes an argv list - never a shell - refuses
+absolute or relative program names, and only runs bare names from a fixed
+allowlist of tools Atropa uses (`ALLOWED` in `helper.py`), resolved through a
+fixed `PATH`. `tests/test_helper.py` fails if a new literal privileged
+command is missing from that allowlist.
+
+Without the helper - a source checkout, or an install that skipped
+`install.sh` - calls fall back to direct pkexec and ask per command; nothing
+breaks, it just behaves the old way. The tradeoff of `auth_admin_keep` is
+real and worth stating: during the keep window anything running as the
+invoking user can run those allowlisted tools as root without another
+prompt. That is the same power pkexec already granted, only cached. The
+longer-term direction in the TODO is one helper entry point per *operation*
+with a narrow API, rather than a command allowlist.
 
 **Timeouts hold, even for a child that runs as root.** Commands start in
 `privilege._subprocess_run()`, which has `subprocess.run()`'s interface but
@@ -230,6 +256,12 @@ streaming runners return everything in `.stdout`, with `.stderr` always empty.
 Python 3.11-3.13 when a directory on the way isn't searchable - a root-only
 ESP, a 0700 `/var/lib/aide`. `backup_file()` treats "can't tell" as "try the
 privileged read" rather than crashing.
+
+When the installed helper exists (`HELPER_PATH =
+/usr/lib/atropa/atropa-helper`), both privileged runners prepend it to the
+pkexec/sudo prefix; that is what makes polkit's keep authorization apply (see
+section 1). `helper_available()` is the check, and a missing or
+non-executable helper silently restores the old per-command behavior.
 
 ### Packages (`pacman.py` / `pages/packages.py`)
 - `Package(name, version, installed=True, description="", repo="")` — `repo`
@@ -436,6 +468,11 @@ the daemon). `sudoers_check() -> CommandResult` runs `visudo -cf /etc/sudoers`
 **privileged** - sudoers is 0440 root:root, so unprivileged visudo can only
 report "Permission denied" - read-only, syntax-check only; callers go by `.ok`.
 
+When OpenSSH isn't installed, the Security page disables every SSH
+control and says why: a desktop with no SSH server has nothing to harden,
+and leaving the switches live only produced failed edits. The firewall,
+rules and sudoers check stay usable.
+
 ### Hardening (`hardening.py` / `pages/hardening.py`)
 The "basic toggle" layer — NOT the deep AppArmor/SELinux pages (those are
 separate, richer modules; see below). Covers:
@@ -493,6 +530,17 @@ separate, richer modules; see below). Covers:
   the above plus firewall/SSH from `security.py` plus SELinux status; powers
   the "Security Audit" score section
 
+### Encryption & Secure Boot (`boot_security.py` / `pages/boot_security.py`)
+
+Whether `/` sits above a LUKS device (`findmnt` plus the `lsblk -s` stack,
+with `/etc/crypttab` as a fallback when lsblk can't answer - "can't tell"
+stays distinct from "unencrypted"), the firmware's Secure Boot state via
+bootctl then mokutil, and sbctl's own view. sbctl's three actions
+(`create-keys`, `enroll-keys --microsoft`, `sign-all`) are pkexec'd and
+confirmed; enrollment still requires the firmware in setup mode, which Atropa
+cannot do and says so. The encryption and Secure Boot checks feed the
+compliance report's "Boot & Disk Security" category and the exposure summary.
+
 ### Compliance Report (`compliance.py` / `pages/compliance.py`)
 Categorized, scored security-posture report built **on top of**
 `hardening.run_audit()` plus two extra checks (login lockout, sudoers) -
@@ -509,6 +557,17 @@ row per installed service, one per user's home directory) rather than the
 fixed small set `_CATEGORY_MAP` was built for. The header's total
 (`total_check_count`) counts every check in the report; it used to count
 only `run_audit()`'s, so it could read "29 scored checks, 3 total".
+
+The score is deliberately framed as **exposure**, not an enterprise audit:
+`Exposure`/`ExposureSignal` derive a plain-language level (low / moderate /
+high) from facts the report already computed - firewall, whether an SSH
+server is reachable, non-loopback listening sockets (read from
+`/proc/net/tcp`, so no `ss` dependency), LUKS, Secure Boot - and the page
+leads with that before the CIS-style categories. `EXPOSURE_NOTE` states on
+the page and in every export that 100% means "nothing Atropa checked is
+exposing this machine", not a certification. Loopback-only listeners are
+excluded: a local helper isn't network exposure, and counting it made every
+ordinary desktop read "moderate".
 
 ### File Integrity / AIDE (`aide.py` / `pages/aide_page.py`)
 CIS DIL Phase 3 - see the Phase 3 write-up in section 6 for the full
@@ -825,6 +884,17 @@ check that fails says "Couldn't check: ..." in its own line. One missing
 tool used to raise out of the whole function and leave the page with an
 error toast and no statuses at all.
 
+**Desktop mode.** With no sshd, the server-shaped steps don't fit, so
+`_apply_firewall()` stops opening port 22 - it used to do that
+unconditionally, which put a listening hole on every laptop - and
+`_apply_fail2ban()` skips with an explanation (there is no remote login to
+protect). `desktop_baseline()` then returns a read-only
+`DesktopBaseline(applies, sshd_installed, checks)` covering firewall
+state, LUKS, Secure Boot and "no SSH server to harden"; the page renders
+it as its own group, leaves fail2ban visible-but-insensitive, and the
+Security page disables its SSH controls for the same reason. Nothing in
+the baseline is applied: it states what is already true.
+
 ### Security Profiles (`profiles.py` / `pages/profiles.py`)
 `export_profile() -> dict`, `save_profile_to_file`, `load_profile_from_file`,
 `summarize_profile -> ProfileSummary`, `import_profile(profile, sections,
@@ -841,6 +911,93 @@ SELinux booleans go in a single `selinux.set_booleans()` call - one prompt
 and one policy rebuild, not one of each per boolean. A locked Quick Setup
 item is never applied from a profile (see Security Quick Setup).
 
+### Mirrors (`mirrors.py` / `pages/mirrors.py`)
+
+`reflector` ranking plus mirrorlist writing. `rank_mirrors()` runs reflector
+with `--score 20 --latest 30 --sort rate --print` and parses the `Server =`
+lines (also accepting bare URLs, which older reflector versions print),
+de-duplicating while keeping reflector's order; a missing reflector is a clear
+"pacman -S reflector" error. `write_mirrorlist()` refuses an empty list or any
+non-`http(s)` URL rather than writing a mirrorlist pacman cannot use, backs up
+`/etc/pacman.d/mirrorlist` through the standard mechanism, and writes the new
+file with one pkexec `tee`. The page shows the active list, ranks behind a
+spinner, and asks before replacing: a bad mirrorlist is only recoverable via
+the backup (Activity & Backups).
+
+### Boot Report (`boot_report.py` / `pages/boot_report.py`)
+
+"What went wrong this boot" as a page instead of a journal tail:
+`journalctl -b -p err` (parsed into program + message; the identifier must end
+in `:` so `-- No entries --` is skipped, not parsed as a program), failed
+units (reusing `system_health.failed_units()`'s `systemctl --failed` parser -
+no second copy), and `coredumpctl --since @<boot>` crashes, each with its own
+error row. The `--since` matters: coredumps persist across reboots, and
+without it three-week-old dumps filled a page whose whole premise is "this
+boot". The boot timestamp comes from `/proc/uptime`; if that can't be read,
+the filter is dropped rather than hiding crashes. Crash rows are parsed by
+column after `SIG` (`COREFILE`, then `EXE`, with the trailing `SIZE` column
+ignored) - reading "the last field" as the program named every crash `-`.
+`collect()` isolates the three sources, so a missing coredumpctl or an
+unreadable journal blanks only that group. Read-only, no root, no writes.
+
+### Firmware (`firmware.py` / `pages/firmware.py`)
+
+fwupd devices and updates. Listing uses `fwupdmgr ... --json` and accepts both
+the `Devices`/`devices` key and a bare list, because the JSON shape has varied
+across fwupd releases; an unparseable device list is an error, never "no
+devices". An update's available version is the first release fwupd lists, with
+the device's own Version as fallback; equal versions are skipped, and "No
+updates" in any of fwupd's forms is an empty list rather than a toast on every
+page open. `refresh()` and the streaming `update -y` go through pkexec; the
+page confirms first and says that firmware updates can reboot the machine.
+
+### Disk Health (`disk_health.py` / `pages/disk_health.py`)
+
+SMART per whole disk (`lsblk` -> `smartctl -H`), `df` usage per mount,
+`fstrim.timer` state and enable, and the three cleanups that aren't pacman's
+cache: `journalctl --vacuum-size`, `~/.cache` (user-owned; symlinks are
+unlinked, never followed into whatever they point at) and `systemd-tmpfiles
+--clean` for coredumps.
+
+Unprivileged `smartctl -H` runs first, so opening the page never prompts.
+On most NVMe/ATA drives the kernel refuses it; those rows say UNKNOWN with
+smartctl's *actual* reason (its open error is printed on stdout, which used
+to be mistaken for the version banner) and the page offers one explicit
+"Read SMART as administrator" action. That action calls
+`smart_status_privileged()`, which runs `smartctl -H --json` through pkexec
+and reads `smart_status.passed`; a failed open's reason lives in
+`smartctl.messages` there. One password covers every disk, since polkit
+keeps the authorization.
+
+The SMART verdict only comes from the verdict line; a whole-output substring
+check turned smartctl's own probe error ("failed: No such device") into a
+dying disk. Exit bits 3/4 (disk failing / pre-fail attribute below threshold)
+still force a failure, and "smartctl printed no verdict" stays unknown rather
+than healthy. One unreadable disk never blanks the others.
+
+### Power (`power.py` / `pages/power.py`)
+
+power-profiles-daemon profiles (set unprivileged: the daemon does its own
+polkit authentication), TLP detection, battery capacity/status/charge limit
+from sysfs (the limit is written through pkexec and only offered where
+`charge_control_end_threshold` exists), zram devices, swap and hibernation
+feasibility, and enabling zram swap by writing
+`/etc/systemd/zram-generator.conf` (backed up first) and starting the setup
+unit. Every read degrades to empty/None instead of raising: a desktop has no
+battery and a machine without power-profiles-daemon still has a Power page.
+Sleep/hibernate is *reported* (advertised states, swap vs RAM) rather than
+reconfigured: changing logind's lid/sleep behaviour needs a logind restart,
+which can end the graphical session, so it stays a manual `/etc/systemd/
+logind.conf` edit.
+
+### Flatpak (`flatpak.py` / `pages/flatpak.py`)
+
+Installed apps, pending updates, `update -y` and `uninstall --unused`, both
+streamed into the progress dialog. Whether root is needed is decided per
+operation with `flatpak list --system` rather than assumed, so per-user
+installs don't prompt and system installs do. "No updates" is an empty list,
+not an error.
+
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
 required, note)`; `check_all() -> list[DependencyStatus]`,
@@ -850,7 +1007,12 @@ and SELinux's userspace tools - their notes are built from
 the other way to get them) have `package=None` and a note instead of
 an Install button that would run `pacman -S` and fail. `checkupdates`
 (pacman-contrib) and `fakeroot` are listed for the Packages page's live
-update check.
+update check; the desktop modules added `reflector`, `fwupdmgr`, `smartctl`,
+`fstrim`, `du`, `journalctl`, `coredumpctl`, `powerprofilesctl`, `zramctl`,
+`flatpak`, `findmnt`, `sbctl` and `mokutil`. `zram-generator` is deliberately
+absent: its generator lives under `/usr/lib/systemd/system-generators`, not
+on `PATH`, so `check_all()`'s `shutil.which` would report it missing even
+when installed - the Power page checks it with `pacman -Q` instead.
 
 ### Add-ons / plugins (`plugins.py` + `plugin_registry.py` / `pages/addons.py`, `pages/plugin_page.py`)
 - `plugin_registry.REGISTRY` — the only actions a manifest may reference:
@@ -903,6 +1065,39 @@ self.run_streaming_operation(title, work_fn, on_done=None)
 self.confirm(heading, body, danger_label, on_confirm, on_cancel=None)
                                                     # markup disabled, for destructive actions
 ```
+
+### Visual language (`main_window.py` + `resources/style.css`)
+
+The chrome is deliberately built from stock libadwaita widgets plus one
+stylesheet, not a custom widget toolkit:
+
+- `MODULES` is a list of `Module(key, title, icon, page, tagline, section)`.
+  `section` drives the sidebar's **CORE / SECURITY / MAINTENANCE /
+  EXTENSIONS** groups; `tagline` is the content header subtitle and is also
+  searchable. A plugin becomes a `Module` with `section="extensions"`.
+- The sidebar is a brand header (logo + name + "System control center"), a
+  module search entry, one `ListBox` with non-selectable section header rows,
+  and a footer explaining the polkit model. Search hides non-matching rows and
+  empty sections, offers a keyboard-friendly empty state, and `Enter` opens
+  the first match. `Ctrl+K` / `Ctrl+F` focus the search; `Esc` clears it.
+- The content header carries the active module's icon (accent-tinted tile),
+  title and tagline in an `Adw.WindowTitle`, plus a menu with **Refresh
+  Page** (`F5`), **Search Modules** and an `Adw.AboutDialog`. The OS window
+  title tracks the active module too.
+- In the collapsed one-pane layout the sidebar header needs the window
+  controls back (there is no content header on screen); `_sync_sidebar_window_controls()`
+  follows `NavigationSplitView:collapsed`.
+- `theme.py` loads `resources/style.css` at `STYLE_PROVIDER_PRIORITY_APPLICATION`
+  on startup. The stylesheet uses **only Adwaita named colours**
+  (`@accent_bg_color`, `@window_fg_color`, `@borders`, ...), so light mode,
+  dark mode and the desktop's accent colour all keep working. It styles the
+  sidebar, header tiles, group cards, buttons, switches and scrollbars; no
+  page logic depends on it. A missing stylesheet is non-fatal at runtime, but
+  `tests/test_resources.py` checks that it is shipped in the wheel.
+- `BasePage` adds the `atropa-page` class to its `Adw.PreferencesPage`, which
+  is the hook for the card/typography refinements. New pages get the same
+  look for free by going through `add_group()` as usual.
+
 `run_async` is **mandatory** for any backend call — backend functions block on
 subprocess I/O, so calling them directly on the main thread would freeze the GTK
 event loop (e.g. during a full `pacman -Syu`).
@@ -980,8 +1175,9 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 789 tests across
-one file per `backend/` module (all 23), run via `python3 -m pytest` (config in
+**There's a real pytest suite**: `tests/`, 1035 tests across
+one file per `backend/` module (all 31), plus `test_pacman_config.py`,
+`test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
 started from, and `subprocess.run`, with a prefix-matching response registry),
@@ -1005,6 +1201,21 @@ to it. `kernel_state` exists for the same reason from the other side:
 GitHub's Ubuntu runners have AppArmor enabled, so an "AppArmor isn't
 available" test passed locally and failed in CI until the paths it reads
 became module constants the fixture can redirect.
+
+`tests/test_privilege.py` also carries a source-level guard rather than a
+grep: it AST-walks every module in `atropa/` and fails if any
+`Popen`/`run`/`call`/`check_call`/`check_output` passes a truthy `shell=`, or
+if `os.system`/`os.popen` appears. A text search would match this repo's own
+"never shell=True" comment and prove nothing about the calls that actually
+exist.
+
+A later pass ran the parsers against the real machine's output - journal,
+`coredumpctl`, `df`, `lsblk`, `flatpak list` and `/proc/net/tcp` - which is
+how the smartctl probe-error and coredumpctl SIZE-column bugs were found;
+they were invisible to hand-written fixtures because the fixtures shared the
+parser's assumption. Where a tool or device was missing (fwupd, a battery
+charge threshold, Secure Boot firmware), the output shapes stay
+documentation-based and say so in section 5.
 
 `tests/test_resources.py` is the one file that isn't about a backend module.
 The app icon is wired by name in three places - `APP_ID` in `main.py` (the
@@ -1088,7 +1299,31 @@ exactly one definition.
   SELinux builds, the kernel parameter and the reboot are not automated
 - **Plugins**: declarative TOML only, limited to actions in
   `plugin_registry.REGISTRY`; enabling/disabling takes effect on next launch
-- **AUR builds**: shells out to `paru`/`yay` if present, no PKGBUILD review/sandboxing
+- **AUR builds**: runs `paru`/`yay` if present, no PKGBUILD review/sandboxing
+- **Smartctl needs root on most machines**: the Disk Health page reads it
+  unprivileged first and shows UNKNOWN where the kernel refuses, with a
+  "Read SMART as administrator" button that runs one privileged call per
+  disk (the pkexec keep window makes that one password). The status page
+  itself never prompts on open.
+- **The desktop modules are only as tested as this sandbox allows**: fwupd,
+  battery charge thresholds, Secure Boot firmware and reflector's network
+  ranking had no real device to run against here. Their parsers are tested
+  against documented output shapes and their commands against `fake_run`,
+  but the first real run happens on the user's machine. The read-only
+  probes that *could* run for real (journal, coredumpctl, df, lsblk,
+  flatpak list, /proc/net/tcp) were checked against actual output and
+  caught three real bugs: smartctl's probe error being read as a failing
+  disk, coredumpctl's SIZE column being parsed as the program name, and
+  weeks-old coredumps appearing on a page whose premise is "this boot"
+  (now `coredumpctl --since @<boot epoch>`).
+- **Secure Boot enrollment is not automated past sbctl**: it still requires
+  the firmware's setup mode; Atropa calls `sbctl create-keys`,
+  `enroll-keys --microsoft` and `sign-all`, and says so in the confirm
+  dialogs rather than pretending it can flip firmware settings.
+- **zram swap needs `zram-generator` and a kernel with CONFIG_ZRAM**: the
+  Power page checks the package with `pacman -Q` (its generator lives off
+  PATH, so a `shutil.which` catalog row would always read "missing") and
+  reports the package hint instead of failing obscurely.
 - No i18n/l10n
 
 ## 6. TODO / brainstormed next steps (roughly priority order, per the last planning pass)
@@ -1099,7 +1334,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (789 tests as of the latest pass, across all 23 `backend/` modules, one
+- ✅ A real pytest suite (1035 tests as of the latest pass, across all 31 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -1126,7 +1361,7 @@ exactly one definition.
   GTK/libadwaita to run against.
 - ✅ A "what's missing" dependency overview page (`backend/dependencies.py`
   + the Dependencies page) — one catalog of every external tool every
-  module shells out to (pkexec/sudo, pacman/AUR helpers, systemd,
+  module invokes (pkexec/sudo, pacman/AUR helpers, systemd,
   NetworkManager, GRUB/systemd-boot, ufw/firewalld, SSH, fail2ban,
   AppArmor, USBGuard, auditd, arch-audit, every SELinux tool), grouped by
   module, each with an Install button where a real pacman package exists.
@@ -1318,6 +1553,18 @@ exactly one definition.
   `set_active()` for programmatically setting a switch. Both were
   caught by checking existing code for precedent before trusting an
   API I couldn't run, not by inspection alone.
+
+- ✅ **pkexec remembers now: one helper, one password, five minutes.**
+  The documented polkit bug is fixed. `atropa/helper.py` is installed
+  root-owned at `/usr/lib/atropa/atropa-helper`; the shipped policy
+  annotates that exact path and sets `allow_active=auth_admin_keep`, so
+  polkit keeps the authorization for its window instead of asking on every
+  `tee`/`sed`/`systemctl`. The helper validates a bare-name allowlist
+  (no shell, no paths), and `tests/test_helper.py` walks the backend's
+  privileged call sites so a newly added command can't silently stop
+  working. `install.sh` and the PKGBUILD install the helper and policy;
+  without them the app falls back to the old per-command prompting.
+  Still open: the operation-level helper API and root-owned backups.
 
 - ✅ SELinux: Denial Review gained a fourth classification,
   **"undefined_in_policy"**, found via a real user-reported bug hunt (a
@@ -2185,6 +2432,44 @@ exactly one definition.
   where this was written: there the dialogs and the commands sent were
   checked, not their effect.
 
+- ✅ **Seven desktop modules and an exposure-framed audit.** The earlier
+  passes were server-shaped: firewall, SSH, fail2ban, SELinux, CIS categories.
+  This pass added the things that actually go wrong or matter on a
+  single-user Arch laptop, each as backend module + page + tests, and wired
+  into the sidebar and the Dependencies catalog:
+  - **Mirrors** (`mirrors.py`) - reflector ranking, backup-first mirrorlist
+    replacement.
+  - **Boot Report** (`boot_report.py`) - this boot's journal errors, failed
+    units (reusing `system_health`'s parser) and coredumpctl crashes, each
+    isolated so one missing tool doesn't blank the page.
+  - **Firmware** (`firmware.py`) - fwupd device/update listing with a tolerant
+    JSON parser, pkexec'd metadata refresh and streamed `update -y`.
+  - **Disk Health** (`disk_health.py`) - SMART (with smartctl's exit-bit
+    semantics), df usage, fstrim.timer, and journal/cache/coredump cleanup.
+  - **Power** (`power.py`) - power-profiles-daemon, battery charge limits,
+    zram and hibernation feasibility, zram-generator config writing.
+  - **Flatpak** (`flatpak.py`) - app/update listing, streamed update and
+    unused-runtime removal, with per-user vs system-wide privilege decided
+    from `flatpak list --system` instead of guessed.
+  - **Encryption & Secure Boot** (`boot_security.py`) - LUKS detection
+    through findmnt/lsblk with a crypttab fallback, bootctl/mokutil Secure
+    Boot state, and sbctl create/enroll/sign behind pkexec.
+  Two of these are also the first checks that ask "is the *disk* safe", not
+  just "is the *service* configured", so they were fed into the audit:
+  `compliance.py` gained a "Boot & Disk Security" category and an `Exposure`
+  summary (low/moderate/high) built from firewall, reachable SSH,
+  non-loopback listening sockets, LUKS and Secure Boot, with the percentage
+  re-framed as "share of checks holding" rather than a CIS score. Quick Setup
+  grew a desktop mode: with no sshd it no longer opens port 22 (it used to,
+  on every machine, server-shaped default included), skips fail2ban, and
+  shows a read-only desktop baseline (firewall, encryption, Secure Boot)
+  instead of pretending the server checklist fits.
+  Every new backend module has its own pytest file (223 new tests); the
+  environment couldn't run any of the tools for real (no fwupd, no battery,
+  no Secure Boot on the sandbox), so command parsing is tested against
+  documented output shapes and the pages are deliberately conservative about
+  actions.
+
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
   since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
@@ -2199,7 +2484,7 @@ exactly one definition.
 - Disk/partition management (explicitly out of scope at project start)
 - Btrfs snapshots / Timeshift integration ("snapshot before this risky op" is
   a very YaST-shaped feature, pairs with the backup mechanism)
-- Journal/log viewer (already shell out to `journalctl` in several places,
+- Journal/log viewer (already runs `journalctl` in several places,
   never surfaced as its own page)
 - Kernel management (multiple kernels, `mkinitcpio`, headers)
 
@@ -2217,12 +2502,13 @@ exactly one definition.
   suite never imports GTK), Python 3.13/3.14 in the matrix next to
   3.11/3.12, and tests that run the parsers against real config files
   rather than hand-written snippets
-- The single privileged helper (see Architecture): one root helper per
-  operation instead of one pkexec prompt per command. Its design gets
-  agreed before any code. It is also where backups should move to
-  root-owned storage: `restore_file()` only writes to the files Atropa
-  backs up, but anything running as the user can still change a backup's
-  contents in `~/.local/share/atropa/backups`
+- The privileged helper is installed and remembers authorization now (see
+  Architecture), but it is still a *command* allowlist rather than one
+  entry point per operation. The next step is an operation-level API; it
+  is also where backups should move to root-owned storage:
+  `restore_file()` only writes to the files Atropa backs up, but anything
+  running as the user can still change a backup's contents in
+  `~/.local/share/atropa/backups`
 
 ---
 

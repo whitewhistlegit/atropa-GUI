@@ -25,8 +25,8 @@ class CompliancePage(BasePage):
         super().__init__()
 
         intro_group = self.add_group(
-            "Compliance Report",
-            f"{compliance.DISCLAIMER}",
+            "Security Audit",
+            f"{compliance.EXPOSURE_NOTE} {compliance.DISCLAIMER}",
         )
         self.summary_row = Adw.ActionRow(title="Generating report…")
         export_btn = Gtk.Button(label="Export Report (Markdown)", valign=Gtk.Align.CENTER)
@@ -36,6 +36,12 @@ class CompliancePage(BasePage):
         refresh_btn.connect("clicked", lambda _b: self.refresh())
         self.summary_row.add_suffix(refresh_btn)
         intro_group.add(self.summary_row)
+
+        # The exposure summary is the headline; the CIS-style categories
+        # below it are the supporting detail, not the other way round.
+        self.exposure_group = self.add_group("Exposure")
+        self.exposure_group.set_visible(False)
+        self._exposure_rows: list[Adw.ActionRow] = []
 
         self._category_groups: list[Adw.PreferencesGroup] = []
         self._report = None
@@ -63,8 +69,12 @@ class CompliancePage(BasePage):
         self._category_groups = []
 
         pct = round(result.overall_score * 100)
-        self.summary_row.set_title(f"Overall score: {pct}% ({result.scored_check_count} scored checks)")
-        self.summary_row.set_subtitle(f"Host: {result.hostname} · Generated {result.generated_at}")
+        level = result.exposure.level.capitalize()
+        self.summary_row.set_title(f"Exposure: {level} · {pct}% of checks holding ({result.scored_check_count} scored)")
+        self.summary_row.set_subtitle(
+            esc(f"{result.exposure.summary} Host: {result.hostname} · Generated {result.generated_at}")
+        )
+        self._render_exposure(result.exposure)
 
         for category in result.categories:
             score_text = f"{round(category.score * 100)}%" if category.score is not None else "N/A"
@@ -77,6 +87,22 @@ class CompliancePage(BasePage):
             self._category_groups.append(group)
 
         return False
+
+    def _render_exposure(self, exposure) -> None:
+        self.clear_rows(self.exposure_group, self._exposure_rows)
+        self._exposure_rows = []
+        self.exposure_group.set_visible(bool(exposure.signals))
+        if not exposure.signals:
+            return
+        self.exposure_group.set_title(esc(f"Exposure — {exposure.level.capitalize()}"))
+        self.exposure_group.set_description(esc(exposure.summary))
+        for signal in exposure.signals:
+            row = Adw.ActionRow(title=esc(signal.label), subtitle=esc(signal.detail))
+            row.add_prefix(
+                Gtk.Image.new_from_icon_name(_STATUS_ICON.get(signal.status, "dialog-question-symbolic"))
+            )
+            self.exposure_group.add(row)
+            self._exposure_rows.append(row)
 
     def _on_export_clicked(self, _btn: Gtk.Button) -> None:
         if self._report is None:

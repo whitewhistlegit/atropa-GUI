@@ -9,7 +9,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from atropa.backend import pacman
+from atropa.backend import pacman, system_health
 from atropa.ui.pages import BasePage, esc
 
 
@@ -41,6 +41,49 @@ class PackagesPage(BasePage):
         clean_btn.connect("clicked", self._on_clean_clicked)
         clean_row.add_suffix(clean_btn)
         actions_group.add(clean_row)
+
+        # --- post-upgrade health (read-only) -----------------------------------------
+        self.health_group = self.add_group(
+            "System Health",
+            "Read-only checks worth running after an upgrade: failed units, reboot status, and CPU microcode.",
+        )
+        self.health_recheck_btn = Gtk.Button(label="Re-check", valign=Gtk.Align.CENTER)
+        self.health_recheck_btn.connect("clicked", lambda _b: self._load_health())
+        self.health_group.set_header_suffix(self.health_recheck_btn)
+
+        # --- pacman.conf options (privileged edits, backed up + validated) ------------
+        self._suppress_config = False
+        self.config_group = self.add_group(
+            "pacman Configuration",
+            "Edits /etc/pacman.conf. Every change is backed up first and checked with pacman-conf before it's kept.",
+        )
+        self.config_reload_btn = Gtk.Button(label="Reload", valign=Gtk.Align.CENTER)
+        self.config_reload_btn.connect("clicked", lambda _b: self._load_config())
+        self.config_group.set_header_suffix(self.config_reload_btn)
+
+        self.color_row = Adw.SwitchRow(title="Color output", subtitle="Colorize pacman's terminal output")
+        self.color_row.connect("notify::active", self._on_color_toggled)
+        self.config_group.add(self.color_row)
+
+        parallel_adjustment = Gtk.Adjustment(lower=1, upper=20, step_increment=1, page_increment=5, value=1)
+        self.parallel_row = Adw.SpinRow(
+            title="Parallel downloads",
+            subtitle="How many packages pacman downloads at once (1–20)",
+            adjustment=parallel_adjustment,
+            digits=0,
+        )
+        self.parallel_apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER)
+        self.parallel_apply_btn.connect("clicked", self._on_parallel_apply)
+        self.parallel_row.add_suffix(self.parallel_apply_btn)
+        self.config_group.add(self.parallel_row)
+
+        self.multilib_row = Adw.SwitchRow(
+            title="Multilib repository",
+            subtitle="32-bit packages and libraries from [multilib]",
+        )
+        self.multilib_row.connect("notify::active", self._on_multilib_toggled)
+        self.config_group.add(self.multilib_row)
+        self._set_config_sensitive(False)
 
         # --- pending updates (visible list, not just a count) -----------------------
         self.updates_list_group = self.add_group(
@@ -79,6 +122,8 @@ class PackagesPage(BasePage):
 
     def refresh(self) -> None:
         self._load_updates()
+        self._load_health()
+        self._load_config()
         self.clear_rows(self.installed_group, getattr(self, "_installed_rows", []))
         self._installed_rows = [self.start_loading(self.installed_group, "Loading installed packages…")]
         self.run_async(pacman.list_explicit, self._on_installed_loaded)
@@ -86,6 +131,150 @@ class PackagesPage(BasePage):
         self._orphan_rows = [self.start_loading(self.orphans_group, "Looking for orphaned packages…")]
         self.remove_orphans_btn.set_visible(False)
         self.run_async(pacman.list_orphans, self._on_orphans_loaded)
+
+    def _load_health(self) -> None:
+        self.clear_rows(self.health_group, getattr(self, "_health_rows", []))
+        self._health_rows = [self.start_loading(self.health_group, "Checking system health…")]
+        self.run_async(system_health.check_all, self._on_health_loaded)
+
+    def _add_health_row(self, title: str, subtitle: str = "") -> None:
+        row = Adw.ActionRow(title=esc(title))
+        if subtitle:
+            row.set_subtitle(esc(subtitle))
+        self.health_group.add(row)
+        self._health_rows.append(row)
+
+    def _on_health_loaded(self, report, error) -> bool:
+        for row in list(getattr(self, "_health_rows", [])):
+            self.health_group.remove(row)
+        self._health_rows = []
+
+        if error:
+            self._add_health_row("Couldn't check system health", str(error))
+            return False
+
+        if report.failed_units_error:
+            self._add_health_row("Couldn't list failed units", report.failed_units_error)
+        elif not report.failed_units:
+            self._add_health_row("No failed units", "Everything systemd tried to start is running")
+        else:
+            count = len(report.failed_units)
+            self._add_health_row(
+                f"{count} failed unit{'s' if count != 1 else ''}",
+                "Shown by systemctl --failed",
+            )
+            for unit in report.failed_units[:8]:
+                self._add_health_row(unit.name, unit.description)
+            if count > 8:
+                self._add_health_row(f"…and {count - 8} more", "See systemctl --failed for the full list")
+
+        if report.kernel_error:
+            self._add_health_row("Couldn't determine kernel status", report.kernel_error)
+        elif report.kernel is None:
+            self._add_health_row("Kernel status unavailable")
+        elif report.kernel.reboot_required is True:
+            self._add_health_row(
+                "Reboot recommended",
+                f"Running {report.kernel.running}; {report.kernel.package} now installs {report.kernel.package_release}",
+            )
+        elif report.kernel.reboot_required is False:
+            self._add_health_row("Kernel is current", f"Running {report.kernel.running}")
+        else:
+            self._add_health_row("Kernel status unknown", "Couldn't match the running kernel to an installed package")
+
+        if report.microcode_error:
+            self._add_health_row("Couldn't check CPU microcode", report.microcode_error)
+        elif report.microcode is None or report.microcode.package is None:
+            self._add_health_row("Microcode check unavailable", "Couldn't identify the CPU vendor")
+        elif report.microcode.installed:
+            self._add_health_row("CPU microcode installed", f"{report.microcode.package} is present")
+        else:
+            self._add_health_row(
+                "CPU microcode package missing",
+                f"Install {report.microcode.package} to receive microcode updates",
+            )
+        return False
+
+    # -- pacman.conf options -----------------------------------------------------
+
+    def _set_config_sensitive(self, sensitive: bool) -> None:
+        for row in (self.color_row, self.parallel_row, self.multilib_row):
+            row.set_sensitive(sensitive)
+
+    def _load_config(self) -> None:
+        self.run_async(pacman.read_config, self._on_config_loaded)
+
+    def _on_config_loaded(self, settings, error) -> bool:
+        if error:
+            self._set_config_sensitive(False)
+            self.notify(f"Couldn't read pacman.conf: {error}", is_error=True)
+            return False
+
+        self._suppress_config = True
+        self.color_row.set_active(settings.color)
+        self.parallel_row.set_value(settings.parallel_downloads if settings.parallel_downloads is not None else 1)
+        self.multilib_row.set_active(settings.multilib)
+        self._suppress_config = False
+
+        if settings.parallel_downloads is None:
+            self.parallel_row.set_subtitle(
+                "How many packages pacman downloads at once (1–20). Pacman's default is 1."
+            )
+        else:
+            self.parallel_row.set_subtitle(
+                f"How many packages pacman downloads at once (1–20). Currently {settings.parallel_downloads}."
+            )
+        self._set_config_sensitive(True)
+        return False
+
+    def _apply_config_change(self, work_fn, success_message: str) -> None:
+        def done(result, error) -> bool:
+            self.handle_command_result(result, error, success_message, refresh=False)
+            self._load_config()
+            return False
+
+        if not self.run_action(work_fn, done):
+            self._load_config()
+
+    def _on_color_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
+        if self._suppress_config:
+            return
+        enabled = switch.get_active()
+        self._apply_config_change(lambda: pacman.set_color(enabled), "Color updated")
+
+    def _on_parallel_apply(self, _button: Gtk.Button) -> None:
+        count = int(self.parallel_row.get_value())
+        self._apply_config_change(
+            lambda: pacman.set_parallel_downloads(count),
+            "Parallel downloads updated",
+        )
+
+    def _on_multilib_toggled(self, switch: Adw.SwitchRow, _pspec) -> None:
+        if self._suppress_config:
+            return
+        enabled = switch.get_active()
+        if enabled:
+            heading = "Enable the multilib repository?"
+            body = (
+                "Adds [multilib] to /etc/pacman.conf so pacman can install 32-bit packages. "
+                "Nothing is downloaded or installed now."
+            )
+            label = "Enable"
+        else:
+            heading = "Disable the multilib repository?"
+            body = (
+                "Removes [multilib] from /etc/pacman.conf. Packages already installed from it "
+                "stay installed."
+            )
+            label = "Disable"
+        self.confirm(
+            heading,
+            body,
+            label,
+            lambda: self._apply_config_change(lambda: pacman.set_multilib(enabled), "Multilib updated"),
+            on_cancel=self._load_config,
+            destructive=not enabled,
+        )
 
     def _on_orphans_loaded(self, result, error) -> None:
         for row in list(getattr(self, "_orphan_rows", [])):
