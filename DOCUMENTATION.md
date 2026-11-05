@@ -8,7 +8,7 @@ decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
 Current size: **~18,600 lines of Python across 31 backend modules, 29 UI
-pages and one root helper, plus a 1,072-test pytest suite (~11,500 lines).** CI has no GTK4/libadwaita
+pages and one root helper, plus a 1,073-test pytest suite (~11,500 lines).** CI has no GTK4/libadwaita
 available, so UI code is checked there with `py_compile` + `ruff` + the backend
 test suite; visually it is reviewed on a desktop that has GTK4, where the same
 code renders with the bundled stylesheet (see "Testing approach" below).
@@ -1259,7 +1259,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 1072 tests across
+**There's a real pytest suite**: `tests/`, 1073 tests across
 one file per `backend/` module (all 31), plus `test_pacman_config.py`,
 `test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
@@ -1426,7 +1426,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (1072 tests as of the latest pass, across all 31 `backend/` modules, one
+- ✅ A real pytest suite (1073 tests as of the latest pass, across all 31 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2580,7 +2580,7 @@ exactly one definition.
   on every machine, server-shaped default included), skips fail2ban, and
   shows a read-only desktop baseline (firewall, encryption, Secure Boot)
   instead of pretending the server checklist fits.
-  Every new backend module has its own pytest file (260 new tests); the
+  Every new backend module has its own pytest file (261 new tests); the
   environment couldn't run any of the tools for real (no fwupd, no battery,
   no Secure Boot on the sandbox), so command parsing is tested against
   documented output shapes and the pages are deliberately conservative about
