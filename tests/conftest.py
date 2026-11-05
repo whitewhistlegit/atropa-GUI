@@ -129,6 +129,19 @@ def privilege_paths(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def no_host_helper(monkeypatch, tmp_path):
+    """
+    The privileged helper is installed at a fixed system path by install.sh
+    and by the package itself. `makepkg`'s check() runs this suite on a
+    machine where that may already have happened - and then every expected
+    ["pkexec", "systemctl", ...] argv gains the helper, so the build fails
+    for a reason that has nothing to do with the code. Tests that exercise
+    the helper opt in by monkeypatching HELPER_PATH themselves.
+    """
+    monkeypatch.setattr(privilege, "HELPER_PATH", tmp_path / "atropa-helper-not-installed")
+
+
+@pytest.fixture(autouse=True)
 def kernel_state(monkeypatch, tmp_path):
     """
     Points the checks that read live kernel state (the active LSM list,

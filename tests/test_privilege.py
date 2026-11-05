@@ -655,6 +655,11 @@ def _installed_helper(tmp_path):
     return path
 
 
+def test_the_test_environment_never_uses_a_host_installed_helper():
+    # makepkg check() runs on machines where the package already installed it.
+    assert privilege.helper_available() is False
+
+
 def test_run_privileged_goes_through_the_helper_when_installed(tmp_path, monkeypatch, fake_run, fake_which):
     helper = _installed_helper(tmp_path)
     monkeypatch.setattr(privilege, "HELPER_PATH", helper)
