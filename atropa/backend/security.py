@@ -129,7 +129,15 @@ def firewall_status() -> FirewallStatus:
 def firewall_enable() -> CommandResult:
     backend = firewall_backend()
     if backend == "ufw":
-        return run_privileged(["ufw", "--force", "enable"])
+        # `ufw enable` loads the rules now and sets ENABLED=yes, but on Arch
+        # nothing loads them at boot unless ufw.service is enabled too:
+        # without it the firewall is silently off after every reboot, and
+        # each later rule change fails with "problem running" because ufw
+        # believes it's active while its chains aren't loaded.
+        result = run_privileged(["ufw", "--force", "enable"])
+        if not result.ok:
+            return result
+        return run_privileged(["systemctl", "enable", "ufw"])
     if backend == "firewalld":
         return run_privileged(["systemctl", "enable", "--now", "firewalld"])
     raise RuntimeError("No firewall backend installed (install 'ufw' or 'firewalld')")
@@ -138,7 +146,10 @@ def firewall_enable() -> CommandResult:
 def firewall_disable() -> CommandResult:
     backend = firewall_backend()
     if backend == "ufw":
-        return run_privileged(["ufw", "disable"])
+        result = run_privileged(["ufw", "disable"])
+        if not result.ok:
+            return result
+        return run_privileged(["systemctl", "disable", "ufw"])
     if backend == "firewalld":
         return run_privileged(["systemctl", "disable", "--now", "firewalld"])
     raise RuntimeError("No firewall backend installed")

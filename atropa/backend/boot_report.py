@@ -124,6 +124,10 @@ def recent_crashes(limit: int = 20) -> list[BootProblem]:
     argv.append("list")
     result = run_unprivileged(argv, timeout=30)
     if not result.ok:
+        # coredumpctl exits 1 when there's nothing to list - the normal,
+        # good state, not a failure to read.
+        if "no coredumps found" in f"{result.stdout}\n{result.stderr}".lower():
+            return []
         raise RuntimeError(result.stderr.strip() or f"coredumpctl exited with status {result.returncode}")
 
     problems: list[BootProblem] = []

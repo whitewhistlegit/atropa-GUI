@@ -68,7 +68,27 @@ def test_firewall_enable_no_backend_raises(fake_which):
 def test_firewall_enable_ufw(fake_run, fake_which):
     fake_which.add("ufw")
     security.firewall_enable()
-    assert fake_run.last_call() == ["pkexec", "ufw", "--force", "enable"]
+    # Enabling the unit is what brings the rules back after a reboot on Arch.
+    assert fake_run.calls[-2:] == [
+        ["pkexec", "ufw", "--force", "enable"],
+        ["pkexec", "systemctl", "enable", "ufw"],
+    ]
+
+
+def test_firewall_enable_ufw_stops_when_ufw_fails(fake_run, fake_which):
+    fake_which.add("ufw")
+    fake_run.set_response(["pkexec", "ufw", "--force", "enable"], returncode=1, stderr="ERROR: problem running")
+    assert not security.firewall_enable().ok
+    assert ["pkexec", "systemctl", "enable", "ufw"] not in fake_run.calls
+
+
+def test_firewall_disable_ufw_also_disables_the_unit(fake_run, fake_which):
+    fake_which.add("ufw")
+    security.firewall_disable()
+    assert fake_run.calls[-2:] == [
+        ["pkexec", "ufw", "disable"],
+        ["pkexec", "systemctl", "disable", "ufw"],
+    ]
 
 
 def test_firewall_allow_port_firewalld_reloads_on_success(fake_run, fake_which):
