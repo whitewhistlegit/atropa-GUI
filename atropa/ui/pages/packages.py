@@ -9,7 +9,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from atropa.backend import pacman, system_health
+from atropa.backend import news as news_backend, pacman, system_health
 from atropa.ui.pages import BasePage, esc
 
 
@@ -41,6 +41,22 @@ class PackagesPage(BasePage):
         clean_btn.connect("clicked", self._on_clean_clicked)
         clean_row.add_suffix(clean_btn)
         actions_group.add(clean_row)
+
+        # --- Arch news before an upgrade --------------------------------------------
+        # Only fetched when the user asks: the Packages page already reads the
+        # local package database on open and shouldn't also hit the network.
+        self.news_group = self.add_group(
+            "Before Upgrading",
+            "Arch news announces manual steps that a plain -Syu won't do for you: config migrations, "
+            "packages that need removing first, reboots. Items newer than your last full upgrade are the "
+            "ones that matter.",
+        )
+        self.news_status_row = Adw.ActionRow(title="Arch news not checked yet")
+        self.news_btn = Gtk.Button(label="Check news", valign=Gtk.Align.CENTER)
+        self.news_btn.connect("clicked", self._on_check_news)
+        self.news_status_row.add_suffix(self.news_btn)
+        self.news_group.add(self.news_status_row)
+        self._news_rows: list[Adw.ActionRow] = []
 
         # --- post-upgrade health (read-only) -----------------------------------------
         self.health_group = self.add_group(
@@ -131,6 +147,52 @@ class PackagesPage(BasePage):
         self._orphan_rows = [self.start_loading(self.orphans_group, "Looking for orphaned packages…")]
         self.remove_orphans_btn.set_visible(False)
         self.run_async(pacman.list_orphans, self._on_orphans_loaded)
+
+    def _on_check_news(self, _btn: Gtk.Button) -> None:
+        self.news_btn.set_sensitive(False)
+        self.news_status_row.set_title("Checking Arch news…")
+        self.news_status_row.set_subtitle("Fetching the news feed")
+        self.run_async(news_backend.check, self._on_news_checked)
+
+    def _on_news_checked(self, report, error) -> bool:
+        self.news_btn.set_sensitive(True)
+        self.clear_rows(self.news_group, self._news_rows)
+        self._news_rows = []
+
+        if error or report.error:
+            self.news_status_row.set_title("Couldn't check Arch news")
+            self.news_status_row.set_subtitle(esc(error or report.error))
+            return False
+
+        checked = report.checked_at.astimezone().strftime("%Y-%m-%d %H:%M")
+        since = report.since.astimezone().strftime("%Y-%m-%d") if report.since else ""
+        if not report.items:
+            self.news_status_row.set_title(
+                "No news since the last full upgrade" if since else "No news items were returned"
+            )
+            self.news_status_row.set_subtitle(esc(f"Checked {checked}"))
+            return False
+
+        if since:
+            self.news_status_row.set_title(f"{len(report.items)} news item(s) since {since}")
+        else:
+            self.news_status_row.set_title(f"{len(report.items)} recent news item(s)")
+        self.news_status_row.set_subtitle("Read anything that applies to this machine before upgrading")
+
+        for item in report.items:
+            row = Adw.ActionRow(title=esc(item.title))
+            when = item.published.astimezone().strftime("%Y-%m-%d")
+            summary = item.summary[:160] + ("…" if len(item.summary) > 160 else "")
+            row.set_subtitle(esc(f"{when} · {summary}" if summary else when))
+            open_btn = Gtk.Button(label="Open", valign=Gtk.Align.CENTER)
+            open_btn.connect("clicked", self._on_open_news_link, item.link)
+            row.add_suffix(open_btn)
+            self.news_group.add(row)
+            self._news_rows.append(row)
+        return False
+
+    def _on_open_news_link(self, _btn: Gtk.Button, link: str) -> None:
+        Gtk.show_uri(self.get_root(), link, 0)
 
     def _load_health(self) -> None:
         self.clear_rows(self.health_group, getattr(self, "_health_rows", []))

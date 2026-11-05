@@ -8,6 +8,7 @@ thread so the GTK main loop never freezes.
 
 from __future__ import annotations
 
+import os
 import threading
 from typing import Any, Callable
 
@@ -17,6 +18,16 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
 from gi.repository import Adw, GLib, Gtk  # noqa: E402
+
+# Set by tests/test_ui_smoke.py (CI runs it under xvfb-run). Constructing a
+# page normally starts backend calls immediately; the smoke test only wants
+# to know that every widget/page constructor works, without shelling out to
+# pacman/systemctl/pkexec on the build machine.
+SMOKE_ENV = "ATROPA_UI_SMOKE"
+
+
+def smoke_mode() -> bool:
+    return os.environ.get(SMOKE_ENV) == "1"
 
 
 def esc(text: object) -> str:
@@ -150,6 +161,8 @@ class BasePage(Gtk.Box):
         if self._action_running:
             self.notify("Still working on the previous change - try again when it finishes")
             return
+        if smoke_mode():
+            return  # the UI smoke test never runs the actual operation
         self._action_running = True
 
         dialog = Adw.Dialog()
@@ -253,6 +266,9 @@ class BasePage(Gtk.Box):
         Run work_fn() on a background thread; on_done(result, error) is
         invoked back on the GTK main thread once it finishes.
         """
+
+        if smoke_mode():
+            return  # the UI smoke test constructs pages, it doesn't run commands
 
         def worker() -> None:
             result, error = None, None

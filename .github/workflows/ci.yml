@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
@@ -36,3 +36,21 @@ jobs:
 
       - name: Run backend test suite
         run: python3 -m pytest -v
+
+  gtk-smoke:
+    # The backend suite deliberately never imports GTK. This job is the only
+    # CI coverage of the 29 page constructors: build every page under Xvfb,
+    # with backend calls disabled by ATROPA_UI_SMOKE. The distro PyGObject is
+    # used because setup-python interpreters don't ship the Gtk/Adw typelibs.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install GTK4, libadwaita, PyGObject and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3-gi python3-pytest xvfb gir1.2-gtk-4.0 gir1.2-adw-1
+
+      - name: Construct every page under Xvfb
+        run: xvfb-run -a python3 -m pytest tests/test_ui_smoke.py -q
