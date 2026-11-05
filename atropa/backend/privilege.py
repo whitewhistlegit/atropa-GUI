@@ -388,7 +388,11 @@ def backup_file(path: str) -> str | None:
     if path_exists(src) is False:
         return None  # can't-tell (None) falls through to the privileged read below
 
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    # Owner-only, directory and files alike: a backup can be a copy of a
+    # root-only file (read through `cat` below), and the user's default
+    # umask would otherwise leave it readable as 0644 in a 0755 directory.
+    BACKUP_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(BACKUP_DIR, 0o700)  # also tightens a directory made by older versions
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     backup_name = f"{src.name}.{timestamp}.bak"
     dest = BACKUP_DIR / backup_name
@@ -407,7 +411,9 @@ def backup_file(path: str) -> str | None:
             return None
         content = result.stdout.encode("utf-8")
 
-    dest.write_bytes(content)
+    fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(content)
     with open(BACKUP_MANIFEST, "a", encoding="utf-8") as f:
         f.write(json.dumps({"timestamp": timestamp, "original_path": str(src), "backup_file": backup_name}) + "\n")
     logger.info("Backed up %s -> %s", path, dest)
