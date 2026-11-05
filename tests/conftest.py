@@ -82,6 +82,30 @@ def fake_run(monkeypatch):
     return fr
 
 
+@pytest.fixture(autouse=True)
+def pkexec_on_path(monkeypatch):
+    """
+    Every test sees pkexec, whatever the host has.
+
+    GitHub's Ubuntu runners ship sudo but not polkit, so a test that reaches
+    run_privileged() without requesting fake_which used to resolve to
+    ["sudo", "-A", ...] there and to ["pkexec", ...] on an Arch machine - green
+    locally, red in CI, for a reason having nothing to do with the code under
+    test. Tests that deliberately exercise the sudo/no-privilege fallback
+    request fake_which and discard pkexec, which overrides this fixture.
+    """
+    import shutil
+
+    real_which = shutil.which
+
+    def which(name):
+        if name == "pkexec":
+            return "/usr/bin/pkexec"
+        return real_which(name)
+
+    monkeypatch.setattr(shutil, "which", which)
+
+
 @pytest.fixture
 def fake_which(monkeypatch):
     """Default: only 'pkexec' is 'installed'. Tests add more via fake_which.add(...)."""
