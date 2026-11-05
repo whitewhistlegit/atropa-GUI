@@ -260,6 +260,19 @@ def test_checked_copy_accepts_the_aide_paths(tmp_path, monkeypatch):
     assert helper._checked_copy(str(source), str(destination)) == (str(source), str(destination))
 
 
+def test_checked_copy_keeps_a_trailing_slash_dot_for_cp(tmp_path, monkeypatch):
+    # `cp -rn src/. dst` copies contents; normalising the path would make cp
+    # create dst/<basename> instead. Validation must not rewrite it.
+    source = tmp_path / "plugins"
+    source.mkdir()
+    monkeypatch.setattr(helper, "COPY_SOURCES", (str(tmp_path) + "/",))
+    monkeypatch.setattr(helper, "COPY_DEST_DIRS", (str(tmp_path) + "/",))
+
+    returned_source, _ = helper._checked_copy(str(source) + "/.", str(tmp_path / "dest"))
+
+    assert returned_source == str(source) + "/."
+
+
 def test_checked_copy_refuses_an_arbitrary_destination(tmp_path, monkeypatch):
     monkeypatch.setattr(helper, "COPY_SOURCES", (str(tmp_path) + "/",))
     monkeypatch.setattr(helper, "COPY_DEST_DIRS", ("/var/lib/aide/",))

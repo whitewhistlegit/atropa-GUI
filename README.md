@@ -171,7 +171,7 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,072 tests across every backend module and the privileged helper. It fakes the one
+The suite is 1,073 tests across every backend module and the privileged helper. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.
 

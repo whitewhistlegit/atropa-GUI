@@ -236,7 +236,11 @@ def _checked_copy(src: str, dst: str) -> tuple[str, str]:
         and not destination.startswith(COPY_DEST_DIRS)
     ):
         raise Refused(f"cp destination {destination} isn't allowed")
-    return source, destination
+    # Return the *original* spellings: `cp -rn src/. dst` means "copy the
+    # contents of src into dst", and normalising away the trailing /. turns
+    # it into "copy src as a subdirectory of dst". Validation used the
+    # resolved forms; cp gets the paths the caller actually meant.
+    return src, dst
 
 
 def _calling_uid() -> int:
