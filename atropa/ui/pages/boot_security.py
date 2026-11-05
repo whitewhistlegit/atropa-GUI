@@ -80,7 +80,8 @@ class BootSecurityPage(BasePage):
 
     def _action_button(self, label, heading, body, danger_label, work_fn) -> Adw.ActionRow:
         row = Adw.ActionRow(title=label)
-        button = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
+        # The row already names the step; the button says what it does.
+        button = Gtk.Button(label=danger_label, valign=Gtk.Align.CENTER)
         button.connect("clicked", lambda _b: self._confirm_action(heading, body, danger_label, work_fn))
         row.add_suffix(button)
         return row

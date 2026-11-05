@@ -202,9 +202,13 @@ preferencespage.atropa-page preferencesgroup box.header label.heading {
   font-weight: 800;
 }
 
+/* Secondary text is dimmed once, here: libadwaita also dims these labels
+   with opacity, and the two stacked to about 2:1 contrast in light mode.
+   0.70 of the foreground keeps small text readable (about 5:1) in both. */
 preferencespage.atropa-page preferencesgroup box.header label.body {
   font-size: 0.83rem;
-  color: alpha(@window_fg_color, 0.60);
+  opacity: 1;
+  color: alpha(@window_fg_color, 0.70);
 }
 
 preferencespage.atropa-page list.boxed-list {
@@ -226,7 +230,8 @@ preferencespage.atropa-page list.boxed-list > row label.title {
 }
 
 preferencespage.atropa-page list.boxed-list > row label.subtitle {
-  color: alpha(@window_fg_color, 0.58);
+  opacity: 1;
+  color: alpha(@window_fg_color, 0.70);
 }
 
 /* --------------------------------------------------------------------------

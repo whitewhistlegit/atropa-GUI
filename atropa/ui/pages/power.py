@@ -39,6 +39,9 @@ class PowerPage(BasePage):
 
         profile_group = self.add_group("Power profile")
         self.profile_row = Adw.ComboRow(title="Power profile", subtitle="Reading…")
+        # Plain text: the combo row showed esc()'d subtitles literally
+        # ("isn&apos;t installed"), and an error message needs no markup.
+        self.profile_row.set_use_markup(False)
         self.profile_row.connect("notify::selected", self._on_profile_selected)
         profile_group.add(self.profile_row)
 
@@ -103,7 +106,7 @@ class PowerPage(BasePage):
     def _on_profile_loaded(self, result, error) -> bool:
         if error:
             self.profile_row.set_sensitive(False)
-            self.profile_row.set_subtitle(esc(f"Couldn't read power profiles: {error}"))
+            self.profile_row.set_subtitle(f"Couldn't read power profiles: {error}")
             return False
 
         profiles, current = result
@@ -119,9 +122,9 @@ class PowerPage(BasePage):
                 self.profile_row.set_selected(profiles.index(current))
             self.profile_row.set_sensitive(bool(profiles))
             if profiles:
-                self.profile_row.set_subtitle(esc("provided by power-profiles-daemon"))
+                self.profile_row.set_subtitle("provided by power-profiles-daemon")
             else:
-                self.profile_row.set_subtitle(esc("power-profiles-daemon isn't installed"))
+                self.profile_row.set_subtitle("power-profiles-daemon isn't installed")
         finally:
             self._suppress_signals = False
         return False

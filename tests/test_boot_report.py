@@ -291,3 +291,18 @@ def test_collect_records_every_failure_and_blanks_uptime(monkeypatch):
     assert report.errors == {"journal": "journal down", "units": "systemd down", "crashes": "coredumpctl down"}
     assert report.uptime is None
     assert report.journal == report.units == report.crashes == []
+
+
+def test_recent_crashes_none_found_is_empty_not_an_error(fake_run, fake_which):
+    # coredumpctl exits 1 with "No coredumps found." when nothing crashed;
+    # the page showed that as "Couldn't read recent crashes".
+    fake_which.add("coredumpctl")
+    fake_run.set_response(["coredumpctl"], stderr="No coredumps found.\n", returncode=1)
+    assert boot_report.recent_crashes() == []
+
+
+def test_recent_crashes_other_failures_still_raise(fake_run, fake_which):
+    fake_which.add("coredumpctl")
+    fake_run.set_response(["coredumpctl"], stderr="Failed to open journal: Permission denied\n", returncode=1)
+    with pytest.raises(RuntimeError, match="Permission denied"):
+        boot_report.recent_crashes()
