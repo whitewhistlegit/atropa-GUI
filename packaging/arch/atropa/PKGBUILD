@@ -1,5 +1,5 @@
 # Maintainer: whitewhistlegit <dusdamian4@gmail.com>
-# Stable package built from the GitHub release tarball. packaging/arch/PKGBUILD
+# Stable package built from the GitHub release asset. packaging/arch/PKGBUILD
 # is the -git variant; this one pins a checksum so an install is reproducible.
 pkgname=atropa
 _pkgname=atropa-GUI
@@ -36,8 +36,8 @@ optdepends=(
     'flatpak: Flatpak app updates and cleanup'
 )
 conflicts=('atropa-git')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('9ad32a637d1e2b659d4527dc5fa3501206053a84a0885406009495f5b8e6911b')
+source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/atropa-$pkgver.tar.gz")
+sha256sums=('7856d8581a39c96dc9344ab74b6ca339bc5a32d915b3c647f40bffae74a8022d')
 
 build() {
     cd "$_pkgname-$pkgver"
