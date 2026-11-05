@@ -88,8 +88,15 @@ class PacnewPage(BasePage):
         # the user's side better than "use new version".
         apply_label = "Restore saved config" if entry.kind == "pacsave" else "Use new version"
         apply_btn = Gtk.Button(label=apply_label, valign=Gtk.Align.CENTER)
-        apply_btn.add_css_class("suggested-action")
-        apply_btn.connect("clicked", lambda _btn: self._on_use_new(entry))
+        if pacnew.is_account_file(entry):
+            # Replacing passwd/group/shadow/gshadow with the package's stock
+            # copy deletes every account; the backend and helper refuse it.
+            apply_btn.set_sensitive(False)
+            apply_btn.set_tooltip_text("Merge by hand - the new file has none of this machine's accounts")
+            row.set_subtitle(esc("Account database: merge by hand (e.g. pacdiff), never replace"))
+        else:
+            apply_btn.add_css_class("suggested-action")
+            apply_btn.connect("clicked", lambda _btn: self._on_use_new(entry))
         row.add_suffix(apply_btn)
 
         keep_btn = Gtk.Button(label="Keep current", valign=Gtk.Align.CENTER)

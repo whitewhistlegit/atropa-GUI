@@ -392,6 +392,32 @@ def test_pacnew_apply_creates_a_missing_live_file_from_a_pacsave(tmp_path, monke
     assert (etc / "removed.conf").read_text() == "saved\n"
 
 
+@pytest.mark.parametrize("name", ["passwd", "group", "shadow", "gshadow"])
+def test_pacnew_apply_refuses_the_account_databases(tmp_path, monkeypatch, name):
+    # The filesystem package's passwd/shadow have none of this machine's
+    # users: "use new" would delete every account.
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    live = etc / name
+    live.write_text("me:x:1000:1000::/home/me:/bin/bash\n")
+    candidate = etc / f"{name}.pacnew"
+    candidate.write_text("root:x:0:0::/root:/bin/bash\n")
+
+    with pytest.raises(helper.Refused, match="by hand"):
+        helper.handle(["pacnew-apply", str(candidate)])
+    assert "me:" in live.read_text()
+    # Discarding the stock copy is still fine.
+    assert helper.handle(["pacnew-remove", str(candidate)]) == 0
+
+
+def test_pacnew_apply_allows_a_same_named_file_elsewhere(tmp_path, monkeypatch):
+    etc = _pacnew_tree(tmp_path, monkeypatch)
+    (etc / "app").mkdir()
+    candidate = etc / "app" / "passwd.pacnew"
+    candidate.write_text("new\n")
+    assert helper.handle(["pacnew-apply", str(candidate)]) == 0
+    assert (etc / "app" / "passwd").read_text() == "new\n"
+
+
 def test_pacnew_remove_deletes_only_the_candidate(tmp_path, monkeypatch):
     etc = _pacnew_tree(tmp_path, monkeypatch)
     live = etc / "x.conf"

@@ -118,6 +118,13 @@ SAFE_PATH = ("/usr/bin", "/usr/sbin", "/bin", "/sbin")
 # the two operations at a temporary tree.
 ETC_ROOT = "/etc"
 
+# The account databases. Their .pacnew is the filesystem package's stock
+# copy with none of this machine's users in it, so "use new" would delete
+# every account (and with shadow, every password). These are merged by hand,
+# never replaced. Kept in step with backend/pacnew.py, which can't be
+# imported here: this file is installed on its own.
+ACCOUNT_FILES = frozenset({"passwd", "group", "shadow", "gshadow"})
+
 # Commands handled by this module rather than executed (or refused): they
 # either write content themselves or validate every path before exec.
 FILE_COMMANDS = frozenset(
@@ -327,6 +334,8 @@ def _pacnew_apply(argv: list[str]) -> int:
         raise Refused("pacnew-apply takes exactly one path")
     candidate = _pacnew_candidate(argv[1])
     live = _pacnew_live(candidate)
+    if os.path.dirname(live) == os.path.normpath(ETC_ROOT) and os.path.basename(live) in ACCOUNT_FILES:
+        raise Refused(f"{live} lists this machine's accounts; merge {candidate} by hand instead of replacing it")
     with open(candidate, "rb") as handle:
         data = handle.read()
     mode = os.stat(candidate).st_mode & 0o7777
