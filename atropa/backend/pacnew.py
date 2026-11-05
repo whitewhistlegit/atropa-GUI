@@ -32,6 +32,10 @@ from .privilege import CommandResult, backup_file, path_exists, run_privileged
 # make the result depend on that machine's pending configs.
 ETC_DIR = Path("/etc")
 
+# Their .pacnew is the stock copy with none of this machine's accounts in it;
+# replacing the live file deletes every user. The helper refuses these too.
+ACCOUNT_FILES = frozenset({"passwd", "group", "shadow", "gshadow"})
+
 PACNEW_SUFFIX = ".pacnew"
 PACSAVE_SUFFIX = ".pacsave"
 _SUFFIXES = (PACNEW_SUFFIX, PACSAVE_SUFFIX)
@@ -59,6 +63,12 @@ def _require_candidate_suffix(candidate: str) -> None:
     """
     if not candidate.endswith(_SUFFIXES):
         raise ValueError(f"{candidate!r} isn't a .pacnew or .pacsave file")
+
+
+def is_account_file(entry: PacnewEntry) -> bool:
+    """True for /etc/passwd, group, shadow and gshadow: merge by hand, never replace."""
+    live = Path(entry.live)
+    return live.parent == ETC_DIR and live.name in ACCOUNT_FILES
 
 
 def scan() -> list[PacnewEntry]:
@@ -161,6 +171,11 @@ def apply_new(entry: PacnewEntry) -> CommandResult:
     re-validates the suffix on its side.
     """
     _require_candidate_suffix(entry.candidate)
+    if is_account_file(entry):
+        raise ValueError(
+            f"{entry.live} lists this machine's accounts - {entry.candidate} has none of them, so "
+            "replacing it would delete every user. Merge the changes by hand (e.g. with pacdiff)."
+        )
     backup_file(entry.live)
     return run_privileged(["pacnew-apply", entry.candidate])
 

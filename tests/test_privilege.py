@@ -148,6 +148,27 @@ def test_backup_file_falls_back_to_privileged_read_on_permission_error(
     assert (privilege_paths.backup_dir / backup_name).read_text() == "secret=1\n"
 
 
+def test_backups_are_owner_only(privilege_paths, tmp_path, monkeypatch, fake_run, fake_which):
+    # A backup can be a root-only file read through `cat` (/etc/shadow,
+    # sudoers.d); it must not land in the user's home as 0644.
+    import stat
+
+    src = tmp_path / "protected.conf"
+    src.write_text("secret=1\n")
+    privilege_paths.backup_dir.mkdir(mode=0o755, parents=True)  # as older versions left it
+
+    def raise_permission_error(self, *a, **k):
+        raise PermissionError()
+
+    monkeypatch.setattr("pathlib.Path.read_bytes", raise_permission_error)
+    fake_run.set_response(["pkexec", "cat", "--", str(src)], stdout="secret=1\n", returncode=0)
+
+    backup_name = privilege.backup_file(str(src))
+
+    assert stat.S_IMODE((privilege_paths.backup_dir / backup_name).stat().st_mode) == 0o600
+    assert stat.S_IMODE(privilege_paths.backup_dir.stat().st_mode) == 0o700
+
+
 def test_backup_file_read_failure_returns_none(
     privilege_paths, tmp_path, monkeypatch, fake_run, fake_which
 ):

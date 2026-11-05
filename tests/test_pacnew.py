@@ -226,6 +226,21 @@ def test_apply_new_rejects_a_bad_suffix(etc, fake_run, fake_which):
     assert fake_run.calls == []  # refused before any password prompt
 
 
+def test_apply_new_refuses_the_account_databases_before_any_prompt(etc, fake_run, fake_which, privilege_paths):
+    live = etc / "shadow"
+    live.write_text("me:$y$hash:20000::::::\n", encoding="utf-8")
+    candidate = etc / "shadow.pacnew"
+    candidate.write_text("root:*:14871::::::\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="by hand"):
+        pacnew.apply_new(_entry("pacnew", candidate, live, True))
+
+    assert fake_run.calls == []
+    # Nothing was backed up either - a backup of shadow is itself a copy of
+    # every password hash.
+    assert not privilege_paths.backup_dir.exists()
+
+
 def test_discard_sends_the_helper_argv(etc, fake_run, fake_which):
     candidate = etc / "app.conf.pacnew"
 

@@ -155,6 +155,9 @@ where almost all of the write-anything risk lived.
   doesn't manage: both require a regular `*.pacnew`/`*.pacsave` file under
   `/etc` (which an unprivileged user cannot create there), and applying
   copies the candidate over its live sibling, refusing symlinked targets.
+  Applying is refused outright for `/etc/passwd`, `group`, `shadow` and
+  `gshadow`: their `.pacnew` is the stock copy with none of the machine's
+  accounts, so replacing the live file would delete every user.
   That is how the Config Changes page can legitimately touch any /etc file
   without reopening "write anywhere".
 - `tests/test_helper.py` has a coverage test that walks the backend's own
@@ -612,10 +615,14 @@ separate, richer modules; see below). Covers:
 Whether `/` sits above a LUKS device (`findmnt` plus the `lsblk -s` stack,
 with `/etc/crypttab` as a fallback when lsblk can't answer - "can't tell"
 stays distinct from "unencrypted"), the firmware's Secure Boot state via
-bootctl then mokutil, and sbctl's own view. sbctl's three actions
-(`create-keys`, `enroll-keys --microsoft`, `sign-all`) are pkexec'd and
-confirmed; enrollment still requires the firmware in setup mode, which Atropa
-cannot do and says so. The encryption and Secure Boot checks feed the
+bootctl then mokutil, and sbctl's own view. sbctl's three actions run in
+the order create keys, sign, enroll, each pkexec'd and confirmed: signing
+lists unsigned EFI files with `sbctl verify --json` and signs and saves each
+(`sign -s`) - `sign-all` alone only re-signs files already in sbctl's
+database, which is empty after `create-keys` - and `enroll-keys --microsoft`
+refuses while anything is still unsigned, because many firmwares enforce as
+soon as keys are enrolled. Enrollment still requires the firmware in setup
+mode, which Atropa cannot do and says so. The encryption and Secure Boot checks feed the
 compliance report's "Boot & Disk Security" category and the exposure summary.
 
 ### Compliance Report (`compliance.py` / `pages/compliance.py`)
@@ -1106,8 +1113,10 @@ not an error.
 - `diff_text(entry)` is a unified diff of live vs candidate via `difflib` -
   no shelling out, and a missing live file diffs as empty so a `.pacsave`
   reads as "all new".
-- `apply_new(entry)` backs the live file up first (`backup_file()`), then
-  calls the helper's `pacnew-apply`; `discard(entry)` calls
+- `apply_new(entry)` refuses the account databases (`is_account_file()`:
+  passwd, group, shadow, gshadow - merge those by hand), otherwise backs
+  the live file up first (`backup_file()`), then calls the helper's
+  `pacnew-apply`; `discard(entry)` calls
   `pacnew-remove`. Both go through the helper's bounded `.pacnew` support
   (see the operation-level helper section): the helper only touches a
   regular, non-symlinked `*.pacnew`/`*.pacsave` under `/etc`, which an
@@ -1454,7 +1463,8 @@ exactly one definition.
   (now `coredumpctl --since @<boot epoch>`).
 - **Secure Boot enrollment is not automated past sbctl**: it still requires
   the firmware's setup mode; Atropa calls `sbctl create-keys`,
-  `enroll-keys --microsoft` and `sign-all`, and says so in the confirm
+  `sign -s` for each unsigned file, then `enroll-keys --microsoft`, and
+  says so in the confirm
   dialogs rather than pretending it can flip firmware settings.
 - **zram swap needs `zram-generator` and a kernel with CONFIG_ZRAM**: the
   Power page checks the package with `pacman -Q` (its generator lives off
