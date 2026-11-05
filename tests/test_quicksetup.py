@@ -287,7 +287,7 @@ def test_apply_faillock_applies_when_wired_in(fake_run, fake_which, privilege_pa
     monkeypatch.setattr(hardening, "FAILLOCK_CONF", conf_file)
     fake_run.set_response(["cat", str(pam_file)], stdout=pam_file.read_text())
     fake_run.set_response(["grep", "-E"], stdout="deny = 3\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     result = quicksetup._apply_faillock(lambda _l: None)
     assert result.ok
@@ -370,7 +370,7 @@ def test_apply_selinux_never_sets_enforcing(fake_run, fake_which):
         stdout="SELinux status:                 enabled\nCurrent mode:                    disabled\n",
     )
     fake_run.set_response(["pkexec", "setenforce", "0"], returncode=0)
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     quicksetup._apply_selinux(lambda _l: None)
 

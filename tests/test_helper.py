@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import os
+import stat
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -32,8 +33,8 @@ def test_resolve_returns_the_real_path_of_an_allowed_command(tmp_path):
 
 
 def test_check_keeps_the_arguments_and_resolves_the_program(tmp_path):
-    program, directories = _bin_dir(tmp_path, "tee")
-    assert helper.check(["tee", "/etc/hostname"], directories) == [str(program), "/etc/hostname"]
+    program, directories = _bin_dir(tmp_path, "systemctl")
+    assert helper.check(["systemctl", "status"], directories) == [str(program), "status"]
 
 
 def test_resolve_refuses_a_command_that_is_not_allowlisted(tmp_path):
@@ -118,9 +119,17 @@ def _literal_privileged_commands() -> dict[str, set[str]]:
     return found
 
 
-def test_every_literal_privileged_command_is_in_the_allowlist():
-    missing = {command: files for command, files in _literal_privileged_commands().items() if command not in helper.ALLOWED}
-    assert missing == {}, f"privileged commands missing from ALLOWED: {missing}"
+def test_every_literal_privileged_command_is_allowlisted_or_handled():
+    known = helper.ALLOWED | helper.FILE_COMMANDS
+    missing = {command: files for command, files in _literal_privileged_commands().items() if command not in known}
+    assert missing == {}, f"privileged commands missing from ALLOWED/FILE_COMMANDS: {missing}"
+
+
+def test_sed_is_refused_even_though_it_is_handled():
+    # sed scripts can write any file (`w /etc/sudoers`), so the operation is
+    # replace-in-file; sed itself must never execute.
+    with pytest.raises(helper.Refused, match="replace-in-file"):
+        helper.handle(["sed", "-i", "-E", "s/x/y/", "/etc/hosts"])
 
 
 def test_allowlist_contains_no_shells_or_interpreters():
@@ -142,3 +151,196 @@ def test_policy_annotates_the_helper_path_with_a_keep_action():
 
 def test_policy_is_valid_xml():
     assert ET.parse(POLICY).getroot().tag == "policyconfig"
+
+
+# ------------------------------------------------------------ file policy --
+
+def _tmp_policy(monkeypatch, tmp_path, *paths):
+    """Point the write policy at tmp files, so tests never touch /etc."""
+    monkeypatch.setattr(helper, "WRITE_FILES", frozenset(str(p) for p in paths))
+    monkeypatch.setattr(helper, "WRITE_DIRS", ())
+
+
+def test_tee_writes_the_content(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    _tmp_policy(monkeypatch, tmp_path, target)
+
+    assert helper.handle(["tee", str(target)], b"deny = 5\n") == 0
+    assert target.read_text() == "deny = 5\n"
+
+
+def test_tee_append_keeps_what_was_there(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    target.write_text("first\n")
+    _tmp_policy(monkeypatch, tmp_path, target)
+
+    helper.handle(["tee", "-a", str(target)], b"second\n")
+
+    assert target.read_text() == "first\nsecond\n"
+
+
+def test_tee_refuses_a_path_outside_the_policy(tmp_path, monkeypatch):
+    _tmp_policy(monkeypatch, tmp_path, tmp_path / "allowed")
+    with pytest.raises(helper.Refused, match="allowed to write"):
+        helper.handle(["tee", str(tmp_path / "other")], b"x")
+
+
+def test_tee_refuses_a_symlink_to_an_allowed_file(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    target.write_text("original")
+    link = tmp_path / "link"
+    link.symlink_to(target)
+    _tmp_policy(monkeypatch, tmp_path, link)
+
+    with pytest.raises(helper.Refused, match="symlink"):
+        helper.handle(["tee", str(link)], b"x")
+    assert target.read_text() == "original"
+
+
+def test_tee_refuses_relative_paths(tmp_path, monkeypatch):
+    _tmp_policy(monkeypatch, tmp_path, tmp_path / "conf")
+    with pytest.raises(helper.Refused, match="absolute"):
+        helper.handle(["tee", "etc/conf"], b"x")
+
+
+def test_install_sets_content_and_mode(tmp_path, monkeypatch):
+    target = tmp_path / "rules"
+    _tmp_policy(monkeypatch, tmp_path, target)
+
+    assert helper.handle(["install", "-m", "0600", "/dev/stdin", str(target)], b"allow\n") == 0
+    assert target.read_text() == "allow\n"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_install_refuses_a_format_it_does_not_use(tmp_path, monkeypatch):
+    target = tmp_path / "rules"
+    _tmp_policy(monkeypatch, tmp_path, target)
+    with pytest.raises(helper.Refused, match="install must be"):
+        helper.handle(["install", "-o", "root", str(target)], b"x")
+
+
+def test_replace_in_file_updates_only_the_matching_line(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    target.write_text("deny = 3\nunlock_time = 600\n")
+    _tmp_policy(monkeypatch, tmp_path, target)
+
+    assert helper.handle(
+        ["replace-in-file", str(target), r"^#?\s*deny\s*=.*$", "deny = 5"]
+    ) == 0
+    assert target.read_text() == "deny = 5\nunlock_time = 600\n"
+
+
+def test_replace_in_file_preserves_the_mode(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    target.write_text("a = 1\n")
+    target.chmod(0o600)
+    _tmp_policy(monkeypatch, tmp_path, target)
+
+    helper.handle(["replace-in-file", str(target), r"^a\s*=.*$", "a = 2"])
+
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_replace_in_file_rejects_a_bad_pattern(tmp_path, monkeypatch):
+    target = tmp_path / "conf"
+    target.write_text("x\n")
+    _tmp_policy(monkeypatch, tmp_path, target)
+    with pytest.raises(helper.Refused, match="bad pattern"):
+        helper.handle(["replace-in-file", str(target), "(", "x"])
+
+
+# ------------------------------------------------------- other operations --
+
+def test_checked_copy_accepts_the_aide_paths(tmp_path, monkeypatch):
+    source = tmp_path / "aide.db.new"
+    destination = tmp_path / "aide.db"
+    monkeypatch.setattr(helper, "COPY_SOURCES", (str(tmp_path) + "/",))
+    monkeypatch.setattr(helper, "COPY_DEST_DIRS", (str(tmp_path) + "/",))
+
+    assert helper._checked_copy(str(source), str(destination)) == (str(source), str(destination))
+
+
+def test_checked_copy_refuses_an_arbitrary_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(helper, "COPY_SOURCES", (str(tmp_path) + "/",))
+    monkeypatch.setattr(helper, "COPY_DEST_DIRS", ("/var/lib/aide/",))
+
+    with pytest.raises(helper.Refused, match="destination"):
+        helper._checked_copy(str(tmp_path / "src"), "/etc/sudoers")
+
+
+def test_mkdir_only_creates_the_atropa_directories():
+    assert helper._checked_mkdir("/etc/atropa") == "/etc/atropa"
+    assert helper._checked_mkdir("/etc/audit/rules.d") == "/etc/audit/rules.d"
+    with pytest.raises(helper.Refused):
+        helper._checked_mkdir("/etc")
+
+
+def test_rm_only_removes_the_legacy_plugin_tree():
+    assert helper._checked_remove("/etc/archyast") == "/etc/archyast"
+    assert helper._checked_remove("/etc/archyast/plugins") == "/etc/archyast/plugins"
+    with pytest.raises(helper.Refused):
+        helper._checked_remove("/etc")
+
+
+def test_touch_is_only_the_autorelabel_marker(tmp_path, monkeypatch):
+    with pytest.raises(helper.Refused, match="isn't allowed"):
+        helper.handle(["touch", str(tmp_path / "x")])
+
+
+def test_chown_only_hands_files_back_to_the_invoking_user(monkeypatch):
+    import pwd
+
+    account = pwd.getpwuid(os.getuid())
+    monkeypatch.setenv("PKEXEC_UID", str(account.pw_uid))
+    inside = str(Path(account.pw_dir) / "atropa-build")
+
+    argv = ["chown", "-R", "-h", "--from=0:0", f"{account.pw_uid}:{account.pw_gid}", "--", inside]
+    assert helper._checked_chown(argv) == argv
+
+    with pytest.raises(helper.Refused, match="outside"):
+        helper._checked_chown(["chown", "-R", "--from=0:0", f"{account.pw_uid}:{account.pw_gid}", "--", "/etc/shadow"])
+
+
+def test_chown_refuses_another_owner(monkeypatch):
+    import pwd
+
+    account = pwd.getpwuid(os.getuid())
+    monkeypatch.setenv("PKEXEC_UID", str(account.pw_uid))
+    with pytest.raises(helper.Refused, match="isn't"):
+        helper._checked_chown(
+            ["chown", "-R", "--from=0:0", "0:0", "--", str(Path(account.pw_dir) / "x")]
+        )
+
+
+# ------------------------------------------------------ policy coverage ----
+
+def test_policy_covers_every_path_the_backend_manages():
+    from atropa.backend import (
+        aide, apparmor, audit_rules, bootloader, hardening, mirrors, pacman, plugins, power, security, selinux,
+        system_config,
+    )
+
+    managed = [
+        hardening.SYSCTL_HARDENING_FILE,
+        str(hardening.FAILLOCK_CONF),
+        hardening.FAIL2BAN_SSHD_JAIL,
+        hardening.USBGUARD_RULES,
+        str(hardening.PWQUALITY_CONF),
+        str(security.SSHD_CONFIG),
+        str(selinux.SELINUX_CONFIG),
+        str(bootloader.GRUB_DEFAULT_PATH),
+        str(system_config.LOCALE_GEN_PATH),
+        str(pacman.PACMAN_CONF),
+        str(mirrors.MIRRORLIST),
+        str(power.ZRAM_GENERATOR_CONF),
+        str(plugins.ENABLED_STATE_FILE),
+        *aide.DB_ACTIVE_CANDIDATES,
+        *aide.DB_NEW_CANDIDATES,
+        str(apparmor.PROFILES_DIR / "usr.bin.example"),
+        str(audit_rules.AUDIT_RULES_DIR / "99-atropa.rules"),
+        str(plugins.PLUGINS_DIR / "example" / "manifest.toml"),
+        "/boot/loader/loader.conf",
+        "/.autorelabel",
+    ]
+    for path in managed:
+        assert helper.checked_write_path(path), path

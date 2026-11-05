@@ -106,10 +106,10 @@ def test_set_mode_updates_config_when_persistent(fake_run, fake_which, monkeypat
     conf.write_text("SELINUX=permissive\n")
     monkeypatch.setattr(selinux, "SELINUX_CONFIG", conf)
     fake_run.set_response(["pkexec", "setenforce", "1"], returncode=0)
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     selinux.set_mode(enforcing=True, persistent=True)
-    assert fake_run.call_containing("sed") is not None
+    assert fake_run.call_containing("replace-in-file") is not None
 
 
 def test_set_mode_runtime_only_skips_config_edit(fake_run, fake_which, monkeypatch, tmp_path):
@@ -119,7 +119,7 @@ def test_set_mode_runtime_only_skips_config_edit(fake_run, fake_which, monkeypat
     fake_run.set_response(["pkexec", "setenforce", "0"], returncode=0)
 
     selinux.set_mode(enforcing=False, persistent=False)
-    assert fake_run.call_containing("sed") is None
+    assert fake_run.call_containing("replace-in-file") is None
 
 
 def test_set_mode_skips_config_edit_on_setenforce_failure(fake_run, fake_which, monkeypatch, tmp_path):
@@ -130,7 +130,7 @@ def test_set_mode_skips_config_edit_on_setenforce_failure(fake_run, fake_which, 
 
     result = selinux.set_mode(enforcing=True, persistent=True)
     assert not result.ok
-    assert fake_run.call_containing("sed") is None
+    assert fake_run.call_containing("replace-in-file") is None
 
 
 # --------------------------------------------------------------- booleans --
@@ -802,7 +802,7 @@ def test_start_setup_mode_sets_permissive_and_records_timestamp(fake_run, fake_w
     conf.write_text("SELINUX=enforcing\n")
     monkeypatch.setattr(selinux, "SELINUX_CONFIG", conf)
     fake_run.set_response(["pkexec", "setenforce", "0"], returncode=0)
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     result = selinux.start_setup_mode()
     assert result.ok
@@ -831,7 +831,7 @@ def test_clear_setup_mode_removes_state(fake_run, fake_which, module_dirs, monke
     conf.write_text("SELINUX=enforcing\n")
     monkeypatch.setattr(selinux, "SELINUX_CONFIG", conf)
     fake_run.set_response(["pkexec", "setenforce", "0"], returncode=0)
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     selinux.start_setup_mode()
     assert selinux.is_in_setup_mode() is True

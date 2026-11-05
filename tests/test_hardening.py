@@ -395,11 +395,11 @@ def test_set_faillock_policy_updates_both_options(fake_run, fake_which, privileg
     conf_file.write_text("deny = 3\nunlock_time = 600\n")
     monkeypatch.setattr(hardening, "FAILLOCK_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="deny = 3\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     result = hardening.set_faillock_policy(deny=5, unlock_time=900)
     assert result.ok
-    sed_calls = [c for c in fake_run.calls if "sed" in c]
+    sed_calls = [c for c in fake_run.calls if "replace-in-file" in c]
     assert len(sed_calls) == 2  # deny, then unlock_time
 
 
@@ -426,11 +426,11 @@ def test_set_faillock_policy_stops_after_first_failure(fake_run, fake_which, pri
     conf_file.write_text("deny = 3\n")
     monkeypatch.setattr(hardening, "FAILLOCK_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="deny = 3\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=1, stderr="failed")
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=1, stderr="failed")
 
     result = hardening.set_faillock_policy(deny=5, unlock_time=900)
     assert not result.ok
-    sed_calls = [c for c in fake_run.calls if "sed" in c]
+    sed_calls = [c for c in fake_run.calls if "replace-in-file" in c]
     assert len(sed_calls) == 1  # unlock_time step never attempted
 
 
@@ -497,11 +497,11 @@ def test_set_password_complexity_policy_updates_all_six_settings(fake_run, fake_
     conf_file.write_text("minlen = 8\n")
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="minlen = 8\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=0)
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=0)
 
     result = hardening.set_password_complexity_policy()
     assert result.ok
-    sed_calls = [c for c in fake_run.calls if "sed" in c]
+    sed_calls = [c for c in fake_run.calls if "replace-in-file" in c]
     assert len(sed_calls) == 6  # minlen, dcredit, ucredit, lcredit, ocredit, retry
 
 
@@ -510,11 +510,11 @@ def test_set_password_complexity_policy_stops_after_first_failure(fake_run, fake
     conf_file.write_text("minlen = 8\n")
     monkeypatch.setattr(hardening, "PWQUALITY_CONF", conf_file)
     fake_run.set_response(["grep", "-E"], stdout="minlen = 8\n")
-    fake_run.set_response(["pkexec", "sed", "-i"], returncode=1, stderr="failed")
+    fake_run.set_response(["pkexec", "replace-in-file"], returncode=1, stderr="failed")
 
     result = hardening.set_password_complexity_policy()
     assert not result.ok
-    sed_calls = [c for c in fake_run.calls if "sed" in c]
+    sed_calls = [c for c in fake_run.calls if "replace-in-file" in c]
     assert len(sed_calls) == 1  # stopped at minlen, nothing further attempted
 
 
