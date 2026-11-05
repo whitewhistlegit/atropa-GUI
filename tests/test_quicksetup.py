@@ -198,7 +198,62 @@ def test_apply_firewall_desktop_opens_no_ports(fake_run, fake_which):
 
     assert result.ok
     assert fake_run.call_containing("allow") is None
-    assert any("No SSH server is running" in line for line in lines)
+    assert any("No SSH server is running or enabled" in line for line in lines)
+
+
+def _sshd_installed_but_stopped(fake_run, fake_which, monkeypatch, tmp_path):
+    from atropa.backend import security
+
+    conf = tmp_path / "sshd_config"
+    conf.write_text("Port 22\n")
+    monkeypatch.setattr(security, "SSHD_CONFIG", conf)
+    fake_which.add("ufw")
+    fake_which.add("sshd")
+    fake_run.set_response(["pkexec", "ufw", "status", "verbose"], stdout="Status: inactive\n")
+    fake_run.set_response(["systemctl", "is-active", "sshd"], stdout="inactive\n")
+    fake_run.set_response(["cat", str(conf)], stdout=conf.read_text())
+    fake_run.set_response(["pkexec", "ufw", "allow"], returncode=0)
+    fake_run.set_response(["pkexec", "ufw", "--force", "enable"], returncode=0)
+
+
+@pytest.mark.parametrize(
+    ("active", "enabled"),
+    [
+        ("inactive\ninactive\n", "enabled\ndisabled\n"),  # enabled, stopped right now: back at boot
+        ("inactive\nactive\n", "disabled\nenabled\n"),  # socket activation: the service is idle
+    ],
+)
+def test_apply_firewall_allows_ssh_when_sshd_is_enabled_but_not_running(
+    fake_run, fake_which, monkeypatch, tmp_path, active, enabled
+):
+    """sshd.service being inactive this second doesn't mean nothing will
+    listen: enabled sshd comes back at boot, and with sshd.socket the service
+    only runs during a connection. Skipping the SSH rule then locked remote
+    logins out after the next reboot."""
+    _sshd_installed_but_stopped(fake_run, fake_which, monkeypatch, tmp_path)
+    fake_run.set_response(["systemctl", "is-active", "sshd.service", "sshd.socket"], stdout=active)
+    fake_run.set_response(["systemctl", "is-enabled", "sshd.service", "sshd.socket"], stdout=enabled)
+
+    quicksetup._apply_firewall(lambda _l: None)
+
+    allow_index = next(i for i, c in enumerate(fake_run.calls) if "allow" in c)
+    enable_index = next(i for i, c in enumerate(fake_run.calls) if "enable" in c and "ufw" in c)
+    assert allow_index < enable_index
+
+
+def test_apply_firewall_opens_no_port_for_installed_but_disabled_sshd(fake_run, fake_which, monkeypatch, tmp_path):
+    _sshd_installed_but_stopped(fake_run, fake_which, monkeypatch, tmp_path)
+    fake_run.set_response(
+        ["systemctl", "is-active", "sshd.service", "sshd.socket"], stdout="inactive\ninactive\n"
+    )
+    fake_run.set_response(
+        ["systemctl", "is-enabled", "sshd.service", "sshd.socket"], stdout="disabled\ndisabled\n"
+    )
+
+    result = quicksetup._apply_firewall(lambda _l: None)
+
+    assert result.ok
+    assert fake_run.call_containing("allow") is None
 
 
 # --------------------------------------------------------------- fail2ban --

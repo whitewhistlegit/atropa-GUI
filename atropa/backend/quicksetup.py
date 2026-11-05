@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from . import boot_security, hardening, pacman, security, selinux
-from .privilege import CommandResult
+from .privilege import CommandResult, run_unprivileged
 
 
 @dataclass
@@ -133,6 +133,26 @@ CATALOG: list[SetupItem] = [
 _ORDER = ["firewall", "fail2ban", "sysctl", "faillock", "apparmor", "auditd", "usbguard", "selinux_repo", "selinux"]
 
 
+def _sshd_will_listen(ssh: security.SshStatus) -> bool:
+    """
+    Whether sshd accepts connections now *or after the next boot*.
+
+    "Running right now" isn't enough: an enabled sshd that happens to be
+    stopped comes back at boot, and with socket activation (sshd.socket)
+    sshd.service is only active while a connection is open. Either way a
+    deny-by-default firewall without the SSH rule locks remote logins out.
+    """
+    if not ssh.installed:
+        return False
+    if ssh.running:
+        return True
+    units = ["sshd.service", "sshd.socket"]
+    active = run_unprivileged(["systemctl", "is-active", *units])
+    enabled = run_unprivileged(["systemctl", "is-enabled", *units])
+    states = set(active.stdout.split()) | set(enabled.stdout.split())
+    return bool(states & {"active", "activating", "enabled", "enabled-runtime"})
+
+
 def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
     on_line("=== Firewall ===")
     if security.firewall_backend() == "none":
@@ -148,7 +168,7 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
         return CommandResult(0, "already active", "")
 
     ssh = security.ssh_status()
-    if ssh.installed and ssh.running:
+    if _sshd_will_listen(ssh):
         # Every port sshd listens on - Port lines accumulate, and
         # ListenAddress can name its own - not just the first one.
         ports = ssh.ports or ["22"]
@@ -169,7 +189,9 @@ def _apply_firewall(on_line: Callable[[str], None]) -> CommandResult:
         # Opening 22 here anyway was a server-shaped default leaking into a
         # single-user machine: an unnecessary listening surface, on the port
         # every scanner tries first.
-        on_line("No SSH server is running - enabling the firewall with no incoming ports opened.")
+        on_line(
+            "No SSH server is running or enabled - enabling the firewall with no incoming ports opened."
+        )
 
     on_line("Enabling firewall...")
     result = security.firewall_enable()
