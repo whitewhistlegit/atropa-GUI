@@ -327,7 +327,10 @@ def test_chown_refuses_another_owner(monkeypatch):
 
 # ------------------------------------------------------ policy coverage ----
 
-def test_policy_covers_every_path_the_backend_manages():
+def test_policy_covers_every_path_the_backend_manages(monkeypatch):
+    # About the policy, not this machine's disk: on an SELinux install
+    # /etc/selinux/config is a symlink, which made this fail there.
+    monkeypatch.setattr(helper.os.path, "realpath", os.path.normpath)
     from atropa.backend import (
         aide, apparmor, audit_rules, bootloader, hardening, mirrors, pacman, plugins, power, security, selinux,
         system_config,
@@ -463,3 +466,30 @@ def test_pacnew_refuses_to_replace_a_symlinked_live_file(tmp_path, monkeypatch):
     with pytest.raises(helper.Refused, match="symlink"):
         helper.handle(["pacnew-apply", str(candidate)])
     assert real.read_text() == "x\n"
+
+
+def _selinux_config_link(tmp_path, monkeypatch, target_name):
+    directory = tmp_path / "selinux"
+    directory.mkdir()
+    config = directory / "config"
+    target = directory / target_name
+    target.write_text("SELINUX=permissive\n")
+    config.symlink_to(target_name)
+    monkeypatch.setattr(helper, "SYMLINKED_FILES", {str(config): str(directory / "config.")})
+    return config, target
+
+
+def test_selinux_config_symlinked_by_the_policy_package_is_writable(tmp_path, monkeypatch):
+    # selinux-refpolicy-arch links /etc/selinux/config -> config.refpolicy-arch
+    # when there's no config yet; Atropa must still be able to set the mode.
+    config, target = _selinux_config_link(tmp_path, monkeypatch, "config.refpolicy-arch")
+    assert helper.checked_write_path(str(config)) == str(target)
+    helper.handle(["replace-in-file", str(config), "^SELINUX=.*$", "SELINUX=enforcing"])
+    assert target.read_text() == "SELINUX=enforcing\n"
+    assert config.is_symlink()  # the package's link stays a link
+
+
+def test_selinux_config_symlink_elsewhere_is_refused(tmp_path, monkeypatch):
+    config, _target = _selinux_config_link(tmp_path, monkeypatch, "not-config")
+    with pytest.raises(helper.Refused, match="sibling"):
+        helper.checked_write_path(str(config))

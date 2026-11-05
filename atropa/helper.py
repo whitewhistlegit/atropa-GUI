@@ -93,6 +93,12 @@ WRITE_FILES = frozenset(
     }
 )
 
+# Managed files that may be a symlink to a sibling, mapped to the prefix the
+# resolved target must have. selinux-refpolicy-arch's install script links
+# /etc/selinux/config -> config.refpolicy-arch when no config exists yet,
+# which is exactly the state after setting SELinux up from scratch.
+SYMLINKED_FILES = {"/etc/selinux/config": "/etc/selinux/config."}
+
 # Directories Atropa writes into, with a trailing slash so prefix matching
 # cannot be fooled by "/etc/apparmor.d-evil".
 WRITE_DIRS = (
@@ -218,6 +224,15 @@ def checked_write_path(path: str) -> str:
         if real.startswith("/sys/") and real.endswith("/charge_control_end_threshold"):
             return real
         raise Refused(f"{path} doesn't resolve to a battery charge threshold")
+    prefix = SYMLINKED_FILES.get(normal)
+    if prefix is not None:
+        # The write goes to the resolved file, and only when that is a sibling
+        # named like the policy's own copy - never somewhere a link could aim.
+        real = os.path.realpath(normal)
+        rest = real[len(prefix):]
+        if real == normal or (real.startswith(prefix) and rest and "/" not in rest):
+            return real
+        raise Refused(f"{path} resolves to {real}, which isn't its {prefix}* sibling")
     target = _resolved(path)
     if target in WRITE_FILES or target.startswith(WRITE_DIRS):
         return target
