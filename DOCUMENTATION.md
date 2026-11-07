@@ -7,8 +7,8 @@ reference — architecture, every function's contract, design
 decisions and *why* they were made, bugs already hit and fixed, and what's
 still on the TODO list.
 
-Current size: **~19,400 lines of Python across 33 backend modules, 30 UI
-pages and one root helper, plus a 1,159-test pytest suite (~12,100 lines).** CI has no GTK4/libadwaita
+Current size: **~20,300 lines of Python across 35 backend modules, 30
+built-in UI pages (plus the plugin page) and one root helper, plus a 1,214-test pytest suite (~12,900 lines).** CI has no GTK4/libadwaita
 available, so UI code is checked there with `py_compile` + `ruff` + the backend
 test suite; visually it is reviewed on a desktop that has GTK4, where the same
 code renders with the bundled stylesheet (see "Testing approach" below).
@@ -700,6 +700,39 @@ duplication). No `install()` function on purpose.
   with copy stating it accepts everything currently reported as normal -
   deliberate friction, not an oversight.
 
+### Lockdown & Scans (`lockdown.py`, `rootkit.py` / `pages/lockdown.py`)
+
+- **Lockdown** is a reversible radio-silence mode, not a hardening preset:
+  NetworkManager networking off, the Wi-Fi radio off, and Bluetooth stopped.
+  `current_snapshot()` records what was on, `enable()` saves that snapshot
+  *before* changing anything, and `disable()` restores exactly it (a radio
+  that was already off stays off). A failed step rolls back the steps
+  already taken and drops the snapshot. Running over SSH is refused outright
+  (`SSH_CONNECTION`/`SSH_TTY`) because the switch would cut the session.
+  The state file is ordinary user data (`~/.local/share/atropa/lockdown.json`),
+  not a security boundary. There is deliberately **no session lock**:
+  `loginctl lock-sessions` only shows the lock screen, and with a Bluetooth
+  keyboard it could make the restore button unreachable. Firewall and sshd
+  configuration are untouched - networking off already removes the remote
+  surface. Only already-allowed helper commands are used (`nmcli`,
+  `systemctl`), so lockdown needs no new privileged verb or writable path.
+- **Rootkit scan** wraps rkhunter, which is in Arch's official `extra`
+  repository (unlike most scanner tooling), via the helper's fixed-argv
+  operations `rootkit-scan` (`--check --sk --nocolors --rwo`),
+  `rootkit-update` and `rootkit-baseline` (`--propupd`). rkhunter is
+  deliberately **not** in the command allowlist: caller-supplied flags would
+  let a cached authorization rewrite the baseline. `parse_warnings()` reads
+  both `[ Warning ]` and `Warning:` output shapes, deduplicates, and never
+  invents a verdict; `save/load_scan_record()` keeps the last result.
+  Nothing is removed or "fixed" automatically, and the page says "N
+  warnings - review the log", never "clean".
+- **Scans** on the same page reuse the existing backends rather than
+  duplicating them: `aide.run_check()` + `build_check_record()` (the same
+  saved record the File Integrity page shows) and
+  `hardening.vulnerability_scan()` (arch-audit, also on the Hardening page).
+  Rebaselining rkhunter is behind a confirmation explaining that doing it on
+  a compromised machine blesses the compromise.
+
 ### Service Inventory & Account Hygiene (`inventory.py` + `account_hygiene.py` / `pages/inventory_hygiene.py`)
 CIS DIL Phase 2 - see the Phase 2 write-up in section 6 for the full
 rationale (especially why CIS's server/client 2.2/2.3 split doesn't map
@@ -1304,8 +1337,8 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing approach
 
-**There's a real pytest suite**: `tests/`, 1159 tests across
-one file per `backend/` module (all 33), plus `test_pacman_config.py`,
+**There's a real pytest suite**: `tests/`, 1214 tests across
+one file per `backend/` module (all 35), plus `test_pacman_config.py`,
 `test_helper.py` and `test_resources.py`, run via `python3 -m pytest` (config in
 `pyproject.toml`). A shared `conftest.py` provides four fixtures —
 `fake_run` (replaces `privilege._subprocess_run`, the one place commands are
@@ -1480,7 +1513,7 @@ exactly one definition.
 - ✅ AppArmor parity with SELinux (profile toggles, denial review)
 - ✅ Package management visibility (real pending-updates list, not just a count; gated single-package update -
   removed again later, see the second bug-fix batch at the end of this section)
-- ✅ A real pytest suite (1159 tests as of the latest pass, across all 31 `backend/` modules, one
+- ✅ A real pytest suite (1214 tests as of the latest pass, across all 35 `backend/` modules, one
   shared command-runner fake in `conftest.py`; covers the SSH and GRUB
   rollback-on-failure safety paths specifically)
 - ✅ CI/lint config (`.github/workflows/ci.yml` runs `py_compile` + `ruff
@@ -2634,7 +2667,7 @@ exactly one definition.
   on every machine, server-shaped default included), skips fail2ban, and
   shows a read-only desktop baseline (firewall, encryption, Secure Boot)
   instead of pretending the server checklist fits.
-  Every new backend module has its own pytest file (347 new tests); the
+  Every new backend module has its own pytest file (402 new tests); the
   environment couldn't run any of the tools for real (no fwupd, no battery,
   no Secure Boot on the sandbox), so command parsing is tested against
   documented output shapes and the pages are deliberately conservative about
@@ -2661,7 +2694,7 @@ exactly one definition.
   "Before: recent Arch news" upgrade check.
 
 - ✅ **CI can see the UI now.** A separate `gtk-smoke` job installs the
-  distro PyGObject + Xvfb and constructs every one of the 30 pages under
+  distro PyGObject + Xvfb and constructs every built-in page under
   `xvfb-run`; `ATROPA_UI_SMOKE=1` turns `BasePage.run_async()` into a no-op
   so building a page never shells out on a runner. The backend matrix also
   grew 3.13/3.14. This is the CI item that the repo audit asked for - and
@@ -2670,6 +2703,17 @@ exactly one definition.
 - ✅ **Version 0.2.0** - first tagged release after the desktop-module,
   helper and exposure work, with a stable `atropa` PKGBUILD that builds
   from the release tarball instead of the git head.
+
+- ✅ **Lockdown & Scans** (new `backend/lockdown.py`, `backend/rootkit.py`
+  and the Lockdown & Scans page) - a reversible "radios off" mode (network,
+  Wi-Fi, Bluetooth) with a saved snapshot and restore, an SSH-session
+  refusal, and automatic rollback if a step fails; plus on-demand AIDE,
+  rkhunter and arch-audit scans. rkhunter runs through three fixed-argv
+  helper operations rather than being added to the command allowlist, so a
+  cached authorization cannot pass `--propupd` or arbitrary flags. No
+  session lock (it would only lock the screen and can strand a Bluetooth
+  keyboard); no auto-removal and no "clean" verdict from a heuristic
+  scanner.
 
 **Still open:**
 - `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2

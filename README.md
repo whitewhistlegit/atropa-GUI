@@ -46,6 +46,7 @@ Each sidebar entry is a module:
 | **Compliance Report** | Posture report with an exposure summary (firewall, SSH, listening sockets, LUKS, Secure Boot) on top of the CIS-style categories, exportable as Markdown (not an official CIS assessment) |
 | **Inventory & Hygiene** | Read-only scans for unneeded network services and account/file hygiene issues |
 | **File Integrity** | AIDE baseline/check/timer management with changed-path reports saved between launches, config validation, and next-run times (AIDE itself is AUR-only; install it first) |
+| **Lockdown & Scans** | Reversible radio lockdown (network, Wi-Fi, Bluetooth off, state restored on exit) plus on-demand AIDE, rkhunter and arch-audit scans with saved last results |
 | **AppArmor** | Profile modes, capability/network rule toggles, denial review with rule suggestions |
 | **SELinux** | Status, enforcing/permissive (lock-gated), booleans, denial review, per-application policy drafts |
 | **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
@@ -188,7 +189,7 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,159 tests across every backend module and the privileged helper. It fakes the one
+The suite is 1,214 tests across every backend module and the privileged helper. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.
 

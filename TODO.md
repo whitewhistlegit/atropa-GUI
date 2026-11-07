@@ -43,6 +43,10 @@ single-user Arch machine.
       end the graphical session, so it stays a manual edit for now.
 - [x] **Flatpak** - updates and removing unused runtimes, next to the
       pacman page.
+- [x] **Lockdown mode** - one reversible switch: networking, Wi-Fi radio and
+      Bluetooth off, with the previous state saved and restored on exit.
+- [x] **Rootkit scan** - rkhunter (fixed-argv helper operations), with the
+      last result saved and AIDE/arch-audit scans on the same page.
 
 ### Desktop focus for existing modules
 

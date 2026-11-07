@@ -43,6 +43,7 @@ from atropa.ui.pages.firmware import FirmwarePage  # noqa: E402
 from atropa.ui.pages.flatpak import FlatpakPage  # noqa: E402
 from atropa.ui.pages.hardening import HardeningPage  # noqa: E402
 from atropa.ui.pages.inventory_hygiene import InventoryHygienePage  # noqa: E402
+from atropa.ui.pages.lockdown import LockdownPage  # noqa: E402
 from atropa.ui.pages.mirrors import MirrorsPage  # noqa: E402
 from atropa.ui.pages.network import NetworkPage  # noqa: E402
 from atropa.ui.pages.packages import PackagesPage  # noqa: E402
@@ -137,6 +138,10 @@ MODULES = [
     Module(
         "aide", "File Integrity", "drive-harddisk-symbolic", AidePage,
         "Baselines and checks for changed files", "security",
+    ),
+    Module(
+        "lockdown", "Lockdown & Scans", "system-lock-screen-symbolic", LockdownPage,
+        "Cut the radios, check integrity and look for rootkits", "security",
     ),
     Module(
         "apparmor", "AppArmor", "security-high-symbolic", ApparmorPage,

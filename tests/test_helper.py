@@ -120,7 +120,7 @@ def _literal_privileged_commands() -> dict[str, set[str]]:
 
 
 def test_every_literal_privileged_command_is_allowlisted_or_handled():
-    known = helper.ALLOWED | helper.FILE_COMMANDS
+    known = helper.ALLOWED | helper.FILE_COMMANDS | helper.OPERATIONS
     missing = {command: files for command, files in _literal_privileged_commands().items() if command not in known}
     assert missing == {}, f"privileged commands missing from ALLOWED/FILE_COMMANDS: {missing}"
 
@@ -130,6 +130,33 @@ def test_sed_is_refused_even_though_it_is_handled():
     # replace-in-file; sed itself must never execute.
     with pytest.raises(helper.Refused, match="replace-in-file"):
         helper.handle(["sed", "-i", "-E", "s/x/y/", "/etc/hosts"])
+
+
+def test_rootkit_operations_use_a_fixed_argv(monkeypatch):
+    calls = []
+    monkeypatch.setattr(helper, "_exec", lambda program, argv: calls.append((program, argv)) or 0)
+    monkeypatch.setattr(helper, "_system_binary", lambda name: "/usr/bin/" + name)
+
+    expected = {
+        "rootkit-scan": ["rkhunter", "--check", "--sk", "--nocolors", "--rwo"],
+        "rootkit-update": ["rkhunter", "--update", "--nocolors"],
+        "rootkit-baseline": ["rkhunter", "--propupd", "--nocolors"],
+    }
+    for operation, argv in expected.items():
+        calls.clear()
+        assert helper.handle([operation]) == 0
+        assert calls == [("/usr/bin/rkhunter", argv)]
+
+
+def test_rootkit_operations_refuse_extra_arguments():
+    # Caller-supplied flags would defeat the point of a fixed operation -
+    # rkhunter --propupd would otherwise be reachable through the cache.
+    with pytest.raises(helper.Refused, match="no arguments"):
+        helper.handle(["rootkit-scan", "--propupd"])
+
+
+def test_rkhunter_is_not_a_bare_allowed_command():
+    assert "rkhunter" not in helper.ALLOWED
 
 
 def test_allowlist_contains_no_shells_or_interpreters():
