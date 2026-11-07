@@ -725,7 +725,12 @@ duplication). No `install()` function on purpose.
   both `[ Warning ]` and `Warning:` output shapes, deduplicates, and never
   invents a verdict; `save/load_scan_record()` keeps the last result.
   Nothing is removed or "fixed" automatically, and the page says "N
-  warnings - review the log", never "clean".
+  warnings - review the log", never "clean". rkhunter's exit status 1 is
+  "warnings found" and is passed to `run_streaming_operation` via
+  `success_codes={0, 1}`, so the dialog doesn't mislabel a completed scan
+  as failed. GNU grep's egrep-deprecation and stray-backslash lines from
+  rkhunter's internals are filtered out of the live log (`_NOISE_PREFIXES`);
+  real findings start with `[ Warning ]`/`Warning:` and are kept.
 - **Scans** on the same page reuse the existing backends rather than
   duplicating them: `aide.run_check()` + `build_check_record()` (the same
   saved record the File Integrity page shows) and
@@ -1222,7 +1227,7 @@ self.handle_command_result(result, error, success_message="Done", refresh=True)
 self.run_action(work_fn, on_done) -> bool           # run_async for a state change: one at a time per page
 self.apply_switch(switch, requested, work_fn, confirm=None, on_done=None) -> bool
                                                     # body of a Gtk.Switch "state-set" handler
-self.run_streaming_operation(title, work_fn, on_done=None)
+self.run_streaming_operation(title, work_fn, on_done=None, success_codes=None)
                                                     # modal live-log dialog; work_fn(on_line)
 self.confirm(heading, body, danger_label, on_confirm, on_cancel=None)
                                                     # markup disabled, for destructive actions
@@ -1297,6 +1302,13 @@ used to be unclosable until its command finished or timed out (30 minutes
 for an upgrade). Hiding it leaves the command running, and the usual
 notification reports how it ended. A page won't start a second streaming
 operation while one is running.
+
+**A non-zero exit isn't always a failure.** `success_codes=` tells the
+dialog which exit statuses mean "ran and reported findings": rkhunter exits
+1 when it has warnings, and AIDE's check exits 1/2/4 (combined 1-7) for
+new/removed/changed files. Those now finish with "Finished (exit code N) /
+review the log" instead of "Finished with errors", which used to suggest the
+scan itself had failed when it had done its job.
 
 **A row has to live in a list box.** An `Adw.ActionRow` placed directly in
 a `Gtk.Box` makes GTK assert when it gets focus; wrap it in a

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Collection
 from typing import Any, Callable
 
 import gi
@@ -147,6 +148,7 @@ class BasePage(Gtk.Box):
         title: str,
         work_fn: Callable[[Callable[[str], None]], Any],
         on_done: Callable[[Any, Exception | None], None] | None = None,
+        success_codes: Collection[int] | None = None,
     ) -> None:
         """
         Runs work_fn(on_line) on a worker thread, showing a modal dialog
@@ -155,9 +157,15 @@ class BasePage(Gtk.Box):
         full system upgrade or a recursive relabel. on_done(result, error)
         fires once work_fn returns, same contract as run_async; defaults to
         self.handle_command_result if not given.
+
+        success_codes lists exit statuses that mean "the command ran and
+        reported findings", not failure - rkhunter exits 1 for warnings and
+        AIDE exits 1/2/4 (combined as 1-7) for new/removed/changed files.
+        Without it those normal results show up as "Finished with errors".
         """
         if on_done is None:
             on_done = self.handle_command_result
+        accepted = {0} if success_codes is None else set(success_codes) | {0}
         if self._action_running:
             self.notify("Still working on the previous change - try again when it finishes")
             return
@@ -243,8 +251,13 @@ class BasePage(Gtk.Box):
             if error:
                 status_row.set_title("Failed")
                 status_row.set_subtitle(esc(str(error)))
-            elif result is not None and not getattr(result, "ok", True):
+            elif result is not None and getattr(result, "returncode", 0) not in accepted:
                 status_row.set_title("Finished with errors")
+            elif result is not None and getattr(result, "returncode", 0) != 0:
+                # Not a failure, but not a silent success either: the tool
+                # reported findings (warnings, changed files, ...).
+                status_row.set_title(f"Finished (exit code {result.returncode})")
+                status_row.set_subtitle("Review the log below")
             else:
                 status_row.set_title("Done")
             on_done(result, error)

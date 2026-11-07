@@ -249,7 +249,10 @@ class LockdownPage(BasePage):
 
     def _on_aide_check(self, _btn: Gtk.Button) -> None:
         self.aide_row.set_subtitle("Running AIDE check…")
-        self.run_streaming_operation("Running AIDE check", aide.run_check, self._on_aide_done)
+        # AIDE's exit status is a bitmask: 1 new, 2 removed, 4 changed (1-7).
+        self.run_streaming_operation(
+            "Running AIDE check", aide.run_check, self._on_aide_done, success_codes=set(range(8))
+        )
 
     def _on_aide_done(self, result, error) -> bool:
         if error:
@@ -281,7 +284,9 @@ class LockdownPage(BasePage):
 
     def _on_rootkit_scan(self, _btn: Gtk.Button) -> None:
         self.rootkit_row.set_subtitle("Running rkhunter…")
-        self.run_streaming_operation("Running rootkit scan", rootkit.scan, self._on_rootkit_done)
+        self.run_streaming_operation(
+            "Running rootkit scan", rootkit.scan, self._on_rootkit_done, success_codes={0, 1}
+        )
 
     def _on_rootkit_done(self, result, error) -> bool:
         if error:

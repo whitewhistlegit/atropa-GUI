@@ -253,7 +253,10 @@ class AidePage(BasePage):
     # -- run check --------------------------------------------------------------
 
     def _on_check_clicked(self) -> None:
-        self.run_streaming_operation("Running AIDE check", aide.run_check, self._on_check_done)
+        # AIDE's exit status is a bitmask: 1 new, 2 removed, 4 changed (1-7).
+        self.run_streaming_operation(
+            "Running AIDE check", aide.run_check, self._on_check_done, success_codes=set(range(8))
+        )
 
     def _on_check_done(self, result, error) -> bool:
         if error:
