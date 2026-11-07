@@ -87,6 +87,30 @@ def test_scan_streams_the_fixed_helper_operation(fake_which, monkeypatch):
     assert captured["timeout"] == 3600
 
 
+def test_scan_filters_gnu_grep_noise_from_rkhunter(fake_which, monkeypatch):
+    fake_which.add("rkhunter")
+    seen = []
+
+    def fake(argv, on_line, input_text=None, timeout=None):
+        on_line("egrep: warning: egrep is obsolescent; using grep -E")
+        on_line("grep: warning: stray \\ before +")
+        on_line("[ Warning ] The file '/usr/bin/foo' has changed")
+        return CommandResult(1, "", "")
+
+    monkeypatch.setattr(rootkit, "run_privileged_streaming", fake)
+
+    rootkit.scan(seen.append)
+
+    assert seen == ["[ Warning ] The file '/usr/bin/foo' has changed"]
+
+
+def test_visible_keeps_real_warnings():
+    assert rootkit._visible("[ Warning ] something") is True
+    assert rootkit._visible("Warning: hidden file") is True
+    assert rootkit._visible("egrep: warning: egrep is obsolescent; using grep -E") is False
+    assert rootkit._visible("grep: warning: stray \\ before +") is False
+
+
 def test_update_signatures_uses_the_helper_operation(fake_run, fake_which):
     fake_which.add("rkhunter")
     fake_run.set_response(["pkexec", "rootkit-update"], stdout="updated\n")

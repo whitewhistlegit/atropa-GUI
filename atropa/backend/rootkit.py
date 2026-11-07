@@ -46,6 +46,18 @@ LAST_SCAN_FILE = Path.home() / ".local" / "share" / "atropa" / "rootkit_last_sca
 
 _WARNING_RE = re.compile(r"\[\s*warning\s*\]", re.IGNORECASE)
 
+# rkhunter is a shell script that calls egrep dozens of times. GNU grep 3.12
+# prints a deprecation warning on every egrep call, and its extended-regex
+# parser warns about the escaped "+" rkhunter's own patterns use. Both go to
+# stderr, which the streaming runner merges into the log; without filtering,
+# the progress dialog is nothing but tool noise. These prefixes are cosmetic
+# and never part of a scan result - real findings start with "[ Warning ]"
+# or "Warning:" and are kept.
+_NOISE_PREFIXES = (
+    "egrep: warning: egrep is obsolescent",
+    "grep: warning: stray \\ before ",
+)
+
 
 @dataclass
 class RootkitStatus:
@@ -124,14 +136,23 @@ def _require_installed() -> None:
         raise RuntimeError("rkhunter isn't installed - install it with: pacman -S rkhunter")
 
 
+def _visible(line: str) -> bool:
+    return not line.startswith(_NOISE_PREFIXES)
+
+
 def scan(on_line: Callable[[str], None]) -> CommandResult:
     """
     Run `rkhunter --check` (warnings only) and stream it. Non-zero is not an
     error here: rkhunter exits 1 when it has warnings, which is the normal
     "something needs review" result.
+
+    The GNU grep deprecation/escaping noise from rkhunter's internal egrep
+    calls is filtered out; see _NOISE_PREFIXES.
     """
     _require_installed()
-    return run_privileged_streaming(["rootkit-scan"], on_line, timeout=3600)
+    return run_privileged_streaming(
+        ["rootkit-scan"], lambda line: on_line(line) if _visible(line) else None, timeout=3600
+    )
 
 
 def update_signatures() -> CommandResult:
