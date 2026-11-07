@@ -26,6 +26,28 @@ def _fake_streaming(monkeypatch, lines, returncode=1):
 
 # ------------------------------------------------------------ installed/
 
+def test_is_installed_when_the_binary_is_root_only(monkeypatch, tmp_path):
+    # Arch ships rkhunter 0700 root:root; shutil.which() is false for a normal
+    # user even though the package is installed. Existence is what counts.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    binary = bin_dir / "rkhunter"
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o700)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setattr(rootkit.shutil, "which", lambda _name: None)
+
+    assert rootkit.is_installed() is True
+
+
+def test_is_installed_false_when_absent(monkeypatch, tmp_path):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    monkeypatch.setattr(rootkit.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(rootkit, "STANDARD_BIN", tmp_path / "missing")
+
+    assert rootkit.is_installed() is False
+
+
 def test_status_reports_installed_and_database_time(fake_which, monkeypatch, tmp_path):
     fake_which.add("rkhunter")
     db = tmp_path / "db"
@@ -46,7 +68,8 @@ def test_status_handles_a_missing_database(fake_which, monkeypatch, tmp_path):
     assert rootkit.status().database_updated == ""
 
 
-def test_scan_refuses_without_rkhunter(fake_which):
+def test_scan_refuses_without_rkhunter(monkeypatch, fake_which):
+    monkeypatch.setattr(rootkit, "_binary_path", lambda: None)
     with pytest.raises(RuntimeError, match="pacman -S rkhunter"):
         rootkit.scan(lambda _line: None)
 
@@ -80,7 +103,8 @@ def test_update_baseline_uses_the_helper_operation(fake_run, fake_which):
     assert fake_run.last_call() == ["pkexec", "rootkit-baseline"]
 
 
-def test_update_refuses_without_rkhunter(fake_which):
+def test_update_refuses_without_rkhunter(monkeypatch, fake_which):
+    monkeypatch.setattr(rootkit, "_binary_path", lambda: None)
     with pytest.raises(RuntimeError, match="rkhunter"):
         rootkit.update_signatures()
 

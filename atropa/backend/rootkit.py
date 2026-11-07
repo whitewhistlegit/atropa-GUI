@@ -26,6 +26,7 @@ arbitrary config overrides through a cached root authorization.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -36,6 +37,7 @@ from typing import Callable
 from .privilege import CommandResult, run_privileged, run_privileged_streaming
 
 DB_DIR = Path("/var/lib/rkhunter/db")
+STANDARD_BIN = Path("/usr/bin")
 LOG_FILE = Path("/var/log/rkhunter.log")
 
 # Last scan's warnings, kept between launches (the scan output itself can be
@@ -62,8 +64,33 @@ class RootkitScanRecord:
         return bool(self.warnings)
 
 
+def _binary_path() -> str | None:
+    """
+    Locate rkhunter without requiring the *user* to be able to execute it.
+
+    Arch installs /usr/bin/rkhunter as 0700 root-only (it runs as root and
+    reads the whole filesystem), so shutil.which() - which checks X_OK for
+    the current user - reports it missing on a machine where pacman says it
+    is installed. Detection therefore falls back to a plain existence check
+    in the PATH; execution still happens through pkexec/the helper as root,
+    where the mode is sufficient.
+    """
+    found = shutil.which("rkhunter")
+    if found:
+        return found
+    candidates = [Path(directory) / "rkhunter" for directory in os.environ.get("PATH", "").split(os.pathsep)]
+    candidates.append(STANDARD_BIN / "rkhunter")
+    for candidate in candidates:
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except OSError:
+            continue
+    return None
+
+
 def is_installed() -> bool:
-    return shutil.which("rkhunter") is not None
+    return _binary_path() is not None
 
 
 def _database_timestamp() -> str:
