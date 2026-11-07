@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from atropa.backend import aide, apparmor, hardening, migration, privilege, refpolicy_build, selinux
+from atropa.backend import aide, apparmor, hardening, lockdown, migration, privilege, refpolicy_build, rootkit, selinux
 
 
 @dataclass
@@ -149,6 +149,9 @@ def privilege_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(migration, "OLD_USER_DATA_DIR", tmp_path / "archyast")
     monkeypatch.setattr(refpolicy_build, "ATROPA_POLICY_DIR", tmp_path / "refpolicy-atropa")
     monkeypatch.setattr(aide, "LAST_CHECK_FILE", tmp_path / "aide_last_check.json")
+    monkeypatch.setattr(lockdown, "LOCKDOWN_FILE", tmp_path / "lockdown.json")
+    monkeypatch.setattr(rootkit, "LAST_SCAN_FILE", tmp_path / "rootkit_last_scan.json")
+    monkeypatch.setattr(rootkit, "DB_DIR", tmp_path / "rkhunter-db")
 
     return SimpleNamespace(backup_dir=backup_dir, manifest=manifest, log_path=log_path, home=home)
 

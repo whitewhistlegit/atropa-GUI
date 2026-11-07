@@ -89,6 +89,7 @@ CATALOG: list[Dependency] = [
     Dependency("usbguard", "Hardening", "USB device allow-listing (BadUSB protection)", "usbguard"),
     Dependency("auditctl", "Hardening", "Kernel audit logging status", "audit"),
     Dependency("arch-audit", "Hardening", "Scans installed packages against the Arch Security Team's CVE feed", "arch-audit"),
+    Dependency("rkhunter", "Lockdown & Scans", "Scans for known rootkits and suspicious file changes", "rkhunter"),
     Dependency("fwupdmgr", "Firmware", "List firmware devices and apply updates through fwupd", "fwupd"),
     Dependency("smartctl", "Disk Health", "Read SMART health from disks", "smartmontools"),
     Dependency("fstrim", "Disk Health", "Periodic TRIM via fstrim.timer", "util-linux"),

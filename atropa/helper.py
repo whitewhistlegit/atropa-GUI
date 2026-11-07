@@ -140,6 +140,18 @@ FILE_COMMANDS = frozenset(
     }
 )
 
+# Operations with a *fixed* argv built here, not by the caller. The rootkit
+# scanner is the first of these: admitting `rkhunter` to ALLOWED would let a
+# cached authorization run arbitrary rkhunter flags, including rewriting its
+# baseline; these three names take no arguments at all.
+OPERATIONS = frozenset({"rootkit-scan", "rootkit-update", "rootkit-baseline"})
+
+ROOTKIT_ARGV = {
+    "rootkit-scan": ["--check", "--sk", "--nocolors", "--rwo"],
+    "rootkit-update": ["--update", "--nocolors"],
+    "rootkit-baseline": ["--propupd", "--nocolors"],
+}
+
 _MODE_RE = re.compile(r"^[0-7]{3,4}$")
 _OWNER_RE = re.compile(r"^(\d+):(\d+)$")
 
@@ -495,6 +507,10 @@ def handle(argv: list[str], data: bytes = b"") -> int | None:
         return _pacnew_apply(argv)
     if program == "pacnew-remove":
         return _pacnew_remove(argv)
+    if program in OPERATIONS:
+        if len(argv) != 1:
+            raise Refused(f"{program} takes no arguments")
+        return _exec(_system_binary("rkhunter"), ["rkhunter", *ROOTKIT_ARGV[program]])
 
     return None  # an allowlisted bare command: main() execs it
 
