@@ -54,6 +54,7 @@ Each sidebar entry is a module:
 | **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
 | **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |
 | **Disk Health** | SMART health (one-click root read where the kernel requires it), filesystem usage, `fstrim.timer`, journal/cache/coredump cleanup |
+| **Package History** | Recent pacman transactions from `pacman.log`; roll one back by reinstalling the versions it replaced from the package cache (asks every time). Clean keeps the previous version so this stays possible |
 | **Firmware** | fwupd devices and updates, streamed |
 | **Mirrors** | Rank Arch mirrors with `reflector` and replace the mirrorlist (backed up first) |
 | **Power** | Power profiles, battery charge limits, zram swap, hibernation feasibility |
