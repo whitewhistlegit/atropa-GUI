@@ -252,8 +252,30 @@ def remove(package_names: list[str], purge_config: bool = False) -> CommandResul
 
 
 def clean_cache() -> CommandResult:
-    """pacman -Sc : remove uninstalled/old packages from the cache."""
-    return run_privileged(["pacman", "-Sc", "--noconfirm"])
+    """
+    Shrink the package cache but keep a way back: with pacman-contrib's
+    paccache, keep the installed and the previous version of every package
+    and drop packages that are no longer installed. `pacman -Sc` (the
+    fallback) deletes every old version, which makes a rollback from the
+    cache impossible - the result says so.
+    """
+    if shutil.which("paccache"):
+        result = run_privileged(["paccache", "-r", "-k2"])
+        if not result.ok:
+            return result
+        uninstalled = run_privileged(["paccache", "-r", "-u", "-k0"])
+        return uninstalled if not uninstalled.ok else CommandResult(
+            0, (result.stdout + uninstalled.stdout).strip(), ""
+        )
+    result = run_privileged(["pacman", "-Sc", "--noconfirm"])
+    if result.ok:
+        return CommandResult(
+            0,
+            (result.stdout.strip() + "\nOld versions were removed too, so recent upgrades can't be rolled back "
+             "from the cache. Install pacman-contrib to keep the previous version next time.").strip(),
+            result.stderr,
+        )
+    return result
 
 
 # ------------------------------------------------------- repositories --

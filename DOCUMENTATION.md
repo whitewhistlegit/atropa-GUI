@@ -123,6 +123,37 @@ prompt. Phases 1 and 2 bound that to Atropa's own non-root-equivalent
 operations with validated arguments; see "Operation-level privileged helper"
 below for the threat model and what remains.
 
+### Package rollback (`backend/rollback.py`, Package History page)
+
+Undoes a recent pacman transaction on any filesystem. `parse_log()` reads
+`/var/log/pacman.log` into completed transactions (the command from the
+preceding `[PACMAN] Running` line, then every `upgraded`, `downgraded`,
+`installed`, `removed`, `reinstalled` line up to `transaction completed`;
+failed and interrupted transactions are dropped). `plan()` turns one into
+the `pacman -U` file list that reinstalls the versions it replaced, from
+`/var/cache/pacman/pkg` (exact `name-version-arch.pkg.tar.{zst,xz}`, arch
+from `uname` or `any`), and refuses rather than half-does it:
+
+- a package now at a different version than the transaction left it is
+  **stale** - the plan would describe a state the system isn't in;
+- a version missing from the cache blocks the rollback: half a rollback is
+  a partial upgrade. Packages that came with the install image were never
+  downloaded, so the first big upgrade usually can't be rolled back;
+- packages the transaction *installed* stay (something may depend on them
+  by now), and packages removed since are skipped, not counted as stale.
+
+`apply()` runs one `pacman -U --noconfirm FILES...`. The helper accepts `-U`
+only for regular files directly in the root-owned cache (no symlinks, no
+`.sig`, no `download-*` temp dirs) and puts it in the ASK tier: installing
+older versions is a downgrade and never happens on a remembered
+authorization.
+
+`pacman.clean_cache()` used to run `pacman -Sc`, which deletes every old
+version and with it any chance of a rollback. With pacman-contrib it now
+runs `paccache -r -k2` (installed and previous version) and
+`paccache -r -u -k0` (uninstalled packages); without it, `pacman -Sc` with a
+note in the result that recent upgrades can't be rolled back.
+
 ### Operation-level privileged helper (design)
 
 Phases 1 and 2 are implemented; phase 3 (root-owned backups) is the

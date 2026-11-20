@@ -54,6 +54,7 @@ from atropa.ui.pages.quicksetup import QuickSetupPage  # noqa: E402
 from atropa.ui.pages.security import SecurityPage  # noqa: E402
 from atropa.ui.pages.selinux import SelinuxPage  # noqa: E402
 from atropa.ui.pages.refpolicy_build import RefpolicyBuildPage  # noqa: E402
+from atropa.ui.pages.rollback import RollbackPage  # noqa: E402
 from atropa.ui.pages.selinux_load import SelinuxLoadPage  # noqa: E402
 from atropa.ui.pages.selinux_review import SelinuxReviewPage  # noqa: E402
 from atropa.ui.pages.services import ServicesPage  # noqa: E402
@@ -161,6 +162,10 @@ MODULES = [
     Module(
         "pacnew", "Config Changes", "document-revert-symbolic", PacnewPage,
         "Review .pacnew and .pacsave files after upgrades", "maintenance",
+    ),
+    Module(
+        "rollback", "Package History", "edit-undo-symbolic", RollbackPage,
+        "Roll back a recent pacman transaction from the cache", "maintenance",
     ),
     Module(
         "boot_report", "Boot Report", "dialog-warning-symbolic", BootReportPage,

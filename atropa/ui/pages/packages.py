@@ -35,7 +35,7 @@ class PackagesPage(BasePage):
         self.updates_row.add_suffix(upgrade_btn)
         actions_group.add(self.updates_row)
 
-        clean_row = Adw.ActionRow(title="Clean package cache", subtitle="Remove old/uninstalled packages from /var/cache/pacman")
+        clean_row = Adw.ActionRow(title="Clean package cache", subtitle="Keeps the previous version of each package, so an upgrade can still be rolled back")
         clean_btn = Gtk.Button(label="Clean")
         clean_btn.set_valign(Gtk.Align.CENTER)
         clean_btn.connect("clicked", self._on_clean_clicked)
@@ -434,7 +434,8 @@ class PackagesPage(BasePage):
     def _on_clean_clicked(self, _btn: Gtk.Button) -> None:
         self.confirm(
             "Clean package cache?",
-            "This removes cached package files that are no longer installed.",
+            "This removes cached packages that are no longer installed and every version older than the "
+            "previous one. The previous version stays, so Package History can still roll back the last upgrade.",
             "Clean",
             lambda: self.run_action(pacman.clean_cache, self.handle_command_result),
         )

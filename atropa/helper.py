@@ -593,9 +593,27 @@ def _nmcli(args):
     raise Refused("nmcli arguments aren't a shape Atropa uses")
 
 
+PACKAGE_CACHE = "/var/cache/pacman/pkg/"
+_PACKAGE_FILE_RE = re.compile(r"^[^/]+\.pkg\.tar\.(?:zst|xz)$")
+
+
+def _cached_package(path: str) -> str:
+    """A package file directly in pacman's root-owned cache, not a symlink."""
+    target = _under(path, (PACKAGE_CACHE,), f"package in {PACKAGE_CACHE}")
+    name = target[len(PACKAGE_CACHE):]
+    if not _PACKAGE_FILE_RE.match(name) or not os.path.isfile(target):
+        raise Refused(f"{target} isn't a package file in {PACKAGE_CACHE}")
+    return target
+
+
 def _pacman(args):
-    # Repository operations only: no -U (a package file is arbitrary root
-    # code), no --config/--root/--dbpath/--hookdir/--cachedir.
+    # Repository operations by package name. -U only takes files that
+    # pacman itself downloaded into its root-owned cache (a rollback): any
+    # other package file is arbitrary root code. Installing older versions
+    # is a downgrade, so that shape always asks. No --config, --root,
+    # --dbpath, --hookdir or --cachedir anywhere.
+    if len(args) >= 3 and args[:2] == ["-U", "--noconfirm"]:
+        return ASK, ["-U", "--noconfirm", *(_cached_package(path) for path in args[2:])]
     shapes = {
         ("-Syu", "--noconfirm"): 0,
         ("-Sc", "--noconfirm"): 0,
@@ -812,6 +830,9 @@ COMMANDS = {
     "make": _make,
     "nmcli": _nmcli,
     "pacman": _pacman,
+    # Cache cleanup that keeps the previous version of every installed
+    # package (so a rollback stays possible) and drops uninstalled ones.
+    "paccache": _keep_exact(("-r", "-k2"), ("-r", "-u", "-k0")),
     "restorecon": _restorecon,
     "sbctl": _sbctl,
     "semanage": _semanage,
