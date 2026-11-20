@@ -160,8 +160,8 @@ def test_home_directory_skips_system_accounts_and_nobody(monkeypatch):
 
 def test_empty_password_field_detected(fake_run, fake_which):
     fake_run.set_response(
-        ["pkexec", "cat", "/etc/shadow"],
-        stdout="root:$6$abc:19700:0:99999:7:::\nghost::19700:0:99999:7:::\n",
+        ["pkexec", "shadow-status"],
+        stdout="root:set\nghost:empty\nbin:locked\n",
     )
     result = ah._check_empty_passwords()
     assert result.status == "fail"
@@ -170,15 +170,15 @@ def test_empty_password_field_detected(fake_run, fake_which):
 
 def test_no_empty_password_fields_passes(fake_run, fake_which):
     fake_run.set_response(
-        ["pkexec", "cat", "/etc/shadow"],
-        stdout="root:$6$abc:19700:0:99999:7:::\nalice:$6$def:19700:0:99999:7:::\n",
+        ["pkexec", "shadow-status"],
+        stdout="root:set\nalice:set\nbin:locked\n",
     )
     result = ah._check_empty_passwords()
     assert result.status == "pass"
 
 
 def test_empty_password_check_handles_unreadable_shadow(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "cat", "/etc/shadow"], returncode=1, stderr="permission denied")
+    fake_run.set_response(["pkexec", "shadow-status"], returncode=1, stderr="permission denied")
     result = ah._check_empty_passwords()
     assert result.status == "info"
 
@@ -252,7 +252,7 @@ def test_file_perms_missing_file_is_info(monkeypatch):
 # --------------------------------------------------------------- scan_all --
 
 def test_scan_all_aggregates_every_check(fake_passwd_db, fake_run, fake_which):
-    fake_run.set_response(["pkexec", "cat", "/etc/shadow"], returncode=1)
+    fake_run.set_response(["pkexec", "shadow-status"], returncode=1)
     fake_run.set_response(["pkexec", "cat", "--", "/root/.bash_profile", "/root/.bashrc"], returncode=1)
     results = ah.scan_all()
     keys = {f.key for f in results}

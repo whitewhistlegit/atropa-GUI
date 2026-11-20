@@ -164,6 +164,7 @@ def no_host_helper(monkeypatch, tmp_path):
     the helper opt in by monkeypatching HELPER_PATH themselves.
     """
     monkeypatch.setattr(privilege, "HELPER_PATH", tmp_path / "atropa-helper-not-installed")
+    monkeypatch.setattr(privilege, "ASK_HELPER_PATH", tmp_path / "atropa-helper-ask-not-installed")
 
 
 @pytest.fixture(autouse=True)

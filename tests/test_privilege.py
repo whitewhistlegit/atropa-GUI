@@ -685,9 +685,9 @@ def test_run_privileged_goes_through_the_helper_when_installed(tmp_path, monkeyp
     helper = _installed_helper(tmp_path)
     monkeypatch.setattr(privilege, "HELPER_PATH", helper)
 
-    privilege.run_privileged(["true"])
+    privilege.run_privileged(["systemctl", "daemon-reload"])
 
-    assert fake_run.last_call() == ["pkexec", str(helper), "true"]
+    assert fake_run.last_call() == ["pkexec", str(helper), "systemctl", "daemon-reload"]
 
 
 def test_missing_helper_keeps_the_old_per_command_pkexec(tmp_path, monkeypatch, fake_run, fake_which):
@@ -714,6 +714,48 @@ def test_helper_is_used_with_the_sudo_fallback_too(tmp_path, monkeypatch, fake_r
     fake_which.discard("pkexec")
     fake_which.add("sudo")
 
-    privilege.run_privileged(["true"])
+    privilege.run_privileged(["systemctl", "daemon-reload"])
 
-    assert fake_run.last_call() == ["sudo", "-A", str(helper), "true"]
+    assert fake_run.last_call() == ["sudo", "-A", str(helper), "systemctl", "daemon-reload"]
+
+
+def test_root_equivalent_operations_go_to_the_ask_helper(tmp_path, monkeypatch, fake_run, fake_which):
+    keep = _installed_helper(tmp_path)
+    ask = tmp_path / "atropa-helper-ask"
+    ask.write_bytes(keep.read_bytes())
+    ask.chmod(0o755)
+    monkeypatch.setattr(privilege, "HELPER_PATH", keep)
+    monkeypatch.setattr(privilege, "ASK_HELPER_PATH", ask)
+
+    privilege.run_privileged(["setenforce", "0"])
+    privilege.run_privileged(["tee", "/etc/pacman.conf"], input_text="")
+    privilege.run_privileged(["systemctl", "daemon-reload"])
+
+    assert fake_run.calls[-3:] == [
+        ["pkexec", str(ask), "setenforce", "0"],
+        ["pkexec", str(ask), "tee", "/etc/pacman.conf"],
+        ["pkexec", str(keep), "systemctl", "daemon-reload"],
+    ]
+
+
+def test_authenticate_is_never_answered_by_a_remembered_authorization(tmp_path, monkeypatch, fake_run, fake_which):
+    # It unlocks controls that must not be within reach without a password.
+    keep = _installed_helper(tmp_path)
+    ask = tmp_path / "atropa-helper-ask"
+    ask.write_bytes(keep.read_bytes())
+    ask.chmod(0o755)
+    monkeypatch.setattr(privilege, "HELPER_PATH", keep)
+    monkeypatch.setattr(privilege, "ASK_HELPER_PATH", ask)
+
+    privilege.authenticate()
+
+    assert fake_run.last_call() == ["pkexec", str(ask), "true"]
+
+
+def test_an_install_without_the_ask_helper_refuses_before_prompting(tmp_path, monkeypatch, fake_run, fake_which):
+    monkeypatch.setattr(privilege, "HELPER_PATH", _installed_helper(tmp_path))
+    monkeypatch.setattr(privilege, "ASK_HELPER_PATH", tmp_path / "missing")
+
+    with pytest.raises(privilege.PrivilegeError, match="asks for your password every time"):
+        privilege.run_privileged(["useradd", "-m", "-s", "/bin/bash", "bob"])
+    assert fake_run.calls == []

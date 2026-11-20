@@ -34,6 +34,10 @@ LOG_PATH = Path.home() / ".local" / "share" / "atropa" / "actions.log"
 # pkexec picks up the annotated `auth_admin_keep` action and one password
 # covers a whole operation instead of one prompt per command.
 HELPER_PATH = Path("/usr/lib/atropa/atropa-helper")
+# The same helper installed a second time, with a plain auth_admin action:
+# root-equivalent operations (see helper.needs_fresh_auth) go through it
+# and ask for the password every time.
+ASK_HELPER_PATH = Path("/usr/lib/atropa/atropa-helper-ask")
 
 BACKUP_DIR = Path.home() / ".local" / "share" / "atropa" / "backups"
 BACKUP_MANIFEST = BACKUP_DIR / "manifest.jsonl"
@@ -192,15 +196,19 @@ def run_unprivileged(argv: list[str], input_text: str | None = None, timeout: in
     return _run(argv, input_text=input_text, timeout=timeout)
 
 
-def helper_available() -> bool:
-    """True when the root-owned helper is installed and executable."""
+def _installed(path: Path) -> bool:
     try:
-        return HELPER_PATH.is_file() and os.access(HELPER_PATH, os.X_OK)
+        return path.is_file() and os.access(path, os.X_OK)
     except OSError:
         return False
 
 
-def _resolve_privileged_prefix() -> list[str]:
+def helper_available() -> bool:
+    """True when the root-owned helper is installed and executable."""
+    return _installed(HELPER_PATH)
+
+
+def _resolve_privileged_prefix(argv: list[str]) -> list[str]:
     """
     Picks the pkexec/sudo prefix for a privileged command, or raises if
     neither is available. Shared by run_privileged() and
@@ -211,6 +219,11 @@ def _resolve_privileged_prefix() -> list[str]:
     the first authentication is remembered for the next few minutes. Without
     it - a source checkout, or an install that skipped install.sh - the old
     per-command pkexec behavior is kept rather than failing outright.
+
+    Root-equivalent operations go to the ask helper instead, whose action
+    is never remembered. An install from before it existed has only the
+    keep helper, which refuses them; say so here rather than after a
+    password prompt.
     """
     if shutil.which("pkexec"):
         prefix = ["pkexec"]
@@ -221,9 +234,18 @@ def _resolve_privileged_prefix() -> list[str]:
             "Neither pkexec nor sudo is available. Install 'polkit' to use "
             "privileged actions in Atropa."
         )
-    if helper_available():
-        return prefix + [str(HELPER_PATH)]
-    return prefix
+    if not helper_available():
+        return prefix
+    from atropa import helper as helper_policy  # the installed helper's own rules
+
+    if helper_policy.needs_fresh_auth(argv):
+        if not _installed(ASK_HELPER_PATH):
+            raise PrivilegeError(
+                f"This change needs {ASK_HELPER_PATH}, which asks for your password every time; "
+                "reinstall Atropa (the package or install.sh) to get it."
+            )
+        return prefix + [str(ASK_HELPER_PATH)]
+    return prefix + [str(HELPER_PATH)]
 
 
 def run_privileged(argv: list[str], input_text: str | None = None, timeout: int = 600) -> CommandResult:
@@ -235,7 +257,7 @@ def run_privileged(argv: list[str], input_text: str | None = None, timeout: int 
     Falls back to `sudo -A` (askpass) if pkexec isn't present, and raises
     if neither is available rather than silently doing something insecure.
     """
-    full_argv = _resolve_privileged_prefix() + argv
+    full_argv = _resolve_privileged_prefix(argv) + argv
     return _run(full_argv, input_text=input_text, timeout=timeout)
 
 
@@ -333,7 +355,7 @@ def run_privileged_streaming(
     CommandResult split the way run_privileged() gives - the returned
     CommandResult.stderr is always empty; .stdout holds everything.
     """
-    full_argv = _resolve_privileged_prefix() + argv
+    full_argv = _resolve_privileged_prefix(argv) + argv
     logger.info("RUN (streaming, privileged): %s", " ".join(full_argv))
     return _run_streaming(full_argv, on_line, input_text, timeout)
 

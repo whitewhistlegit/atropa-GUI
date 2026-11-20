@@ -43,7 +43,7 @@ def display():
 
     from atropa.backend.privilege import PrivilegeError
 
-    def no_privileged_command():
+    def no_privileged_command(*_argv):
         # Belt and braces: construction must never raise a polkit dialog on
         # a developer's desktop (or hang on a CI runner).
         raise PrivilegeError("privileged commands are disabled in the UI smoke test")

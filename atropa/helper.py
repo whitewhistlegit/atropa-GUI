@@ -34,10 +34,21 @@ policy of paths Atropa is allowed to manage. In particular:
   back to the invoking user inside that user's home; `cp` only copies into
   the AIDE database or Atropa's plugin directory; `mkdir`/`touch` only the
   paths Atropa creates.
-- Everything else must still be a bare command name from a much smaller
-  allowlist (systemctl, pacman, the user/group tools, ...). That list is
-  phase 2 of the operation-level migration and is documented in
-  DOCUMENTATION.md.
+- Every other program has its own validator in COMMANDS: the exact
+  argument shapes Atropa uses, nothing else (no `pacman -U`, no
+  `systemctl link`, no `make` outside `install load`, no `cat /etc/shadow`).
+  An unknown program or shape is refused.
+
+Two tiers, because some of Atropa's own operations are root-equivalent by
+nature (a password for root, a member for wheel, a policy module, a
+pacman.conf HookDir) and no argument check makes them safe to cache:
+
+- KEEP: everything else. Installed as ``atropa-helper``, whose polkit action
+  is ``auth_admin_keep``.
+- ASK: the root-equivalent operations. The same file installed again as
+  ``atropa-helper-ask``, whose action is plain ``auth_admin``: it asks every
+  time. The keep helper refuses ASK operations; privilege.py sends them to
+  the ask helper (``needs_fresh_auth()`` is the shared answer).
 
 The policy below is deliberately exact-path rather than "anything under
 /etc": a cached authorization must not turn into "write any root-owned
@@ -51,23 +62,13 @@ import os
 import re
 import sys
 
-# Bare command names still executed through a fixed PATH. File-manipulating
-# commands are absent on purpose: this module handles or validates them.
-ALLOWED = frozenset(
-    {
-        "aa-complain", "aa-disable", "aa-enforce", "aa-status",
-        "aide", "apparmor_parser", "auditctl", "augenrules", "ausearch",
-        "bootctl", "cat", "chpasswd",
-        "firewall-cmd", "firewall-offline-cmd", "flatpak",
-        "fwupdmgr", "grep", "groupadd", "groupdel", "grub-mkconfig",
-        "hostnamectl", "journalctl", "locale-gen", "localectl",
-        "make", "nmcli", "pacman", "restorecon",
-        "sbctl", "semanage", "semodule", "setenforce", "setsebool",
-        "smartctl", "sshd", "systemctl", "systemd-tmpfiles", "sysctl",
-        "timedatectl", "true", "ufw", "usbguard",
-        "useradd", "userdel", "usermod", "visudo",
-    }
-)
+# The two installed copies of this file. Which one is running decides the
+# tier: the kernel hands the script the path it was exec'd from, so a caller
+# can't make the keep helper believe it is the ask helper.
+KEEP_HELPER_PATH = "/usr/lib/atropa/atropa-helper"
+ASK_HELPER_PATH = "/usr/lib/atropa/atropa-helper-ask"
+KEEP = "keep"
+ASK = "ask"
 
 # Exact files Atropa writes (and may restore a backup over).
 WRITE_FILES = frozenset(
@@ -98,6 +99,31 @@ WRITE_FILES = frozenset(
 # /etc/selinux/config -> config.refpolicy-arch when no config exists yet,
 # which is exactly the state after setting SELinux up from scratch.
 SYMLINKED_FILES = {"/etc/selinux/config": "/etc/selinux/config."}
+
+# Managed files whose content can run code as root or open a login path:
+# pacman.conf (HookDir, unsigned repos), sshd_config (AuthorizedKeysCommand),
+# SELinux mode, the kernel command line (init=), sysctl (core_pattern,
+# modprobe), fail2ban actions (shell commands), AppArmor profiles. Writes to
+# these go through the ask helper only.
+ASK_WRITE_FILES = frozenset(
+    {
+        "/etc/default/grub",
+        "/etc/fail2ban/jail.d/sshd.local",
+        "/etc/pacman.conf",
+        "/etc/selinux/config",
+        "/etc/ssh/sshd_config",
+        "/etc/sysctl.d/99-atropa-hardening.conf",
+    }
+)
+ASK_WRITE_DIRS = ("/etc/apparmor.d/",)
+
+# Root-only files Atropa reads (besides the ones it manages, which it reads
+# to back them up). /etc/shadow is deliberately absent: shadow-status
+# answers the only question Atropa asks of it without the hashes.
+READ_FILES = frozenset({"/root/.bash_profile", "/root/.bashrc", "/etc/profile"})
+
+# Where boot files live: the ESP is /efi, /boot or /boot/efi.
+BOOT_DIRS = ("/boot/", "/efi/")
 
 # Directories Atropa writes into, with a trailing slash so prefix matching
 # cannot be fooled by "/etc/apparmor.d-evil".
@@ -152,8 +178,8 @@ def resolve(program: str, directories: tuple[str, ...] = SAFE_PATH) -> str:
     """Absolute path of `program` under `directories`, or Refused."""
     if not program or "/" in program or program in {".", ".."}:
         raise Refused(f"{program!r} isn't a bare command name")
-    if program not in ALLOWED:
-        raise Refused(f"{program!r} isn't in Atropa's privileged allowlist")
+    if program not in COMMANDS:
+        raise Refused(f"{program!r} isn't a program Atropa runs as root")
     for directory in directories:
         candidate = os.path.join(directory, program)
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
@@ -165,10 +191,11 @@ def resolve(program: str, directories: tuple[str, ...] = SAFE_PATH) -> str:
 
 
 def check(argv: list[str], directories: tuple[str, ...] = SAFE_PATH) -> list[str]:
-    """Resolve an allowlisted command's argv (kept for tests and callers)."""
+    """Validate an executed command's argv and resolve its program."""
     if not argv:
         raise Refused("no command given")
-    return [resolve(argv[0], directories), *argv[1:]]
+    _tier, args = validate_command(argv)
+    return [resolve(argv[0], directories), *args]
 
 
 def _system_binary(name: str) -> str:
@@ -369,6 +396,502 @@ def _pacnew_remove(argv: list[str]) -> int:
     return 0
 
 
+
+# ------------------------------------------------------------- command shapes --
+#
+# One validator per program: it receives argv[1:] and returns (tier, args)
+# for a shape Atropa uses, or raises Refused. Names and values that end up
+# as separate argv entries can't inject options when they can't start with
+# "-", which every free-form value below checks.
+
+_UNIT_RE = re.compile(r"^[A-Za-z0-9@_][A-Za-z0-9@._:\\-]*$")  # a unit *name*: no "/" (no unit files from $HOME)
+_PACKAGE_RE = re.compile(r"^(?:[a-z0-9][a-z0-9._-]*/)?[a-z0-9@_+][a-z0-9@._+-]*$")
+_USER_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}\$?$")
+_GROUP_LIST_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}(,[a-z_][a-z0-9_-]{0,31})*$")
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
+_LOCALE_VALUE_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@-]*$")
+_TIMEZONE_RE = re.compile(r"^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+)*$")
+_PORT_SPEC_RE = re.compile(r"^\d{1,5}(?:[:-]\d{1,5})?/(?:tcp|udp)$")
+_BOOLEAN_RE = re.compile(r"^[a-z0-9_]+$")
+_MODULE_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_SEUSER_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+_SIZE_RE = re.compile(r"^\d+[KMG]?$")
+_DEVICE_RE = re.compile(r"^/dev/[A-Za-z0-9_][A-Za-z0-9/_-]*$")
+
+
+def _value(value: str, pattern: re.Pattern, what: str) -> str:
+    if not isinstance(value, str) or not pattern.match(value) or ".." in value:
+        raise Refused(f"{value!r} isn't a valid {what}")
+    return value
+
+
+def _free_text(value: str, what: str) -> str:
+    """A value that can be anything readable, but not an option or a line break."""
+    if not isinstance(value, str) or value.startswith("-") or any(ch in value for ch in "\n\r\0"):
+        raise Refused(f"{value!r} isn't a valid {what}")
+    return value
+
+
+def _shapes(args: list[str], *allowed: tuple[str, ...]) -> list[str]:
+    if tuple(args) not in allowed:
+        raise Refused(f"arguments {args!r} aren't a shape Atropa uses")
+    return list(args)
+
+
+def _keep_exact(*allowed: tuple[str, ...]):
+    return lambda args: (KEEP, _shapes(args, *allowed))
+
+
+def _under(path: str, prefixes: tuple[str, ...], what: str) -> str:
+    target = _resolved(path)
+    if not target.startswith(prefixes):
+        raise Refused(f"{target} isn't a {what}")
+    return target
+
+
+def _apparmor_mode(args):
+    if len(args) != 1:
+        raise Refused("expected one profile path")
+    return KEEP, [_under(args[0], ("/etc/apparmor.d/",), "profile under /etc/apparmor.d")]
+
+
+def _apparmor_parser(args):
+    if len(args) != 2 or args[0] != "-r":
+        raise Refused("apparmor_parser must be `-r PROFILE`")
+    return KEEP, ["-r", _under(args[1], ("/etc/apparmor.d/",), "profile under /etc/apparmor.d")]
+
+
+def _ausearch(args):
+    if len(args) < 3 or args[0] != "-m" or args[1] not in {"avc", "AVC,APPARMOR_DENIED"} or args[-1] != "--input-logs":
+        raise Refused("ausearch must be `-m avc|AVC,APPARMOR_DENIED [-ts boot] --input-logs`")
+    if args[2:-1] not in ([], ["-ts", "boot"]):
+        raise Refused("ausearch only takes -ts boot")
+    return KEEP, list(args)
+
+
+def _bootctl(args):
+    if args in (["update"], ["install"]):
+        return KEEP, list(args)
+    if len(args) == 2 and args[0] == "set-timeout" and (args[1] == "" or args[1].isdigit()):
+        return KEEP, list(args)
+    raise Refused("bootctl must be update, install or set-timeout N")
+
+
+def _checked_read_path(path: str) -> str:
+    normal = _normal(path)
+    if normal in READ_FILES:
+        return _resolved(path)
+    # Anything Atropa may write it may also read back (backups, diffs).
+    try:
+        return checked_write_path(path)
+    except Refused:
+        raise Refused(f"{normal} isn't a file Atropa reads") from None
+
+
+def _cat(args):
+    paths = args[1:] if args[:1] == ["--"] else args
+    if not paths:
+        raise Refused("cat needs a path")
+    return KEEP, ["--", *(_checked_read_path(path) for path in paths)]
+
+
+def _grep(args):
+    if len(args) == 3 and args[:2] == ["-E", "^menuentry"] and _resolved(args[2]) == "/boot/grub/grub.cfg":
+        return KEEP, list(args)
+    if len(args) == 4 and args[:3] == ["-rH", "--include=*.conf", ""]:
+        loader = _under(args[3], BOOT_DIRS, "boot directory")
+        if os.path.basename(loader) == "loader":
+            return KEEP, [*args[:3], loader]
+    raise Refused("grep only reads grub.cfg's menu entries or a systemd-boot loader directory")
+
+
+def _firewall_cmd(args):
+    if args in (["--list-all"], ["--reload"]):
+        return KEEP, list(args)
+    if len(args) == 3 and args[0] == "--permanent" and args[1] in {"--add-port", "--remove-port"}:
+        return KEEP, ["--permanent", args[1], _value(args[2], _PORT_SPEC_RE, "port")]
+    raise Refused("firewall-cmd only lists, reloads, and adds or removes a port")
+
+
+def _firewall_offline_cmd(args):
+    if len(args) == 1:
+        flag, sep, spec = args[0].partition("=")
+        if sep and flag in {"--add-port", "--remove-port"}:
+            return KEEP, [f"{flag}={_value(spec, _PORT_SPEC_RE, 'port')}"]
+    raise Refused("firewall-offline-cmd only adds or removes a port")
+
+
+def _hostnamectl(args):
+    if len(args) == 2 and args[0] == "set-hostname":
+        return KEEP, ["set-hostname", _value(args[1], _HOSTNAME_RE, "hostname")]
+    raise Refused("hostnamectl must be set-hostname NAME")
+
+
+def _journalctl(args):
+    if len(args) == 1 and args[0].startswith("--vacuum-size="):
+        _value(args[0].split("=", 1)[1], _SIZE_RE, "size")
+        return KEEP, list(args)
+    raise Refused("journalctl only vacuums by size")
+
+
+def _localectl(args):
+    if len(args) == 2 and args[0] in {"set-keymap", "set-x11-keymap"}:
+        return KEEP, [args[0], _value(args[1], _LOCALE_VALUE_RE, "keymap")]
+    if len(args) == 2 and args[0] == "set-locale" and args[1].startswith("LANG="):
+        _value(args[1][5:], _LOCALE_VALUE_RE, "locale")
+        return KEEP, list(args)
+    raise Refused("localectl must be set-locale LANG=..., set-keymap or set-x11-keymap")
+
+
+def _make(args):
+    # The policy build: `make install load` in a source tree. It runs that
+    # tree's Makefile as root, so it is root-equivalent by design.
+    if len(args) == 4 and args[0] == "-C" and args[2:] == ["install", "load"]:
+        source = _resolved(args[1])
+        if not os.path.isdir(source):
+            raise Refused(f"{source} isn't a directory")
+        return ASK, ["-C", source, "install", "load"]
+    raise Refused("make must be `-C DIR install load`")
+
+
+def _ip(value: str, network: bool = False) -> str:
+    import ipaddress
+
+    try:
+        ipaddress.ip_interface(value) if network else ipaddress.ip_address(value)
+    except ValueError:
+        raise Refused(f"{value!r} isn't an IP address") from None
+    return value
+
+
+def _nmcli(args):
+    if args == ["networking", "on"] or args == ["networking", "off"]:
+        return KEEP, list(args)
+    head = args[1:] if args[:1] == ["--ask"] else args
+    if len(head) == 4 and head[:3] == ["device", "wifi", "connect"]:
+        return KEEP, [*args[: len(args) - len(head)], *head[:3], _free_text(head[3], "network name")]
+    if len(args) == 3 and args[:2] == ["device", "disconnect"]:
+        return KEEP, ["device", "disconnect", _free_text(args[2], "device")]
+    if len(args) == 3 and args[:2] == ["connection", "up"]:
+        return KEEP, ["connection", "up", _free_text(args[2], "connection")]
+    if len(args) == 5 and args[:2] == ["connection", "modify"] and args[3:] == ["ipv4.method", "auto"]:
+        return KEEP, ["connection", "modify", _free_text(args[2], "connection"), "ipv4.method", "auto"]
+    if (
+        len(args) == 11
+        and args[:2] == ["connection", "modify"]
+        and args[3] == "ipv4.addresses" and args[5] == "ipv4.gateway" and args[7] == "ipv4.dns"
+        and args[9:] == ["ipv4.method", "manual"]
+    ):
+        dns = args[8].split(",") if args[8] else []
+        for server in dns:
+            _ip(server)
+        return KEEP, [
+            "connection", "modify", _free_text(args[2], "connection"),
+            "ipv4.addresses", _ip(args[4], network=True), "ipv4.gateway", _ip(args[6]),
+            "ipv4.dns", args[8], "ipv4.method", "manual",
+        ]
+    raise Refused("nmcli arguments aren't a shape Atropa uses")
+
+
+def _pacman(args):
+    # Repository operations only: no -U (a package file is arbitrary root
+    # code), no --config/--root/--dbpath/--hookdir/--cachedir.
+    shapes = {
+        ("-Syu", "--noconfirm"): 0,
+        ("-Sc", "--noconfirm"): 0,
+        ("-S", "--needed", "--noconfirm"): 1,
+        ("-Syu", "--needed", "--noconfirm"): 1,
+        ("-Rs", "--noconfirm"): 1,
+        ("-Rns", "--noconfirm"): 1,
+    }
+    for prefix, minimum in shapes.items():
+        if tuple(args[: len(prefix)]) == prefix:
+            packages = args[len(prefix):]
+            if (minimum == 0 and packages) or (minimum and not packages):
+                break
+            return KEEP, [*prefix, *(_value(name, _PACKAGE_RE, "package name") for name in packages)]
+    raise Refused("pacman only syncs, installs, removes or cleans by package name")
+
+
+def _restorecon(args):
+    if len(args) == 2 and args[0] in {"-v", "-Rv"}:
+        return KEEP, [args[0], _normal(args[1])]
+    raise Refused("restorecon must be -v|-Rv PATH")
+
+
+def _sbctl(args):
+    if args in (["create-keys"], ["verify", "--json"], ["sign-all"]):
+        return KEEP, list(args)
+    if len(args) == 3 and args[:2] == ["sign", "-s"]:
+        # Only boot files: signing a file from $HOME with your own keys
+        # would make it bootable under Secure Boot.
+        return KEEP, ["sign", "-s", _under(args[2], BOOT_DIRS, "file under /boot or /efi")]
+    if args in (["enroll-keys", "--microsoft"], ["enroll-keys", "--no-microsoft"]):
+        return ASK, list(args)  # changes the firmware's trusted keys
+    raise Refused("sbctl arguments aren't a shape Atropa uses")
+
+
+def _semanage(args):
+    if (
+        len(args) == 9 and args[0] == "login" and args[1] == "-S" and args[3] == "-N"
+        and args[4] in {"-a", "-m"} and args[5] == "-s" and args[8] == "__default__"
+    ):
+        _value(args[2], _MODULE_RE, "policy name")
+        _value(args[6], _SEUSER_RE, "SELinux user")
+        return ASK, list(args)
+    raise Refused("semanage only maps __default__ in a named policy store")
+
+
+def _semodule(args):
+    if args == ["-l"]:
+        return KEEP, ["-l"]
+    if len(args) >= 2 and args[0] == "-i":
+        paths = [_resolved(path) for path in args[1:]]
+        for path in paths:
+            if not path.endswith(".pp") or not os.path.isfile(path):
+                raise Refused(f"{path} isn't a compiled .pp module")
+        return ASK, ["-i", *paths]
+    if len(args) == 2 and args[0] == "-r":
+        return ASK, ["-r", _value(args[1], _MODULE_RE, "module name")]
+    raise Refused("semodule only lists, installs .pp files or removes a module")
+
+
+def _setsebool(args):
+    rest = args[1:] if args[:1] == ["-P"] else args
+    if len(rest) == 2 and rest[1] in {"on", "off"} and "=" not in rest[0]:
+        return KEEP, [*args[: len(args) - 2], _value(rest[0], _BOOLEAN_RE, "boolean"), rest[1]]
+    if rest and all("=" in item for item in rest):
+        for item in rest:
+            name, _sep, value = item.partition("=")
+            _value(name, _BOOLEAN_RE, "boolean")
+            if value not in {"on", "off"}:
+                raise Refused(f"{item!r} isn't name=on|off")
+        return KEEP, list(args)
+    raise Refused("setsebool must be [-P] NAME on|off or [-P] NAME=on|off ...")
+
+
+def _smartctl(args):
+    if len(args) == 3 and args[:2] == ["-H", "--json"]:
+        return KEEP, ["-H", "--json", _value(args[2], _DEVICE_RE, "device")]
+    raise Refused("smartctl must be -H --json DEVICE")
+
+
+def _systemctl(args):
+    if args == ["daemon-reload"]:
+        return KEEP, ["daemon-reload"]
+    verbs = {"start", "stop", "restart", "try-reload-or-restart", "enable", "disable"}
+    rest = [arg for arg in args[1:] if arg != "--now"]
+    now = len(rest) != len(args) - 1
+    if args and args[0] in verbs and len(rest) == 1 and (not now or args[0] in {"enable", "disable"}):
+        return KEEP, list(args[:1]) + [arg if arg == "--now" else _value(arg, _UNIT_RE, "unit name") for arg in args[1:]]
+    raise Refused("systemctl must be daemon-reload or VERB UNIT (enable/disable may add --now)")
+
+
+def _timedatectl(args):
+    if len(args) == 2 and args[0] == "set-timezone":
+        return KEEP, ["set-timezone", _value(args[1], _TIMEZONE_RE, "time zone")]
+    if args in (["set-ntp", "true"], ["set-ntp", "false"]):
+        return KEEP, list(args)
+    raise Refused("timedatectl must be set-timezone ZONE or set-ntp true|false")
+
+
+def _ufw(args):
+    if args in (["status", "verbose"], ["--force", "enable"], ["disable"]):
+        return KEEP, list(args)
+    if len(args) == 2 and args[0] in {"allow", "deny"}:
+        return KEEP, [args[0], _value(args[1], _PORT_SPEC_RE, "port")]
+    raise Refused("ufw only reports status, enables, disables, and allows or denies a port")
+
+
+def _shell(value: str) -> str:
+    try:
+        with open("/etc/shells", encoding="utf-8") as handle:
+            shells = {line.strip() for line in handle if line.strip() and not line.startswith("#")}
+    except OSError:
+        shells = set()
+    if value not in shells:
+        raise Refused(f"{value!r} isn't listed in /etc/shells")
+    return value
+
+
+def _user_options(args: list[str], allowed: dict[str, int]) -> list[str]:
+    """Options as flag/value pairs (value count per flag), validated, user name last."""
+    out: list[str] = []
+    index = 0
+    while index < len(args) - 1:
+        flag = args[index]
+        if flag not in allowed:
+            raise Refused(f"option {flag!r} isn't one Atropa uses")
+        out.append(flag)
+        if allowed[flag]:
+            value = args[index + 1]
+            if flag == "-s":
+                value = _shell(value)
+            elif flag == "-G":
+                value = _value(value, _GROUP_LIST_RE, "group list")
+            elif flag == "-c":
+                value = _free_text(value, "full name")
+                if ":" in value:
+                    raise Refused("a full name can't contain ':'")
+            out.append(value)
+        index += 1 + allowed[flag]
+    if index != len(args) - 1:
+        raise Refused("expected a user name last")
+    return [*out, _value(args[-1], _USER_RE, "user name")]
+
+
+def _useradd(args):
+    return ASK, _user_options(args, {"-m": 0, "-M": 0, "-s": 1, "-c": 1, "-G": 1})
+
+
+def _usermod(args):
+    return ASK, _user_options(args, {"-c": 1, "-s": 1, "-G": 1, "-L": 0, "-U": 0})
+
+
+def _userdel(args):
+    validated = _user_options(args, {"-r": 0})
+    if validated[-1] == "root":
+        raise Refused("root can't be deleted")
+    return ASK, validated
+
+
+def _group(args):
+    if len(args) == 1:
+        return ASK, [_value(args[0], _USER_RE, "group name")]
+    raise Refused("expected one group name")
+
+
+COMMANDS = {
+    "aa-complain": _apparmor_mode,
+    "aa-disable": _apparmor_mode,
+    "aa-enforce": _apparmor_mode,
+    "aa-status": _keep_exact(()),
+    "aide": _keep_exact(("--init",), ("--check",), ("--config-check",)),
+    "apparmor_parser": _apparmor_parser,
+    "auditctl": _keep_exact(("-l",)),
+    "augenrules": _keep_exact(("--load",)),
+    "ausearch": _ausearch,
+    "bootctl": _bootctl,
+    "cat": _cat,
+    "chpasswd": lambda args: (ASK, _shapes(args, ())),
+    "firewall-cmd": _firewall_cmd,
+    "firewall-offline-cmd": _firewall_offline_cmd,
+    "flatpak": _keep_exact(("update", "-y", "--noninteractive"), ("uninstall", "--unused", "-y", "--noninteractive")),
+    "fwupdmgr": _keep_exact(("refresh", "--force"), ("update", "-y")),
+    "grep": _grep,
+    "groupadd": _group,
+    "groupdel": _group,
+    "grub-mkconfig": _keep_exact(("-o", "/boot/grub/grub.cfg")),
+    "hostnamectl": _hostnamectl,
+    "journalctl": _journalctl,
+    "locale-gen": _keep_exact(()),
+    "localectl": _localectl,
+    "make": _make,
+    "nmcli": _nmcli,
+    "pacman": _pacman,
+    "restorecon": _restorecon,
+    "sbctl": _sbctl,
+    "semanage": _semanage,
+    "semodule": _semodule,
+    "setenforce": lambda args: (ASK, _shapes(args, ("0",), ("1",))),
+    "setsebool": _setsebool,
+    "smartctl": _smartctl,
+    "sshd": _keep_exact(("-t",)),
+    "sysctl": _keep_exact(("--system",)),
+    "systemctl": _systemctl,
+    "systemd-tmpfiles": _keep_exact(("--clean",)),
+    "timedatectl": _timedatectl,
+    # privilege.authenticate(): unlocks controls that must not be reachable
+    # without a password, so a cached keep authorization mustn't satisfy it.
+    "true": lambda args: (ASK, _shapes(args, ())),
+    "ufw": _ufw,
+    "usbguard": _keep_exact(("generate-policy",)),
+    "useradd": _useradd,
+    "userdel": _userdel,
+    "usermod": _usermod,
+    "visudo": _keep_exact(("-cf", "/etc/sudoers")),
+}
+
+
+def validate_command(argv: list[str]) -> tuple[str, list[str]]:
+    """(tier, validated args) for an executed program, or Refused."""
+    if not argv:
+        raise Refused("no command given")
+    validator = COMMANDS.get(argv[0])
+    if validator is None:
+        raise Refused(f"{argv[0]!r} isn't a program Atropa runs as root")
+    return validator(list(argv[1:]))
+
+
+def _write_tier(path: str) -> str:
+    normal = _normal(path)
+    if normal in ASK_WRITE_FILES or normal.startswith(ASK_WRITE_DIRS):
+        return ASK
+    return KEEP
+
+
+def _file_command_tier(argv: list[str]) -> str:
+    program = argv[0]
+    if program == "chown":
+        return ASK  # only used after the (ask-tier) policy build
+    target = None
+    if program == "tee":
+        rest = [arg for arg in argv[1:] if arg not in {"-a", "--"}]
+        target = rest[0] if len(rest) == 1 else None
+    elif program == "install" and len(argv) == 5:
+        target = argv[4]
+    elif program == "replace-in-file" and len(argv) == 4:
+        target = argv[1]
+    if target is None:
+        return KEEP  # malformed: the operation itself refuses it
+    return _write_tier(target)
+
+
+def needs_fresh_auth(argv: list[str]) -> bool:
+    """
+    True when `argv` is an ASK operation, which the keep helper refuses.
+    privilege.py asks this to pick the helper; it never raises, so a
+    malformed argv goes to the keep helper and is refused there.
+    """
+    if not argv:
+        return False
+    try:
+        if argv[0] in FILE_COMMANDS or argv[0] in OPERATIONS:
+            return _file_command_tier(argv) == ASK
+        return validate_command(argv)[0] == ASK
+    except Refused:
+        return False
+
+
+# ------------------------------------------------------------ shadow status --
+
+
+SHADOW = "/etc/shadow"
+
+
+def _shadow_status(argv: list[str]) -> int:
+    """
+    `shadow-status`: one `user:empty|locked|set` line per account, never a
+    hash. The account-hygiene check only needs to know which password
+    fields are empty, and `cat /etc/shadow` would hand every hash to any
+    process that can reuse a cached authorization.
+    """
+    if len(argv) != 1:
+        raise Refused("shadow-status takes no arguments")
+    with open(SHADOW, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            fields = line.rstrip("\n").split(":")
+            if len(fields) < 2 or not fields[0]:
+                continue
+            field = fields[1]
+            status = "empty" if field == "" else "locked" if field.startswith(("!", "*")) else "set"
+            print(f"{fields[0]}:{status}")
+    return 0
+
+
+# Operations implemented here that aren't files or programs.
+OPERATIONS = frozenset({"shadow-status"})
+
 # -------------------------------------------------------------- file writing --
 
 
@@ -445,14 +968,20 @@ def _exec(program: str, argv: list[str]) -> int:
     return 127  # unreachable; execve doesn't return
 
 
-def handle(argv: list[str], data: bytes = b"") -> int | None:
+def handle(argv: list[str], data: bytes = b"", *, tier: str) -> int | None:
     """
     Perform an allowed file operation (returning its exit code), or return
-    None when argv should be exec'd as an allowlisted command.
+    None when argv should be exec'd as a validated command. `tier` is the
+    tier of the running helper; an ASK operation in the keep helper is
+    refused before anything is touched.
     """
     if not argv:
         raise Refused("no command given")
     program = argv[0]
+    if tier != ASK and needs_fresh_auth(argv):
+        raise Refused(f"{program} asks for a password every time; it runs through {ASK_HELPER_PATH}")
+    if program == "shadow-status":
+        return _shadow_status(argv)
 
     if program == "tee":
         return _tee(argv, data)
@@ -496,11 +1025,19 @@ def handle(argv: list[str], data: bytes = b"") -> int | None:
     if program == "pacnew-remove":
         return _pacnew_remove(argv)
 
-    return None  # an allowlisted bare command: main() execs it
+    validate_command(argv)  # refuse here too, so handle() alone decides
+    return None  # a validated command: main() execs it
+
+
+def running_tier(script: str | None = None) -> str:
+    """ASK when this process is the installed ask helper, KEEP otherwise."""
+    path = os.path.realpath(script if script is not None else sys.argv[0])
+    return ASK if path == os.path.realpath(ASK_HELPER_PATH) else KEEP
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    tier = running_tier()
 
     # pkexec makes the child root; running this directly as a user must not
     # do anything, even if it somehow has a setuid bit it shouldn't.
@@ -513,7 +1050,7 @@ def main(argv: list[str] | None = None) -> int:
         data = sys.stdin.buffer.read()
 
     try:
-        handled = handle(args, data)
+        handled = handle(args, data, tier=tier)
     except Refused as exc:
         print(f"atropa-helper: refused: {exc}", file=sys.stderr)
         return 126
@@ -522,11 +1059,11 @@ def main(argv: list[str] | None = None) -> int:
         return handled
 
     try:
-        program = resolve(args[0])
+        validated = check(args)
     except Refused as exc:
         print(f"atropa-helper: refused: {exc}", file=sys.stderr)
         return 126
-    return _exec(program, args)
+    return _exec(validated[0], validated)
 
 
 if __name__ == "__main__":
