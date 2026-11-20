@@ -75,4 +75,13 @@ package() {
     for icon in atropa/resources/icons/hicolor/*/apps/org.atropa.Atropa.png; do
         install -Dm644 "$icon" "$pkgdir/usr/share/icons/${icon#atropa/resources/icons/}"
     done
+    # makepkg's tarball stores each file's SELinux label (security.selinux
+    # xattr) from the build directory - xdg_cache_t, user_tmp_t - and pacman
+    # restores it on extraction, before the relabel hook fixes it at the end
+    # of the transaction. polkitd reads the new policy in between, is denied,
+    # and never retries, so Atropa's actions silently vanish until polkit
+    # restarts. Package them with the label they get under /usr anyway.
+    if command -v chcon >/dev/null && [[ -e /sys/fs/selinux/enforce ]]; then
+        chcon -R -t usr_t "$pkgdir/usr" 2>/dev/null || true
+    fi
 }
