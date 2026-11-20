@@ -40,19 +40,6 @@ Max kernel policy version:      33
 """
 
 
-@pytest.fixture
-def module_dirs(monkeypatch, tmp_path):
-    review_base = tmp_path / "selinux-review"
-    modules_dir = review_base / "modules"
-    approved_dir = review_base / "approved"
-    monkeypatch.setattr(selinux, "REVIEW_BASE_DIR", review_base)
-    monkeypatch.setattr(selinux, "REVIEW_MODULES_DIR", modules_dir)
-    monkeypatch.setattr(selinux, "APPROVED_MODULES_DIR", approved_dir)
-    monkeypatch.setattr(selinux, "SETUP_MODE_STATE_FILE", review_base / "setup_mode_state.json")
-    monkeypatch.setattr(selinux, "LAST_REVIEW_FILE", review_base / "last_review.json")
-    return modules_dir, approved_dir
-
-
 # --------------------------------------------------------------- status --
 
 def test_is_available_via_sestatus(fake_which):
@@ -667,11 +654,11 @@ def test_review_modules_never_take_a_policy_modules_name(fake_run, fake_which, m
         ["journalctl", "-k"],
         stdout='avc:  denied  { read } for comm="sudo" scontext=user_u:user_r:sudo_t:s0 tcontext=x:y:z tclass=file\n',
     )
-    fake_run.set_response(["audit2allow"], stdout="module atropa_sudo_sudo_t 1.0;\n")
+    fake_run.set_response(["audit2allow"], stdout="module atropa_sudo_t 1.0;\n")
     [review] = selinux.build_policy_review(denial_limit=100)
-    assert review.safe_name == "atropa_sudo_sudo_t"
-    assert ["audit2allow", "-m", "atropa_sudo_sudo_t"] in fake_run.calls
-    assert review.label == "sudo (sudo_t)"
+    assert review.safe_name == "atropa_sudo_t"
+    assert ["audit2allow", "-m", "atropa_sudo_t"] in fake_run.calls
+    assert review.label == "sudo_t (sudo)"
 
 
 def test_build_policy_review_splits_one_program_name_across_domains(fake_run, fake_which, module_dirs):
@@ -687,8 +674,8 @@ def test_build_policy_review_splits_one_program_name_across_domains(fake_run, fa
     )
     reviews = selinux.build_policy_review(denial_limit=100)
     assert sorted((r.domain, r.safe_name) for r in reviews) == [
-        ("foo_t", "atropa_python3_foo_t"),
-        ("user_t", "atropa_python3_user_t"),
+        ("foo_t", "atropa_foo_t"),
+        ("user_t", "atropa_user_t"),
     ]
 
 

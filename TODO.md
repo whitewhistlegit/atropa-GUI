@@ -116,32 +116,32 @@ single-user Arch machine.
 Seen when its generated modules were reviewed in the Arch test VM,
 2026-10-31. (The policy findings themselves are tracked outside this repo.)
 
-- [ ] **Suggest `dontaudit` for known noise** instead of an `allow` - e.g.
+- [x] **Suggest `dontaudit` for known noise** instead of an `allow` - e.g.
       `net_admin` for auth helpers like `polkit-agent-helper-1`, and
       nss-systemd's writes to the `io.systemd.Home` / nsresourced sockets.
       Granting these weakens the policy for nothing.
-- [ ] **Flag likely mislabeling** - `execute_no_trans` on `lib_t` (and
+- [x] **Flag likely mislabeling** - `execute_no_trans` on `lib_t` (and
       similar) almost always means a file is missing its file context, e.g.
       Arch's `/usr/lib/...` helpers where the policy expects `/usr/libexec/`.
       Say "this path probably needs a file context" instead of drafting an
       `allow`.
-- [ ] **Flag rules that can't work on their own** - e.g. `sock_file write`
+- [x] **Flag rules that can't work on their own** - e.g. `sock_file write`
       without `unix_stream_socket connectto`.
 - [x] **Skip list hid real denials** - `^(systemd|kernel|audit|kworker|swapper)`
       matched as a prefix, hiding systemd-tmpfiles, systemd-coredump,
       systemd-logind, systemd-homed and auditd: 292 of 1226 denials in one
       enforcing GNOME boot. Now exact names only.
-- [ ] **Offer booleans before modules** - when `audit2why` / `audit2allow -b`
+- [x] **Offer booleans before modules** - when `audit2why` / `audit2allow -b`
       says a boolean would allow the denial, show that first (e.g. SSH logins
       blocked under refpolicy: `ssh_sysadm_login`), with what else the boolean
       opens up.
-- [ ] **Check "already allowed" against the whole loaded policy** with
+- [x] **Check "already allowed" against the whole loaded policy** with
       `sesearch` (setools), not only Atropa's own approved modules - including
       which boolean gates a rule.
-- [ ] **Sort by impact, not count** - one boot had 901 `polkitd` denials,
+- [x] **Sort by impact, not count** - one boot had 901 `polkitd` denials,
       nearly all nss-systemd noise, on top of everything that actually broke.
       Put recognized noise in its own group.
-- [ ] **Name modules after the SELinux domain**, not the process name: `comm`
+- [x] **Name modules after the SELinux domain**, not the process name: `comm`
       is cut at 15 characters, giving `atropa_polkit-agent-he_policykit_auth_t`
       and `atropa__sd-worker__systemd_nsresourced_t`.
 

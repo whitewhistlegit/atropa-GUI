@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import denial_advice
 from .privilege import CommandResult, backup_file, run_privileged, run_privileged_streaming, run_unprivileged
 
 SELINUX_CONFIG = Path("/etc/selinux/config")
@@ -327,12 +328,16 @@ def explain_denial(raw_avc_line: str) -> str:
     return output
 
 
-def generate_te(raw_avc_line: str, module_name: str) -> str:
-    """Runs audit2allow on a single AVC line and returns the suggested .te module text."""
+def generate_te(raw_avc_line: str, module_name: str, dontaudit: bool = False) -> str:
+    """
+    Runs audit2allow on AVC lines and returns the suggested .te module text;
+    `dontaudit` drafts dontaudit rules (audit2allow -D) for known noise.
+    """
     if not shutil.which("audit2allow"):
         raise missing_tool_error("audit2allow")
     _validate_module_name(module_name)
-    result = run_unprivileged(["audit2allow", "-m", module_name], input_text=raw_avc_line.strip() + "\n")
+    argv = ["audit2allow", "-D", "-m", module_name] if dontaudit else ["audit2allow", "-m", module_name]
+    result = run_unprivileged(argv, input_text=raw_avc_line.strip() + "\n")
     if not result.stdout.strip():
         raise RuntimeError(result.stderr.strip() or "audit2allow produced no output for this denial")
     return result.stdout
@@ -596,26 +601,43 @@ class ProgramPolicyReview:
     pp_path: str | None = None
     error: str | None = None
     domain: str = "?"  # the denials' source type (scontext), "?" if it couldn't be parsed
+    dontaudit: bool = False  # drafted from known noise: dontaudit rules, not allow
+    warnings: list[str] = field(default_factory=list)  # problems installing the draft won't reveal
+    booleans: list[str] = field(default_factory=list)  # audit2allow: these would allow (part of) it
 
     @property
     def label(self) -> str:
-        return f"{self.program} ({self.domain})" if self.domain != "?" else self.program
+        what = f"{self.domain} ({self.program})" if self.domain != "?" else self.program
+        return f"{what} - dontaudit" if self.dontaudit else what
 
 
 def _sanitize_program_name(prog: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_-]", "_", prog) or "unknown"
 
 
-def _review_module_name(program: str, domain: str) -> str:
+def _review_module_name(program: str, domain: str, dontaudit: bool = False) -> str:
     """
-    atropa_<program>_<domain>. Without the prefix a program called ssh,
-    mount or sudo produced a module named exactly that - and installing
-    it replaces the policy's own module of the same name.
+    atropa_<domain>, or atropa_<program> when the domain couldn't be parsed;
+    `_dontaudit` for a noise module. Named after the SELinux domain, not the
+    process: comm= is cut at 15 characters (polkit-agent-he, _sd-worker_)
+    and one domain's programs belong in one module. The prefix keeps a
+    domain called e.g. sudo_t from ever colliding with the policy's own
+    module names.
     """
-    parts = ["atropa", _sanitize_program_name(program)]
-    if domain != "?":
-        parts.append(_sanitize_program_name(domain))
+    parts = ["atropa", _sanitize_program_name(domain if domain != "?" else program)]
+    if dontaudit:
+        parts.append("dontaudit")
     return "_".join(parts)[:64]  # _validate_module_name()'s limit
+
+
+def _is_noise_line(line: str) -> bool:
+    perm_m = _PERM_SET_RE.search(line)
+    tclass_m = _TCLASS_RE.search(line)
+    return denial_advice.noise_reason(
+        _extract_context_type(line, "tcontext"),
+        tclass_m.group(1) if tclass_m else "?",
+        perm_m.group(1).split() if perm_m else [],
+    ) is not None
 
 
 # Distinguishes "the caller didn't pass `since` at all" from "the caller
@@ -662,7 +684,8 @@ def build_policy_review(
     else:
         lines = list_avc_denials_from_audit_log(denial_limit) if source == "audit_log" else list_avc_denials(denial_limit)
 
-    groups: dict[tuple[str, str], list[str]] = {}
+    groups: dict[tuple[str, bool], list[str]] = {}
+    programs: dict[tuple[str, bool], list[str]] = {}
     for line in lines:
         if _UNDEFINED_PERM_RE.search(line) or _UNDEFINED_CLASS_RE.search(line):
             # audit2allow can't do anything useful with these - they have no
@@ -673,19 +696,28 @@ def build_policy_review(
         prog = m.group(1) if m else "unknown"
         if _SKIP_PROGRAMS_RE.fullmatch(prog):
             continue
-        groups.setdefault((prog, _extract_context_type(line, "scontext")), []).append(line)
+        domain = _extract_context_type(line, "scontext")
+        key = (domain if domain != "?" else f"?{prog}", _is_noise_line(line))
+        groups.setdefault(key, []).append(line)
+        if prog not in programs.setdefault(key, []):
+            programs[key].append(prog)
 
     reviews: list[ProgramPolicyReview] = []
-    for (prog, domain), denials in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-        safe_name = _review_module_name(prog, domain)
+    # Real gaps first, noise after; within each, the most frequent first.
+    for (domain_key, noise), denials in sorted(groups.items(), key=lambda kv: (kv[0][1], -len(kv[1]))):
+        names = programs[(domain_key, noise)]
+        domain = "?" if domain_key.startswith("?") else domain_key
+        safe_name = _review_module_name(names[0], domain, dontaudit=noise)
         joined = "\n".join(denials)
         review = ProgramPolicyReview(
-            program=prog, safe_name=safe_name, denial_count=len(denials), sample_denials=denials[:sample_size],
-            domain=domain,
+            program=", ".join(names), safe_name=safe_name, denial_count=len(denials),
+            sample_denials=denials[:sample_size], domain=domain, dontaudit=noise,
         )
 
         try:
-            review.te_content = generate_te(joined, safe_name)
+            review.te_content = generate_te(joined, safe_name, dontaudit=noise)
+            review.warnings = denial_advice.te_warnings(review.te_content)
+            review.booleans = denial_advice.te_booleans(review.te_content)
         except Exception as exc:  # noqa: BLE001 - surfaced per-program, one bad program shouldn't abort the batch
             review.error = str(exc)
             reviews.append(review)
@@ -872,8 +904,12 @@ class GroupedDenial:
     sample_path: str | None
     count: int
     sources: list[str] = field(default_factory=list)
-    classification: str = "new"  # "new" | "already_allowed" | "undefined_in_policy" | "resolved"
+    # "new" | "already_allowed" | "boolean" | "noise" | "undefined_in_policy" | "resolved"
+    classification: str = "new"
     matched_module: str | None = None
+    noise_reason: str | None = None  # known noise: dontaudit, not allow
+    hint: str | None = None  # a likely labeling problem behind it
+    booleans: list[str] = field(default_factory=list)  # off booleans whose rules would allow it
 
 
 def group_denials(lines: list[str]) -> list[GroupedDenial]:
@@ -996,6 +1032,52 @@ def classify_denials(grouped: list[GroupedDenial]) -> list[GroupedDenial]:
     return grouped
 
 
+# Policy lookups are ~0.25 s each; a review is capped rather than taking
+# minutes on a machine with hundreds of distinct denials.
+_POLICY_CHECK_LIMIT = 200
+
+
+def advise_denials(grouped: list[GroupedDenial], checker=None) -> list[GroupedDenial]:
+    """
+    Second pass over classify_denials(): for each still-"new" denial, ask the
+    loaded policy (`checker`, a denial_advice.PolicyChecker) whether a rule
+    already allows it - unconditionally or under a boolean that's on - or
+    would under a boolean that's off; then mark known noise; then attach a
+    labeling hint to anything a label likely explains.
+    """
+    checked = 0
+    for denial in grouped:
+        if denial.classification == "undefined_in_policy":
+            continue
+        if denial.classification == "new" and checker is not None and checked < _POLICY_CHECK_LIMIT:
+            checked += 1
+            verdict = checker.check(denial.scontext_type, denial.tcontext_type, denial.tclass, denial.permissions)
+            if verdict.status == "allowed":
+                denial.classification = "already_allowed"
+                denial.matched_module = "the loaded policy"
+            elif verdict.status == "boolean":
+                denial.classification = "boolean"
+                denial.booleans = verdict.booleans
+        if denial.classification == "new":
+            reason = denial_advice.noise_reason(denial.tcontext_type, denial.tclass, denial.permissions)
+            if reason:
+                denial.classification = "noise"
+                denial.noise_reason = reason
+        denial.hint = denial_advice.label_hint(
+            denial.tcontext_type, denial.tclass, denial.permissions, denial.sample_path
+        )
+    return grouped
+
+
+def _policy_checker():
+    """A PolicyChecker for the running policy, or None without setools or a readable policy."""
+    try:
+        runtime = {boolean.name: boolean.active for boolean in list_booleans()}
+        return denial_advice.PolicyChecker(runtime)
+    except Exception:  # noqa: BLE001 - optional: ImportError, an unreadable policy, ...
+        return None
+
+
 def _load_last_review() -> dict:
     if not LAST_REVIEW_FILE.exists():
         return {}
@@ -1027,6 +1109,10 @@ class ExtensiveDenialReview:
     since: str | None
     source: str
     total_raw_lines: int
+    needs_boolean: list[GroupedDenial] = field(default_factory=list)
+    noise: list[GroupedDenial] = field(default_factory=list)
+    boolean_rules: dict[str, int] = field(default_factory=dict)  # boolean -> rules it switches
+    policy_checked: bool = False  # setools could load the running policy
 
 
 def review_all_denials(source: str = "both", since_setup_mode: bool = True) -> ExtensiveDenialReview:
@@ -1042,7 +1128,13 @@ def review_all_denials(source: str = "both", since_setup_mode: bool = True) -> E
     """
     since = get_setup_mode_started_at() if since_setup_mode else None
     lines = list_all_denials(since=since, source=source)
-    grouped = classify_denials(group_denials(lines))
+    checker = _policy_checker()
+    grouped = advise_denials(classify_denials(group_denials(lines)), checker)
+    needs_boolean = [g for g in grouped if g.classification == "boolean"]
+    boolean_rules = {}
+    if checker is not None:
+        for name in sorted({name for g in needs_boolean for name in g.booleans}):
+            boolean_rules[name] = checker.boolean_rule_count(name)
 
     previous = _load_last_review()
     current_keys = {g.key for g in grouped}
@@ -1067,6 +1159,10 @@ def review_all_denials(source: str = "both", since_setup_mode: bool = True) -> E
         since=since,
         source=source,
         total_raw_lines=len(lines),
+        needs_boolean=needs_boolean,
+        noise=[g for g in grouped if g.classification == "noise"],
+        boolean_rules=boolean_rules,
+        policy_checked=checker is not None,
     )
 
 
