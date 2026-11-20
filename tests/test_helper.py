@@ -387,7 +387,7 @@ def test_policy_covers_every_path_the_backend_manages(monkeypatch):
     monkeypatch.setattr(helper.os.path, "realpath", os.path.normpath)
     from atropa.backend import (
         aide, apparmor, audit_rules, bootloader, hardening, mirrors, pacman, plugins, power, security, selinux,
-        system_config,
+        snapshots, system_config,
     )
 
     managed = [
@@ -403,6 +403,8 @@ def test_policy_covers_every_path_the_backend_manages(monkeypatch):
         str(pacman.PACMAN_CONF),
         str(mirrors.MIRRORLIST),
         str(power.ZRAM_GENERATOR_CONF),
+        str(snapshots.SNAPPER_CONFIG),
+        str(snapshots.SNAPPER_CONFD),
         str(plugins.ENABLED_STATE_FILE),
         *aide.DB_ACTIVE_CANDIDATES,
         *aide.DB_NEW_CANDIDATES,

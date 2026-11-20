@@ -154,6 +154,37 @@ runs `paccache -r -k2` (installed and previous version) and
 `paccache -r -u -k0` (uninstalled packages); without it, `pacman -Sc` with a
 note in the result that recent upgrades can't be rolled back.
 
+### Btrfs snapshots (`backend/snapshots.py`, Snapshots page)
+
+snapper for the root config only, with snap-pac for a pre/post pair around
+every pacman transaction (Atropa's upgrades included). `layout()` decides
+what a whole-system rollback can mean, from `findmnt /`, `/etc/fstab` and
+the kernel command line:
+
+- **top-level**: `/` is subvolid 5 (Arch's VM images). Snapshots work; the
+  running root can't be swapped for one.
+- **subvolume**: `/` is a subvolume pinned by `subvol=` in fstab or
+  `rootflags=` (archinstall's `@`). archinstall also mounts `@.snapshots`
+  on `/.snapshots`, which `snapper create-config` refuses, so `setup()`
+  writes `/etc/snapper/configs/root` from snapper's own template and adds
+  `root` to `SNAPPER_CONFIGS` in `/etc/conf.d/snapper` instead.
+- **default-subvolume**: `/` is a subvolume nothing pins (openSUSE-style),
+  the one layout where `snapper rollback` works. The page explains it;
+  Atropa doesn't run it.
+
+Atropa never swaps the root subvolume of a running system. Recovery is
+restoring files (`snapper undochange N..0 PATH`) from the Changes dialog,
+or booting a snapshot read-only from GRUB via grub-btrfs (`grub-btrfsd`
+keeps the submenu current). `setup()` refuses a non-Btrfs root and a
+`/.snapshots` that exists but isn't a mounted subvolume.
+
+Helper tiers: `snapper --jsonout -c root list`, `status N..0` and `create`
+are keep-tier; `create-config`, `undochange` (writes anything as root),
+`delete` (removes a way back) and both config files (`ALLOW_USERS` makes
+snapper user-driven) are ask-tier. Only the `root` config is accepted;
+`rollback` and `set-config` are refused. `snapper-cleanup.timer` and
+`grub-btrfsd.service` are in `MANAGED_UNITS`.
+
 ### Operation-level privileged helper (design)
 
 Phases 1 and 2 are implemented; phase 3 (root-owned backups) is the

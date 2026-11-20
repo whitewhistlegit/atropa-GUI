@@ -75,6 +75,7 @@ WRITE_FILES = frozenset(
     {
         "/.autorelabel",
         "/etc/atropa/plugins-enabled.json",
+        "/etc/conf.d/snapper",
         "/etc/default/grub",
         "/etc/fail2ban/jail.d/sshd.local",
         "/etc/locale.gen",
@@ -83,6 +84,7 @@ WRITE_FILES = frozenset(
         "/etc/security/faillock.conf",
         "/etc/security/pwquality.conf",
         "/etc/selinux/config",
+        "/etc/snapper/configs/root",
         "/etc/ssh/sshd_config",
         "/etc/sysctl.d/99-atropa-hardening.conf",
         "/etc/systemd/zram-generator.conf",
@@ -107,6 +109,8 @@ SYMLINKED_FILES = {"/etc/selinux/config": "/etc/selinux/config."}
 # these go through the ask helper only.
 ASK_WRITE_FILES = frozenset(
     {
+        "/etc/conf.d/snapper",
+        "/etc/snapper/configs/root",
         "/etc/default/grub",
         "/etc/fail2ban/jail.d/sshd.local",
         "/etc/pacman.conf",
@@ -649,6 +653,35 @@ def _sbctl(args):
     raise Refused("sbctl arguments aren't a shape Atropa uses")
 
 
+_SNAPSHOT_NUMBER_RE = re.compile(r"^[1-9][0-9]{0,8}$")
+
+
+def _snapper(args):
+    # Only the root config. Reading and creating are harmless; restoring
+    # files writes anything as root, deleting removes a way back, and the
+    # config itself (ALLOW_USERS) is root-equivalent - those always ask.
+    if args in (["--jsonout", "-c", "root", "list"], ["--jsonout", "list-configs"]):
+        return KEEP, list(args)
+    if args[:2] != ["-c", "root"]:
+        raise Refused("snapper only works on the root config")
+    rest = args[2:]
+    if len(rest) == 5 and rest[0] == "create" and rest[1] == "-d" and rest[3:] == ["--cleanup-algorithm", "number"]:
+        if len(rest[2]) > 200:
+            raise Refused("snapshot description is too long")
+        return KEEP, ["-c", "root", "create", "-d", _free_text(rest[2], "description"), *rest[3:]]
+    if len(rest) == 2 and rest[0] == "status" and rest[1].endswith("..0"):
+        _value(rest[1][:-3], _SNAPSHOT_NUMBER_RE, "snapshot number")
+        return KEEP, list(args)
+    if len(rest) == 2 and rest[0] == "delete":
+        return ASK, ["-c", "root", "delete", _value(rest[1], _SNAPSHOT_NUMBER_RE, "snapshot number")]
+    if rest == ["create-config", "/"]:
+        return ASK, list(args)
+    if len(rest) >= 3 and rest[0] == "undochange" and rest[1].endswith("..0"):
+        _value(rest[1][:-3], _SNAPSHOT_NUMBER_RE, "snapshot number")
+        return ASK, ["-c", "root", "undochange", rest[1], *(_normal(path) for path in rest[2:])]
+    raise Refused("snapper arguments aren't a shape Atropa uses")
+
+
 def _semanage(args):
     if (
         len(args) == 9 and args[0] == "login" and args[1] == "-S" and args[3] == "-N"
@@ -704,7 +737,8 @@ MANAGED_UNITS = frozenset(
     {
         "aide-check.timer", "aide.timer", "aidecheck.timer",
         "apparmor.service", "auditd.service", "fail2ban.service", "firewalld.service",
-        "fstrim.timer", "sshd.service", "systemd-zram-setup@zram0.service",
+        "fstrim.timer", "grub-btrfsd.service", "snapper-cleanup.timer", "sshd.service",
+        "systemd-zram-setup@zram0.service",
         "ufw.service", "usbguard.service",
     }
 )
@@ -836,6 +870,7 @@ COMMANDS = {
     "restorecon": _restorecon,
     "sbctl": _sbctl,
     "semanage": _semanage,
+    "snapper": _snapper,
     "semodule": _semodule,
     "setenforce": lambda args: (ASK, _shapes(args, ("0",), ("1",))),
     "setsebool": _setsebool,

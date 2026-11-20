@@ -54,6 +54,7 @@ Each sidebar entry is a module:
 | **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
 | **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |
 | **Disk Health** | SMART health (one-click root read where the kernel requires it), filesystem usage, `fstrim.timer`, journal/cache/coredump cleanup |
+| **Snapshots** | Btrfs: sets up snapper + snap-pac (a snapshot before and after every pacman run), lists snapshots, shows what changed since one and restores single files, adds them to the GRUB menu with grub-btrfs. Explains what a whole-system rollback means on this layout |
 | **Package History** | Recent pacman transactions from `pacman.log`; roll one back by reinstalling the versions it replaced from the package cache (asks every time). Clean keeps the previous version so this stays possible |
 | **Firmware** | fwupd devices and updates, streamed |
 | **Mirrors** | Rank Arch mirrors with `reflector` and replace the mirrorlist (backed up first) |
