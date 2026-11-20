@@ -21,4 +21,18 @@
          for constantly. -->
     <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/atropa/atropa-helper</annotate>
   </action>
+  <action id="org.atropa.pkexec.run-ask">
+    <description>Make a root-equivalent change with Atropa</description>
+    <message>Authentication is required for this Atropa change (asked every time)</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <!-- Never "keep": these operations (passwords, users, SELinux modules
+           and mode, pacman.conf, sshd_config, the policy build) are
+           root-equivalent, so a remembered authorization would be a
+           passwordless root window for anything in the session. -->
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/atropa/atropa-helper-ask</annotate>
+  </action>
 </policyconfig>

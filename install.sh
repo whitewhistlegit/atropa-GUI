@@ -14,6 +14,7 @@ sudo pacman -S --needed --noconfirm \
 
 echo "==> Installing the privileged helper and its polkit action..."
 sudo install -Dm755 atropa/helper.py /usr/lib/atropa/atropa-helper
+sudo install -Dm755 atropa/helper.py /usr/lib/atropa/atropa-helper-ask
 sudo install -Dm644 atropa/resources/org.atropa.pkexec.policy \
     /usr/share/polkit-1/actions/org.atropa.pkexec.policy
 
