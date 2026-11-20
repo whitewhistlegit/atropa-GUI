@@ -12,12 +12,14 @@ single-user Arch machine.
 - [x] **`.pacnew` / `.pacsave` handling** - list them, diff each against the
       live file, and keep or replace (merging is a manual edit). Backed up
       through the existing backup mechanism first.
-- [ ] **Snapshot before upgrade, with rollback**
+- [x] **Snapshot before upgrade, with rollback**
   - [x] Package rollback from the pacman cache (any filesystem): Package
         History lists transactions from `pacman.log` and reinstalls the
         versions one replaced; Clean keeps the previous version.
-  - [ ] Btrfs: Snapper + snap-pac (automatic pre/post snapshots), list,
+  - [x] Btrfs: Snapper + snap-pac (automatic pre/post snapshots), list,
         file restore, and booting a snapshot via grub-btrfs.
+  - [ ] Boot a grub-btrfs snapshot entry once by hand (the menu entries
+        were checked in the VM's grub-btrfs.cfg, not booted).
 - [ ] **Upgrade checks**
   - [x] Before: show recent Arch news items that need manual steps.
   - [x] After: list failed units (`systemctl --failed`).
