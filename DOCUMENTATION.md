@@ -185,6 +185,37 @@ snapper user-driven) are ask-tier. Only the `root` config is accepted;
 `rollback` and `set-config` are refused. `snapper-cleanup.timer` and
 `grub-btrfsd.service` are in `MANAGED_UNITS`.
 
+### Denial Review advice (`backend/denial_advice.py`)
+
+audit2allow turns every denial into an allow rule; Denial Review now judges
+first. `advise_denials()` runs after `classify_denials()`:
+
+- **Loaded policy** (`PolicyChecker`, setools' Python API - optional, the
+  review says when it couldn't check): a still-"new" denial whose
+  permissions are all granted by unconditional rules, or by conditional ones
+  whose booleans are on now (runtime values from getsebool, not the compiled
+  defaults), goes to *already allowed* ("the loaded policy"). One only rules
+  behind an off boolean would grant goes to *a boolean would allow this*,
+  with each boolean's rule count (`boolean_rule_count`) and a Turn on
+  button. Capped at 200 lookups (~0.25 s each).
+- **Known noise** (`NOISE`): process siginh/rlimitinh/noatsecure,
+  capability net_admin on its own, sock_file access to the homed/userdb/
+  nsresourced sockets. Its own group; Generate drafts a separate
+  `atropa_<domain>_dontaudit` module with `audit2allow -D` instead of
+  allowing it.
+- **Label hints** (`label_hint`): unlabeled_t/file_t/default_t targets,
+  `execute_no_trans` on lib_t/usr_t (Arch's /usr/lib vs /usr/libexec), and
+  a system path carrying a home-directory type. Shown with ⚠ and a
+  restorecon button.
+- **Drafts**: one module per SELinux domain, `atropa_<domain>` (comm= is cut
+  at 15 characters and one domain's programs belong together), real gaps
+  before noise. `te_warnings` flags `sock_file write` without
+  `unix_stream_socket connectto`; `te_booleans` lifts audit2allow's
+  "#!!!! ... boolean" comments into the draft's row.
+
+Tests never load the host's policy: `no_host_policy` (conftest) replaces
+`_policy_checker`, and the checker takes an injected setools module.
+
 ### Operation-level privileged helper (design)
 
 Phases 1 and 2 are implemented; phase 3 (root-owned backups) is the
@@ -983,8 +1014,8 @@ arbitrary `.te` text, manage loaded + pending + approved-history modules).
   runs `audit2allow -m <name>`
 - **Per-application batch review** (`build_policy_review(source="journal",
   denial_limit=500, sample_size=5, since=<unset>)`) — ported from a
-  user-supplied shell script. Groups denials by **(program, source
-  domain)**, skips kernel noise (exact names: `systemd` (PID 1), `kernel`,
+  user-supplied shell script. Groups denials by **source domain** (known
+  noise separately, drafted as dontaudit), skips kernel noise (exact names: `systemd` (PID 1), `kernel`,
   `kworker/*`, `swapper/*` - a prefix match used to hide systemd-tmpfiles,
   systemd-coredump, auditd and the like),
   and for each group: generates a `.te`, an `audit2why` explanation, and

@@ -187,3 +187,32 @@ def kernel_state(monkeypatch, tmp_path):
     monkeypatch.setattr(hardening, "APPARMOR_SECURITYFS", state.apparmor_securityfs)
     monkeypatch.setattr(apparmor, "SECURITYFS_DIR", state.apparmor_securityfs)
     return state
+
+
+@pytest.fixture(autouse=True)
+def no_host_policy(monkeypatch):
+    """
+    Denial Review asks the *running* SELinux policy (via setools) whether a
+    rule already allows a denial. Tests must not depend on whichever policy
+    the machine running them has loaded; the ones about that check pass a
+    fake checker to selinux.advise_denials() directly.
+    """
+    from atropa.backend import selinux
+
+    monkeypatch.setattr(selinux, "_policy_checker", lambda: None)
+
+
+@pytest.fixture
+def module_dirs(monkeypatch, tmp_path):
+    """SELinux review/approved module directories under tmp_path (Denial Review and Load Policy tests)."""
+    from atropa.backend import selinux
+
+    review_base = tmp_path / "selinux-review"
+    modules_dir = review_base / "modules"
+    approved_dir = review_base / "approved"
+    monkeypatch.setattr(selinux, "REVIEW_BASE_DIR", review_base)
+    monkeypatch.setattr(selinux, "REVIEW_MODULES_DIR", modules_dir)
+    monkeypatch.setattr(selinux, "APPROVED_MODULES_DIR", approved_dir)
+    monkeypatch.setattr(selinux, "SETUP_MODE_STATE_FILE", review_base / "setup_mode_state.json")
+    monkeypatch.setattr(selinux, "LAST_REVIEW_FILE", review_base / "last_review.json")
+    return modules_dir, approved_dir

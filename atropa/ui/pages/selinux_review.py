@@ -54,14 +54,29 @@ class SelinuxReviewPage(BasePage):
 
         self.new_group = self.add_group(
             "New — needs a policy rule",
-            "No matching rule found in anything Atropa has installed and currently has loaded.",
+            "No rule in the loaded policy (or Atropa's own modules) allows these, no boolean would, and they "
+            "aren't known noise. A ⚠ marks one a label probably explains - fix that instead of adding a rule.",
         )
         self.generate_btn = Gtk.Button(label="Generate Policy for All New Denials", valign=Gtk.Align.CENTER)
         self.generate_btn.connect("clicked", self._on_generate_clicked)
         self.generate_btn.set_sensitive(False)
-        generate_row = Adw.ActionRow(title="Groups by program and drafts one module per program")
+        generate_row = Adw.ActionRow(
+            title="Drafts one module per SELinux domain, plus a dontaudit module for its known noise"
+        )
         generate_row.add_suffix(self.generate_btn)
         self.new_group.add(generate_row)
+
+        self.boolean_group = self.add_group(
+            "A boolean would allow this",
+            "The loaded policy already has a rule for these, behind a boolean that's off. Turning the boolean "
+            "on is the policy's own answer - check what else it switches on before you do.",
+        )
+
+        self.noise_group = self.add_group(
+            "Known noise - dontaudit, not allow",
+            "Probes and lookups a program makes without needing them. Allowing them weakens the policy for "
+            "nothing; Generate drafts dontaudit rules for these (a separate _dontaudit module).",
+        )
 
         self.already_allowed_group = self.add_group(
             "Already allowed, but still denied",
@@ -84,6 +99,8 @@ class SelinuxReviewPage(BasePage):
         )
 
         self._new_rows: list = []
+        self._boolean_rows: list = []
+        self._noise_rows: list = []
         self._already_allowed_rows: list = []
         self._undefined_rows: list = []
         self._resolved_rows: list = []
@@ -146,7 +163,8 @@ class SelinuxReviewPage(BasePage):
         self.summary_row.set_title("Running review…")
         self.summary_row.set_subtitle("")
         for group, rows_attr in (
-            (self.new_group, "_new_rows"), (self.already_allowed_group, "_already_allowed_rows"),
+            (self.new_group, "_new_rows"), (self.boolean_group, "_boolean_rows"),
+            (self.noise_group, "_noise_rows"), (self.already_allowed_group, "_already_allowed_rows"),
             (self.undefined_group, "_undefined_rows"), (self.resolved_group, "_resolved_rows"),
         ):
             self.clear_rows(group, getattr(self, rows_attr))
@@ -156,7 +174,8 @@ class SelinuxReviewPage(BasePage):
 
     def _on_review_loaded(self, result, error) -> bool:
         for group, rows_attr in (
-            (self.new_group, "_new_rows"), (self.already_allowed_group, "_already_allowed_rows"),
+            (self.new_group, "_new_rows"), (self.boolean_group, "_boolean_rows"),
+            (self.noise_group, "_noise_rows"), (self.already_allowed_group, "_already_allowed_rows"),
             (self.undefined_group, "_undefined_rows"), (self.resolved_group, "_resolved_rows"),
         ):
             self.clear_rows(group, getattr(self, rows_attr))
@@ -170,11 +189,15 @@ class SelinuxReviewPage(BasePage):
         self._last_review = result
         scope = f"since {result.since}" if result.since else "since boot / all retained"
         self.summary_row.set_title(
-            f"{result.total_raw_lines} raw line(s) → {len(result.new)} new, "
-            f"{len(result.already_allowed)} already-allowed, {len(result.undefined_in_policy)} undefined-in-policy, "
-            f"{len(result.resolved)} resolved"
+            f"{result.total_raw_lines} raw line(s) → {len(result.new)} new, {len(result.needs_boolean)} boolean, "
+            f"{len(result.noise)} noise, {len(result.already_allowed)} already-allowed, "
+            f"{len(result.undefined_in_policy)} undefined-in-policy, {len(result.resolved)} resolved"
         )
-        self.summary_row.set_subtitle(esc(scope))
+        checked = (
+            "checked against the loaded policy" if result.policy_checked
+            else "not checked against the loaded policy (needs setools)"
+        )
+        self.summary_row.set_subtitle(esc(f"{scope} · {checked}"))
         self.generate_btn.set_sensitive(bool(result.new))
 
         if not result.new:
@@ -182,12 +205,21 @@ class SelinuxReviewPage(BasePage):
             self.new_group.add(row)
             self._new_rows.append(row)
         for denial in result.new:
-            row = Adw.ActionRow(
-                title=esc(_denial_title(denial)),
-                subtitle=esc(f"{denial.count} occurrence(s) · program: {denial.program} · sources: {', '.join(denial.sources)}"),
-            )
+            subtitle = f"{denial.count} occurrence(s) · program: {denial.program} · sources: {', '.join(denial.sources)}"
+            if denial.hint:
+                subtitle = f"{denial.hint}\n{subtitle}"
+            row = Adw.ActionRow(title=esc(_denial_title(denial)), subtitle=esc(subtitle))
+            if denial.hint:
+                row.add_prefix(Gtk.Image.new_from_icon_name("dialog-warning-symbolic"))
+                if denial.sample_path and denial.sample_path.startswith("/"):
+                    fix_btn = Gtk.Button(label="Try restorecon", valign=Gtk.Align.CENTER)
+                    fix_btn.connect("clicked", self._on_try_restorecon, denial.sample_path)
+                    row.add_suffix(fix_btn)
             self.new_group.add(row)
             self._new_rows.append(row)
+
+        self._render_booleans(result)
+        self._render_noise(result)
 
         if not result.already_allowed:
             row = Adw.ActionRow(title="None")
@@ -239,6 +271,53 @@ class SelinuxReviewPage(BasePage):
 
         return False
 
+    def _render_booleans(self, result) -> None:
+        if not result.needs_boolean:
+            row = Adw.ActionRow(title="None" if result.policy_checked else "Not checked (needs setools)")
+            self.boolean_group.add(row)
+            self._boolean_rows.append(row)
+            return
+        for denial in result.needs_boolean:
+            switches = ", ".join(
+                f"{name} ({result.boolean_rules.get(name, '?')} rules)" for name in denial.booleans
+            )
+            row = Adw.ActionRow(
+                title=esc(_denial_title(denial)),
+                subtitle=esc(f"{denial.count} occurrence(s) · program: {denial.program} · allowed by: {switches}"),
+            )
+            for name in denial.booleans[:2]:
+                button = Gtk.Button(label=f"Turn on {name}", valign=Gtk.Align.CENTER)
+                button.connect("clicked", self._on_turn_on_boolean, name, result.boolean_rules.get(name))
+                row.add_suffix(button)
+            self.boolean_group.add(row)
+            self._boolean_rows.append(row)
+
+    def _render_noise(self, result) -> None:
+        if not result.noise:
+            row = Adw.ActionRow(title="None")
+            self.noise_group.add(row)
+            self._noise_rows.append(row)
+            return
+        for denial in result.noise:
+            row = Adw.ActionRow(
+                title=esc(_denial_title(denial)),
+                subtitle=esc(f"{denial.count} occurrence(s) · program: {denial.program} · {denial.noise_reason}"),
+            )
+            self.noise_group.add(row)
+            self._noise_rows.append(row)
+
+    def _on_turn_on_boolean(self, _btn: Gtk.Button, name: str, rule_count) -> None:
+        scope = f"It switches {rule_count} rule(s) in the policy, not only the one behind this denial. " if rule_count else ""
+        self.confirm(
+            f"Turn on {name}?",
+            f"{scope}Persistent (setsebool -P), so it survives a reboot; turn it off again on the SELinux page.",
+            "Turn on",
+            lambda: self.run_action(
+                lambda: selinux.set_boolean(name, True),
+                lambda result, error: self.handle_command_result(result, error, f"{name} is on", refresh=False),
+            ),
+        )
+
     def _on_try_restorecon(self, _btn: Gtk.Button, path: str) -> None:
         self.confirm(
             f"Run restorecon on {path}?",
@@ -281,6 +360,10 @@ class SelinuxReviewPage(BasePage):
             else:
                 subtitle = f"{review.denial_count} denial(s) · {review.error or 'not compiled'}"
 
+            if review.booleans:
+                subtitle += " · a boolean would do: " + ", ".join(review.booleans)
+            if review.warnings:
+                subtitle += " · ⚠ " + review.warnings[0]
             row = Adw.ActionRow(title=esc(f"Draft: {review.label}"), subtitle=esc(subtitle))
             view_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER, css_classes=["flat"])
             view_btn.connect("clicked", self._on_view_review, review)
@@ -297,6 +380,12 @@ class SelinuxReviewPage(BasePage):
 
     def _on_view_review(self, _btn: Gtk.Button, review) -> None:
         sections = [f"=== {review.label} ({review.denial_count} denial(s)) ==="]
+        if review.warnings:
+            sections.append("--- Before installing ---")
+            sections.extend(f"⚠ {warning}" for warning in review.warnings)
+        if review.booleans:
+            sections.append("--- A boolean would allow (part of) this ---")
+            sections.append(", ".join(review.booleans) + " - see 'A boolean would allow this' above")
         if review.sample_denials:
             sections.append("--- Sample denials ---")
             sections.extend(review.sample_denials)
