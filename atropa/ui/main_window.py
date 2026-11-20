@@ -53,6 +53,7 @@ from atropa.ui.pages.profiles import ProfilesPage  # noqa: E402
 from atropa.ui.pages.quicksetup import QuickSetupPage  # noqa: E402
 from atropa.ui.pages.security import SecurityPage  # noqa: E402
 from atropa.ui.pages.selinux import SelinuxPage  # noqa: E402
+from atropa.ui.pages.snapshots import SnapshotsPage  # noqa: E402
 from atropa.ui.pages.refpolicy_build import RefpolicyBuildPage  # noqa: E402
 from atropa.ui.pages.rollback import RollbackPage  # noqa: E402
 from atropa.ui.pages.selinux_load import SelinuxLoadPage  # noqa: E402
@@ -166,6 +167,10 @@ MODULES = [
     Module(
         "rollback", "Package History", "edit-undo-symbolic", RollbackPage,
         "Roll back a recent pacman transaction from the cache", "maintenance",
+    ),
+    Module(
+        "snapshots", "Snapshots", "camera-photo-symbolic", SnapshotsPage,
+        "Btrfs snapshots around every pacman run, and file restore", "maintenance",
     ),
     Module(
         "boot_report", "Boot Report", "dialog-warning-symbolic", BootReportPage,
