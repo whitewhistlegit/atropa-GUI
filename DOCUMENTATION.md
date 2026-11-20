@@ -48,10 +48,12 @@ atropa/
     style.css                 visual refinement layer (Adwaita named colours only)
     icons/hicolor/<N>x<N>/apps/org.atropa.Atropa.png
                               the logo as the app icon, 16 to 256 px
-    org.atropa.pkexec.policy  polkit action annotated with the helper path,
-                              allow_active=auth_admin_keep (remembered auth)
-  helper.py                   installed as /usr/lib/atropa/atropa-helper: the
-                              one program pkexec runs, allowlisted, no shell
+    org.atropa.pkexec.policy  two polkit actions: the helper path with
+                              auth_admin_keep (remembered), the -ask path
+                              with auth_admin (asked every time)
+  helper.py                   installed twice, as /usr/lib/atropa/atropa-helper
+                              and atropa-helper-ask: the programs pkexec runs,
+                              a validator per command, no shell
 tests/                          pytest suite, one test_<module>.py per backend module
                                 (plus test_helper.py and test_resources.py)
 examples/plugins/example-plugin/manifest.toml   reference plugin manifest (parsed by a test)
@@ -104,25 +106,27 @@ annotates exactly that path with
 `privilege.py` prefixes privileged calls with the helper when it exists, so
 one authentication covers polkit's keep window (five minutes by default) for
 the whole operation. The helper takes an argv list - never a shell - refuses
-absolute or relative program names, and only runs bare names from a fixed
-allowlist of tools Atropa uses (`ALLOWED` in `helper.py`), resolved through a
-fixed `PATH`. `tests/test_helper.py` fails if a new literal privileged
-command is missing from that allowlist.
+absolute or relative program names, and only runs programs it has a
+validator for (`COMMANDS` in `helper.py`), with the exact argument shapes
+Atropa uses, resolved through a fixed `PATH`. Root-equivalent operations go
+to a second copy, `/usr/lib/atropa/atropa-helper-ask`, whose action is plain
+`auth_admin` (see "Operation-level privileged helper" below).
+`tests/test_helper.py` fails if a new literal privileged command is unknown
+to the helper or fails its validator.
 
 Without the helper - a source checkout, or an install that skipped
 `install.sh` - calls fall back to direct pkexec and ask per command; nothing
 breaks, it just behaves the old way. The tradeoff of `auth_admin_keep` is
 real and worth stating: during the keep window anything running as the
-invoking user can run those allowlisted tools as root without another
-prompt. That is the same power pkexec already granted, only cached. The
-longer-term direction in the TODO is one helper entry point per *operation*
-with a narrow API, rather than a command allowlist. Phase 1 (file operations
-with a path policy, and no `sed`) is in place; see "Operation-level
-privileged helper" below for the threat model and the remaining phases.
+invoking user can run the keep helper's operations as root without another
+prompt. Phases 1 and 2 bound that to Atropa's own non-root-equivalent
+operations with validated arguments; see "Operation-level privileged helper"
+below for the threat model and what remains.
 
 ### Operation-level privileged helper (design)
 
-Phase 1 is implemented; phases 2 and 3 are the remaining TODO.
+Phases 1 and 2 are implemented; phase 3 (root-owned backups) is the
+remaining TODO.
 
 **Why breadth matters now.** `auth_admin_keep` caches the authorization, so
 the helper's reach is what an attacker with a user-level foothold gets
@@ -164,23 +168,50 @@ where almost all of the write-anything risk lived.
   path constants and fails if a managed file is missing from `WRITE_FILES`.
   Adding a file Atropa writes therefore requires adding it to the policy.
 
-**What a cached authorization can still do.** `cat`/`grep` can still read
-any root-readable file the app names (including `/etc/shadow`, which the
-account scan genuinely needs), and the command allowlist still includes
-`systemctl`, `pacman`, the user/group tools, `visudo`, `sshd` and the
-firewall/AppArmor/SELinux tools with broad arguments. A local process during
-the keep window could, for example, start any installed unit, install a
-package from an enabled repository, or create a user. That is phase 2.
+**Phase 2 (shipped) - a validator per command, and two tiers.** The open
+`ALLOWED` list is gone. `COMMANDS` maps every program Atropa runs as root to
+a validator that accepts exactly the argument shapes the backend sends
+(`systemctl VERB UNIT` with a unit *name*, `pacman` repository operations by
+package name, `nmcli` with the fixed properties Atropa sets, `sbctl sign -s`
+only under `/boot` or `/efi`, `smartctl -H --json /dev/...`, ...) and
+returns its tier. Anything else is refused, including what an attacker
+reusing a cached authorization would want: `pacman -U`, `--config`,
+`--hookdir`, `systemctl link`/`enable /path`, `sysctl -w`, `make` targets
+other than `install load`, `systemd-tmpfiles --create FILE`, `grep -r` over
+`/etc`. `cat` reads only the files Atropa manages plus a short
+`READ_FILES` list; `/etc/shadow` is not among them - the account scan uses
+`shadow-status` instead, which prints `user:empty|locked|set` and never a
+hash.
 
-**Phase 2 - typed operations.** Replace the remaining allowlist with verbs
-such as `service <start|stop|restart|enable> <unit>`, `package
-<install|remove> <names...>`, `user <add|modify|delete> <validated fields>`
-and a read policy for `cat`. Each verb validates its parameters in the
-helper and constructs the argv itself, so the cached window can only do
-operations Atropa offers - not arbitrary argument combinations of a
-privileged tool. The command allowlist is deleted once every caller is
-migrated; the same `FILE_COMMANDS`/`ALLOWED` split makes that migration
-incremental.
+Some of Atropa's own operations are root-equivalent whatever their
+arguments: a password for root, a member for wheel, a policy module or
+`setenforce`, the policy build (`make install load` runs a Makefile from the
+user's tree), and writes to files whose content runs code as root
+(`pacman.conf` HookDir, `sshd_config`, `/etc/selinux/config`,
+`/etc/default/grub`, the sysctl and fail2ban files, AppArmor profiles).
+Those are tier ASK: the keep helper refuses them, and `privilege.py` sends
+them (via `helper.needs_fresh_auth()`) to `atropa-helper-ask` - the same
+file installed under a second path, whose polkit action
+`org.atropa.pkexec.run-ask` is plain `auth_admin`, so it asks every time.
+The helper knows which copy it is from the path the kernel exec'd, which a
+caller can't fake. `authenticate()` (unlocking controls such as the SELinux
+repository) is ASK too, so a remembered authorization never unlocks them.
+An install that has only the keep helper gets a clear error for ASK
+operations instead of a refused prompt.
+
+`tests/test_helper_shapes.py` runs the backend functions that build their
+argv at runtime and checks every privileged call against the helper in its
+expected tier, and checks a list of attack shapes is refused.
+
+**What a cached authorization can still do.** Atropa's keep-tier
+operations: stop or disable any unit, start, restart or enable only the
+units Atropa manages (`MANAGED_UNITS` - starting an arbitrary unit isn't
+safe: `debug-shell.service` is a password-less root shell on tty9, so the
+Services page's start/enable ask every time), install or remove a
+package from an enabled repository, change the hostname, time zone, keymap,
+firewall ports, booleans or AppArmor modes, write the non-root-equivalent
+managed files (mirrorlist, locale.gen, audit rules, ...). That is admin
+power, but no code an attacker controls runs as root.
 
 **Phase 3 - root-owned backups.** Move `~/.local/share/atropa/backups` to a
 root-owned directory with a root-owned manifest, and have the helper do the
@@ -331,8 +362,11 @@ privileged read" rather than crashing.
 When the installed helper exists (`HELPER_PATH =
 /usr/lib/atropa/atropa-helper`), both privileged runners prepend it to the
 pkexec/sudo prefix; that is what makes polkit's keep authorization apply (see
-section 1). `helper_available()` is the check, and a missing or
-non-executable helper silently restores the old per-command behavior.
+section 1). Operations `helper.needs_fresh_auth()` marks as root-equivalent
+get `ASK_HELPER_PATH` (`atropa-helper-ask`, asked every time) instead, and a
+PrivilegeError when only the keep helper is installed. `helper_available()`
+is the check, and a missing or non-executable helper silently restores the
+old per-command behavior.
 
 ### Packages (`pacman.py` / `pages/packages.py`)
 - `Package(name, version, installed=True, description="", repo="")` — `repo`

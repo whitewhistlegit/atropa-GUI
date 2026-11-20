@@ -70,8 +70,11 @@ name, username or mirror URL cannot turn into a second command. The first
 privileged action asks for the password; polkit then remembers it for its keep
 window (five minutes by default), so a multi-step change asks once. Because
 that authorization is cached, the helper does not run a generic shell or
-`sed`: file writes are performed by the helper against an exact allowlist of
-paths Atropa manages, and `sed` is refused outright. Changes that
+`sed`: file writes are performed by the helper against an exact list of
+paths Atropa manages, every other command is checked against the exact
+arguments Atropa uses, and root-equivalent changes (passwords, users,
+SELinux modules and mode, `pacman.conf`, `sshd_config`) ask for the password
+every time. Changes that
 can lock you out or end your session ask first and say what they affect:
 stopping or restarting a service like the display manager or sshd, locking a
 password, taking the last administrator out of `wheel`, turning the firewall
@@ -111,8 +114,9 @@ cd atropa-GUI
 
 1. install system dependencies with `pacman` (needs `sudo`), plus the
    optional `arch-audit`, `pacman-contrib` and `fakeroot`;
-2. install the privileged helper to `/usr/lib/atropa/atropa-helper` and its
-   polkit action to `/usr/share/polkit-1/actions/` - without these, Atropa
+2. install the privileged helper to `/usr/lib/atropa/atropa-helper` (and
+   again as `atropa-helper-ask`) and its polkit actions to
+   `/usr/share/polkit-1/actions/` - without these, Atropa
    still works but asks for the password on every privileged command;
 3. install Atropa with `pipx install --system-site-packages --force .` so it
    gets its own venv but reuses the system PyGObject;
@@ -125,7 +129,7 @@ To uninstall: `pipx uninstall atropa`, then remove
 `~/.local/share/applications/atropa.desktop`,
 `~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png`,
 `/usr/share/polkit-1/actions/org.atropa.pkexec.policy` and
-`/usr/lib/atropa/atropa-helper`.
+`/usr/lib/atropa/` (both helpers).
 
 ### As a pacman package
 

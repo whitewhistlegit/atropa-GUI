@@ -184,16 +184,20 @@ def _check_home_directories() -> list[HygieneFinding]:
 
 
 def _check_empty_passwords() -> HygieneFinding:
-    """Requires a privileged read of /etc/shadow - never stores or surfaces the hash itself, only field emptiness."""
-    result = run_privileged(["cat", "/etc/shadow"])
+    """
+    Asks the helper's shadow-status for which password fields are empty:
+    it answers `user:empty|locked|set` per account, so no hash ever leaves
+    root (a `cat /etc/shadow` would hand all of them to the GUI).
+    """
+    result = run_privileged(["shadow-status"])
     if not result.ok:
         return HygieneFinding("empty-password", "Empty password fields", "info", "Couldn't read /etc/shadow")
 
     empty = []
     for line in result.stdout.splitlines():
-        fields = line.split(":")
-        if len(fields) > 1 and fields[1] == "":
-            empty.append(fields[0])
+        name, sep, status = line.partition(":")
+        if sep and status.strip() == "empty":
+            empty.append(name)
 
     if empty:
         return HygieneFinding("empty-password", "Empty password fields", "fail", f"Accounts with no password set: {empty}")

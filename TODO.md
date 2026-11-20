@@ -92,9 +92,16 @@ single-user Arch machine.
       are performed by the helper against an exact path policy; `sed` is
       refused; `cp`/`mkdir`/`touch`/`rm`/`chown` validate their paths.
       A policy-coverage test keeps `WRITE_FILES` in sync with the backend.
-- [ ] **Helper phase 2: typed operations** - `service`, `package`, `user`,
-      and a read policy for `cat`/`grep`, so the command allowlist
-      (systemctl, pacman, useradd, ...) can be deleted.
+- [x] **Helper phase 2: a validator per command, two tiers** - the open
+      allowlist is gone; every program has a validator for the exact
+      argument shapes Atropa uses, `cat` reads only managed files (no
+      `/etc/shadow`: `shadow-status` instead), and root-equivalent
+      operations go through `atropa-helper-ask`, which always asks.
+- [ ] **Check the two prompts by hand in a desktop session** - pkexec's own
+      text agent can't authenticate over SSH with polkit's socket-activated
+      helper ("No session for cookie"), so the keep-vs-ask prompting was
+      verified by polkit's action choice and by running both helpers via
+      sudo, not by typing a password.
 - [ ] **Root-owned backups** - move `~/.local/share/atropa/backups` to
       root-owned storage with a root-owned manifest, written/restored by the
       helper. Today anything running as the user can change a backup's

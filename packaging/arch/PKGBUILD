@@ -73,9 +73,12 @@ package() {
 
     install -Dm644 atropa/resources/atropa.desktop -t "$pkgdir/usr/share/applications/"
     install -Dm644 atropa/resources/org.atropa.pkexec.policy -t "$pkgdir/usr/share/polkit-1/actions/"
-    # The one program pkexec runs: root-owned, fixed path, annotated in the
-    # policy above with auth_admin_keep.
+    # The programs pkexec runs: root-owned, fixed paths, annotated in the
+    # policy above (auth_admin_keep here, auth_admin for -ask below).
     install -Dm755 atropa/helper.py "$pkgdir/usr/lib/atropa/atropa-helper"
+    # The same helper again under the path of the always-ask action, for
+    # root-equivalent operations (see atropa/helper.py).
+    install -Dm755 atropa/helper.py "$pkgdir/usr/lib/atropa/atropa-helper-ask"
     local icon
     for icon in atropa/resources/icons/hicolor/*/apps/org.atropa.Atropa.png; do
         install -Dm644 "$icon" "$pkgdir/usr/share/icons/${icon#atropa/resources/icons/}"
