@@ -676,14 +676,37 @@ def _smartctl(args):
     raise Refused("smartctl must be -H --json DEVICE")
 
 
+# Units Atropa itself starts, restarts or enables. Starting an arbitrary
+# installed unit is not harmless: debug-shell.service is a root shell on
+# tty9 without a password (and enabling it gives one at every boot), and
+# emergency/rescue targets are similar. So start/restart/enable of any
+# other unit - everything the Services page offers - asks every time;
+# stopping or disabling only ever switches something off and stays KEEP.
+MANAGED_UNITS = frozenset(
+    {
+        "aide-check.timer", "aide.timer", "aidecheck.timer",
+        "apparmor.service", "auditd.service", "fail2ban.service", "firewalld.service",
+        "fstrim.timer", "sshd.service", "systemd-zram-setup@zram0.service",
+        "ufw.service", "usbguard.service",
+    }
+)
+_ACTIVATING_VERBS = {"start", "restart", "try-reload-or-restart", "enable"}
+
+
+def _unit_id(name: str) -> str:
+    return name if "." in name else f"{name}.service"
+
+
 def _systemctl(args):
     if args == ["daemon-reload"]:
         return KEEP, ["daemon-reload"]
-    verbs = {"start", "stop", "restart", "try-reload-or-restart", "enable", "disable"}
+    verbs = _ACTIVATING_VERBS | {"stop", "disable"}
     rest = [arg for arg in args[1:] if arg != "--now"]
     now = len(rest) != len(args) - 1
     if args and args[0] in verbs and len(rest) == 1 and (not now or args[0] in {"enable", "disable"}):
-        return KEEP, list(args[:1]) + [arg if arg == "--now" else _value(arg, _UNIT_RE, "unit name") for arg in args[1:]]
+        validated = list(args[:1]) + [arg if arg == "--now" else _value(arg, _UNIT_RE, "unit name") for arg in args[1:]]
+        activating = args[0] in _ACTIVATING_VERBS
+        return (ASK if activating and _unit_id(rest[0]) not in MANAGED_UNITS else KEEP), validated
     raise Refused("systemctl must be daemon-reload or VERB UNIT (enable/disable may add --now)")
 
 

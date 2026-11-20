@@ -204,7 +204,10 @@ argv at runtime and checks every privileged call against the helper in its
 expected tier, and checks a list of attack shapes is refused.
 
 **What a cached authorization can still do.** Atropa's keep-tier
-operations: start, stop or enable an installed unit, install or remove a
+operations: stop or disable any unit, start, restart or enable only the
+units Atropa manages (`MANAGED_UNITS` - starting an arbitrary unit isn't
+safe: `debug-shell.service` is a password-less root shell on tty9, so the
+Services page's start/enable ask every time), install or remove a
 package from an enabled repository, change the hostname, time zone, keymap,
 firewall ports, booleans or AppArmor modes, write the non-root-equivalent
 managed files (mirrorlist, locale.gen, audit rules, ...). That is admin

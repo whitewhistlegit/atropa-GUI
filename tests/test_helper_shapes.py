@@ -32,10 +32,15 @@ def _tier(argv: list[str]) -> str:
     ("call", "tier"),
     [
         (lambda: services.start("sshd.service"), helper.KEEP),
-        (lambda: services.stop("cups.socket"), helper.KEEP),
         (lambda: services.restart("systemd-zram-setup@zram0.service"), helper.KEEP),
         (lambda: services.enable("fstrim.timer", now=True), helper.KEEP),
+        # anything else can be switched off on a cached authorization ...
+        (lambda: services.stop("cups.socket"), helper.KEEP),
         (lambda: services.disable("bluetooth.service", now=False), helper.KEEP),
+        # ... but switching on a unit Atropa doesn't manage asks every time
+        (lambda: services.start("bluetooth.service"), helper.ASK),
+        (lambda: services.restart("cups.service"), helper.ASK),
+        (lambda: services.enable("bluetooth.service", now=True), helper.ASK),
         (lambda: pacman.remove(["foo", "lib32-bar"], purge_config=True), helper.KEEP),
         (lambda: pacman.remove(["python-gobject"]), helper.KEEP),
         (lambda: network.connect_wifi("Café net"), helper.KEEP),
@@ -163,6 +168,11 @@ def test_shapes_atropa_never_sends_are_refused(argv):
 @pytest.mark.parametrize(
     "argv",
     [
+        # a root shell on tty9 without a password, now or at every boot
+        ["systemctl", "start", "debug-shell.service"],
+        ["systemctl", "enable", "debug-shell"],
+        ["systemctl", "restart", "emergency.target"],
+        ["systemctl", "start", "rescue.target"],
         ["chpasswd"],
         ["useradd", "-m", "-s", "/bin/bash", "bob"],
         ["usermod", "-G", "wheel", "bob"],
@@ -189,6 +199,8 @@ def test_root_equivalent_operations_need_the_ask_helper(argv):
     "argv",
     [
         ["systemctl", "restart", "sshd"],
+        ["systemctl", "stop", "debug-shell.service"],
+        ["systemctl", "disable", "--now", "anything.service"],
         ["pacman", "-Syu", "--noconfirm"],
         ["tee", "/etc/pacman.d/mirrorlist"],
         ["tee", "/etc/locale.gen"],
@@ -198,3 +210,21 @@ def test_root_equivalent_operations_need_the_ask_helper(argv):
 )
 def test_ordinary_operations_stay_in_the_keep_tier(argv):
     assert not helper.needs_fresh_auth(argv)
+
+
+def test_every_unit_the_backend_starts_by_name_is_managed():
+    # A literal unit the backend starts or enables itself must stay in the
+    # remembered tier, or Atropa's own features would ask every time.
+    import ast
+    from pathlib import Path
+
+    started = set()
+    for path in (Path(__file__).resolve().parent.parent / "atropa" / "backend").glob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.List) and len(node.elts) >= 3 and all(
+                isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts
+            ):
+                values = [e.value for e in node.elts]
+                if values[0] == "systemctl" and values[1] in {"start", "restart", "try-reload-or-restart", "enable"}:
+                    started.add(helper._unit_id(values[-1]))
+    assert started and started <= helper.MANAGED_UNITS, started - helper.MANAGED_UNITS
