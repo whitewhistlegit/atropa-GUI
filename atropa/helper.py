@@ -80,6 +80,8 @@ WRITE_FILES = frozenset(
         "/etc/fail2ban/jail.d/sshd.local",
         "/etc/locale.gen",
         "/etc/pacman.conf",
+        "/etc/pam.d/su",
+        "/etc/pam.d/su-l",
         "/etc/pacman.d/mirrorlist",
         "/etc/security/faillock.conf",
         "/etc/security/pwquality.conf",
@@ -105,12 +107,14 @@ WRITE_FILES = frozenset(
 SYMLINKED_FILES = {"/etc/selinux/config": "/etc/selinux/config."}
 
 # Managed files whose content can run code as root or open a login path:
-# pacman.conf (HookDir, unsigned repos), sshd_config (AuthorizedKeysCommand),
+# su's PAM stack (pam_permit), pacman.conf (HookDir, unsigned repos), sshd_config (AuthorizedKeysCommand),
 # SELinux mode, the kernel command line (init=), sysctl (core_pattern,
 # modprobe), fail2ban actions (shell commands), AppArmor profiles. Writes to
 # these go through the ask helper only.
 ASK_WRITE_FILES = frozenset(
     {
+        "/etc/pam.d/su",
+        "/etc/pam.d/su-l",
         "/etc/conf.d/snapper",
         "/etc/snapper/configs/root",
         "/etc/default/grub",

@@ -4,7 +4,8 @@ atropa.backend.hardening
 Deeper system hardening beyond the basics in security.py: kernel sysctl
 tuning, intrusion prevention (fail2ban), mandatory access control
 (AppArmor), device whitelisting (USBGuard), audit logging (auditd),
-known-CVE scanning (arch-audit), and login lockout policy (pam_faillock).
+known-CVE scanning (arch-audit), login lockout policy (pam_faillock), and
+restricting su to the wheel group.
 
 Two design choices worth flagging:
 
@@ -18,7 +19,9 @@ Two design choices worth flagging:
    every account, including root, with no easy recovery outside a live
    USB. We only touch /etc/security/faillock.conf, which is inert unless
    pam_faillock is already referenced, and we tell the user clearly which
-   case they're in.
+   case they're in. The one PAM edit made here is restricting su to wheel:
+   uncommenting a line util-linux ships commented out, in files that
+   haven't been edited by hand, and only for a user who is in wheel.
 """
 
 from __future__ import annotations
@@ -501,6 +504,116 @@ def set_password_complexity_policy(
     result = CommandResult(0, "", "")
     for key, value in (("minlen", minlen), ("dcredit", dcredit), ("ucredit", ucredit), ("lcredit", lcredit), ("ocredit", ocredit), ("retry", retry)):
         result = _set_pwquality_option(key, str(value))
+        if not result.ok:
+            return result
+    return result
+
+
+# ------------------------------------------------------ su restriction --
+#
+# CIS 5.6 / 6.1.x-style: only members of wheel may use `su`. Arch's
+# util-linux ships /etc/pam.d/su and su-l with exactly that line commented
+# out, so this uncomments it (and comments it back), touching that one
+# standard line and nothing else. A file without it has been edited by
+# hand, and Atropa leaves it alone rather than guess where the line goes:
+# this is the PAM stack, where a wrong line can lock root out. Writing
+# these files is an ask-tier operation in the helper.
+
+PAM_SU_FILES = (Path("/etc/pam.d/su"), Path("/etc/pam.d/su-l"))
+_SU_WHEEL_LINE = "auth           required        pam_wheel.so use_uid"
+_SU_WHEEL_ACTIVE = r"^auth\s+required\s+pam_wheel\.so\s+use_uid\s*$"
+_SU_WHEEL_COMMENTED = r"^#\s*auth\s+required\s+pam_wheel\.so\s+use_uid\s*$"
+
+
+@dataclass
+class SuRestriction:
+    # path -> "restricted" | "open" (the stock commented line) | "custom"
+    files: dict[str, str]
+    restricted: bool  # every su service file requires wheel
+    trusting: bool  # a pam_wheel `trust` line lets wheel use su with no password
+    user_in_wheel: bool
+
+
+def _su_file_state(text: str) -> tuple[str, bool]:
+    state = "custom"
+    trusting = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if re.match(_SU_WHEEL_COMMENTED, line):
+            state = "open" if state == "custom" else state
+            continue
+        tokens = line.split("#", 1)[0].split()
+        if len(tokens) < 3 or tokens[0] != "auth" or tokens[2].rsplit("/", 1)[-1] != "pam_wheel.so":
+            continue
+        options = tokens[3:]
+        if "trust" in options:
+            trusting = True
+        elif tokens[1] in ("required", "requisite") and "use_uid" in options and "deny" not in options:
+            state = "restricted"
+    return state, trusting
+
+
+def su_restriction_status(username: str | None = None) -> SuRestriction:
+    import getpass
+
+    from . import users
+
+    files = {}
+    trusting = False
+    for path in PAM_SU_FILES:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            files[str(path)] = "custom"
+            continue
+        state, trust = _su_file_state(text)
+        files[str(path)] = state
+        trusting = trusting or trust
+    name = username or getpass.getuser()
+    return SuRestriction(
+        files=files,
+        restricted=bool(files) and all(state == "restricted" for state in files.values()),
+        trusting=trusting,
+        user_in_wheel=name in users._admin_usernames(),
+    )
+
+
+def restrict_su_to_wheel() -> CommandResult:
+    """Uncomment the stock pam_wheel line in su and su-l."""
+    status = su_restriction_status()
+    if not status.user_in_wheel:
+        raise RuntimeError(
+            "You aren't in the wheel group, so this would stop you from using su. "
+            "Add yourself to wheel first (Users & Groups)."
+        )
+    custom = [path for path, state in status.files.items() if state == "custom"]
+    if custom:
+        raise RuntimeError(
+            f"{', '.join(custom)} has been edited by hand (no stock pam_wheel line); "
+            f"add '{_SU_WHEEL_LINE}' above the pam_unix.so auth line yourself."
+        )
+    result = CommandResult(0, "", "")
+    for path, state in status.files.items():
+        if state == "open":
+            result = run_privileged(["replace-in-file", path, _SU_WHEEL_COMMENTED, _SU_WHEEL_LINE])
+            if not result.ok:
+                return result
+    return result
+
+
+def allow_su_for_everyone() -> CommandResult:
+    """Comment the stock pam_wheel line back out; a hand-written one is left alone."""
+    result = CommandResult(0, "", "")
+    for path in PAM_SU_FILES:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        if not re.search(_SU_WHEEL_ACTIVE, text, re.MULTILINE):
+            continue
+        result = run_privileged(["replace-in-file", str(path), _SU_WHEEL_ACTIVE, "#" + _SU_WHEEL_LINE])
         if not result.ok:
             return result
     return result

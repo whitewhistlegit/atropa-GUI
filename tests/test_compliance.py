@@ -37,6 +37,10 @@ def _stub_all_checks_pass(fake_run, fake_which, monkeypatch, tmp_path):
     """Wires up fake_run/fake_which so hardening.run_audit() reports every
     check as a clean pass, for tests that care about scoring math rather
     than any one check's own logic."""
+    pam = tmp_path / "pam.d"
+    pam.mkdir(exist_ok=True)
+    (pam / "su").write_text("auth required pam_wheel.so use_uid\n")
+    monkeypatch.setattr(hardening, "PAM_SU_FILES", (pam / "su",))
     from atropa.backend import security as security_mod
 
     fake_which.update({"ufw", "sshd", "fail2ban-client", "aa-status", "auditctl", "arch-audit"})

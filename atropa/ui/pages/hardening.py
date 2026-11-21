@@ -159,6 +159,18 @@ class HardeningPage(BasePage):
         apply_pwq_btn.connect("clicked", self._on_apply_password_complexity)
         pwq_group.add(apply_pwq_btn)
 
+        # --- su restriction -----------------------------------------------------
+        su_group = self.add_group(
+            "Restrict su (pam_wheel)",
+            "Only members of the wheel group may use su - others can't become root even with root's password",
+        )
+        self.su_row = Adw.ActionRow(title="Checking…")
+        self.su_button = Gtk.Button(valign=Gtk.Align.CENTER, sensitive=False)
+        self.su_button.connect("clicked", self._on_su_button_clicked)
+        self.su_row.add_suffix(self.su_button)
+        su_group.add(self.su_row)
+        self._su_restricted = False
+
         # --- Audit rules (CIS) -----------------------------------------------------
         self.audit_rules_group = self.add_group(
             "Audit Rules (CIS)",
@@ -199,6 +211,7 @@ class HardeningPage(BasePage):
         self.run_async(hardening.auditd_status, self._on_ad_loaded)
         self.run_async(hardening.faillock_status, self._on_faillock_loaded)
         self.run_async(hardening.pwquality_status, self._on_pwquality_loaded)
+        self.run_async(hardening.su_restriction_status, self._on_su_loaded)
         self._refresh_audit_rule_statuses()
         self._run_audit()
 
@@ -436,6 +449,54 @@ class HardeningPage(BasePage):
                 self.cve_results_group.add(row)
                 self._cve_rows.append(row)
         return False
+
+    def _on_su_loaded(self, result, error) -> bool:
+        if error:
+            self.su_row.set_title("Couldn't read su's PAM configuration")
+            self.su_row.set_subtitle(esc(error))
+            self.su_button.set_visible(False)
+            return False
+        self._su_restricted = result.restricted
+        custom = [path for path, state in result.files.items() if state == "custom"]
+        self.su_button.set_visible(True)
+        self.su_button.set_sensitive(True)
+        self.su_button.set_tooltip_text(None)
+        if not result.files:
+            self.su_row.set_title("su isn't installed")
+            self.su_row.set_subtitle("")
+            self.su_button.set_visible(False)
+            return False
+        if result.restricted:
+            self.su_row.set_title("Only wheel members can use su")
+            self.su_button.set_label("Allow everyone")
+        else:
+            self.su_row.set_title("Anyone who knows root's password can use su")
+            self.su_button.set_label("Restrict to wheel")
+        subtitle = ", ".join(f"{path}: {state}" for path, state in result.files.items())
+        if result.trusting:
+            subtitle += " · a pam_wheel 'trust' line lets wheel use su with no password - check it by hand"
+        self.su_row.set_subtitle(esc(subtitle))
+        if custom and not result.restricted:
+            self.su_button.set_sensitive(False)
+            self.su_button.set_tooltip_text("Edited by hand - Atropa only changes the stock pam_wheel line")
+        elif not result.restricted and not result.user_in_wheel:
+            self.su_button.set_sensitive(False)
+            self.su_button.set_tooltip_text("You aren't in wheel, so this would lock you out of su")
+        return False
+
+    def _on_su_button_clicked(self, _btn: Gtk.Button) -> None:
+        if self._su_restricted:
+            self.run_action(hardening.allow_su_for_everyone, self.handle_command_result)
+            return
+        self.confirm(
+            "Restrict su to the wheel group?",
+            "Uncomments the stock 'auth required pam_wheel.so use_uid' line in /etc/pam.d/su and su-l "
+            "(backed up first). Users outside wheel can then no longer use su, even with root's password. "
+            "sudo and Atropa's own prompts aren't affected.",
+            "Restrict",
+            lambda: self.run_action(hardening.restrict_su_to_wheel, self.handle_command_result),
+            destructive=False,
+        )
 
     def _on_apply_faillock(self, _btn: Gtk.Button) -> None:
         deny = int(self.deny_row.get_value())

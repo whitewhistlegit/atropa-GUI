@@ -142,6 +142,8 @@ def privilege_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(privilege, "SYSTEM_BACKUP_DIR", system_backups)
     monkeypatch.setattr(privilege, "SYSTEM_BACKUP_MANIFEST", system_backups / "manifest.jsonl")
     monkeypatch.setattr(helper, "BACKUP_STORE", str(tmp_path / "helper-backups"))
+    # The su PAM files are read directly; never the developer's real ones.
+    monkeypatch.setattr(hardening, "PAM_SU_FILES", (tmp_path / "pam.d" / "su", tmp_path / "pam.d" / "su-l"))
     monkeypatch.setattr(privilege, "LOG_PATH", log_path)
 
     review_base = tmp_path / "selinux-review"
