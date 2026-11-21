@@ -40,6 +40,7 @@ _CATEGORY_MAP: dict[str, str] = {
     "SSH password auth": "Authentication & Access Control",
     "Login lockout (faillock)": "Authentication & Access Control",
     "Sudoers configuration": "Authentication & Access Control",
+    "su restricted to wheel": "Authentication & Access Control",
     "AppArmor": "Mandatory Access Control",
     "SELinux": "Mandatory Access Control",
     "USBGuard": "Device Control",
@@ -116,6 +117,16 @@ def _extra_checks() -> list:
         checks.append(
             hardening.AuditCheck("Login lockout (faillock)", "warn", "pam_faillock isn't wired into PAM")
         )
+
+    su = hardening.su_restriction_status()
+    if su.trusting:
+        checks.append(hardening.AuditCheck(
+            "su restricted to wheel", "warn", "A pam_wheel 'trust' line lets wheel members use su without a password",
+        ))
+    elif su.restricted:
+        checks.append(hardening.AuditCheck("su restricted to wheel", "pass", "Only wheel members can use su"))
+    elif su.files:
+        checks.append(hardening.AuditCheck("su restricted to wheel", "warn", "Any user who knows root's password can use su"))
 
     try:
         result = security.sudoers_check()

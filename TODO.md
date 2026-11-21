@@ -61,8 +61,9 @@ single-user Arch machine.
 
 ## Existing TODO (from DOCUMENTATION.md)
 
-- [ ] **`su` restriction to the wheel group** (CIS 6.1.x) - needs a live
-      edit of `/etc/pam.d/su`; pair it with PAM-wiring automation.
+- [x] **`su` restriction to the wheel group** (CIS 6.1.x) - uncomments the
+      stock `pam_wheel.so use_uid` line in `/etc/pam.d/su` and `su-l`
+      (Hardening page); hand-edited files are left alone.
 - [ ] **Bootloader/AppArmor kernel parameter and PAM-wiring automation** -
       lean on the backup mechanism; e.g. keep the previous kernel cmdline as
       a separate boot entry so a bad boot can pick the old one.

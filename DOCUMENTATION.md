@@ -761,6 +761,19 @@ separate, richer modules; see below). Covers:
   `tee -a` and the line on stdin (`_append_line()`), not a root shell.
   `vulnerability_scan()` raises when `arch-audit` itself fails (e.g. offline)
   rather than returning an empty "nothing vulnerable" list.
+- **su restricted to wheel** (`su_restriction_status`, `restrict_su_to_wheel`,
+  `allow_su_for_everyone`). The one PAM edit Atropa makes: Arch's util-linux
+  ships `/etc/pam.d/su` and `su-l` with `auth required pam_wheel.so use_uid`
+  commented out, and Atropa uncomments exactly that line (and comments it
+  back), nothing else. Each file is `restricted`, `open` (the stock
+  commented line) or `custom` (edited by hand - refused, with the line to
+  add yourself). Restricting is refused when you aren't in wheel, since it
+  would lock you out of su. A pam_wheel `trust` line (wheel uses su with no
+  password) is reported as a warning. Both files are ask-tier writes in the
+  helper, backed up by it first, and restorable from Activity. The
+  compliance report scores it as "su restricted to wheel". Verified in the
+  VM: a user outside wheel gets `su: Permission denied`, a wheel member
+  still switches users, and reverting restores the stock files.
 - `run_audit() -> list[AuditCheck]` — rollup pass/warn/fail/info across all of
   the above plus firewall/SSH from `security.py` plus SELinux status; powers
   the "Security Audit" score section
@@ -2091,7 +2104,7 @@ exactly one definition.
     make the finding trivially pass regardless of what root's real
     interactive shell `PATH` actually contains.
   - `su` restriction to the wheel group (also originally scoped for Phase
-    2) was **not implemented** - editing `/etc/pam.d/su` carries the exact
+    2) was **not implemented** at the time (it is now: see Hardening) - editing `/etc/pam.d/su` carries the exact
     same lockout risk Phase 1 already declined for `pam_faillock`/
     `pam_pwquality` wiring, and CIS DIL's own control here is itself a PAM
     edit, not a read-only check like everything else in this phase. Left
@@ -2845,12 +2858,6 @@ exactly one definition.
   from the release tarball instead of the git head.
 
 **Still open:**
-- `su` restriction to the wheel group (CIS 6.1.x) - deferred from Phase 2
-  since it requires the same kind of live PAM edit (`/etc/pam.d/su`) that
-  Phase 1 already declined to automate; a natural pairing for whenever
-  real PAM-wiring automation (below) gets built, since at that point
-  there'd already be a safe, tested pattern to extend rather than a new
-  one-off risk
 - Bootloader/AppArmor kernel-param and PAM-wiring automation, **now that a
   backup mechanism exists** to lean on — could pair with e.g. keeping the
   previous kernel cmdline as a separate boot entry so a bad boot just picks

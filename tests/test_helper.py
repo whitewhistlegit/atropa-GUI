@@ -396,6 +396,7 @@ def test_policy_covers_every_path_the_backend_manages(monkeypatch):
         hardening.FAIL2BAN_SSHD_JAIL,
         hardening.USBGUARD_RULES,
         str(hardening.PWQUALITY_CONF),
+        "/etc/pam.d/su", "/etc/pam.d/su-l",  # hardening.PAM_SU_FILES; conftest points that at tmp
         str(security.SSHD_CONFIG),
         str(selinux.SELINUX_CONFIG),
         str(bootloader.GRUB_DEFAULT_PATH),
