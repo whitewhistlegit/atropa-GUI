@@ -299,3 +299,17 @@ def test_read_backup_of_a_system_backup_uses_backup_show(with_helper, fake_run, 
     fake_run.set_response(["pkexec"], stdout="content")
     assert privilege.read_backup("s.bak", "system") == "content"
     assert fake_run.calls[-1][-2:] == ["backup-show", "s.bak"]
+
+
+def test_backup_show_refuses_a_backup_of_a_file_cat_may_not_read(etc, monkeypatch):
+    # pacnew-apply replaces any /etc file, e.g. sudoers; its backup must not
+    # become a way to read that file on a cached authorization.
+    live = etc / "sudoers"
+    live.write_text("root-only\n")
+    (etc / "sudoers.pacnew").write_text("new\n")
+    monkeypatch.setattr(helper, "WRITE_DIRS", ())
+    handle(["pacnew-apply", str(etc / "sudoers.pacnew")])
+    (entry,) = manifest()
+
+    with pytest.raises(helper.Refused, match="isn't a file Atropa reads"):
+        handle(["backup-show", entry["backup_file"]])

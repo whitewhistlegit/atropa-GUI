@@ -1130,10 +1130,16 @@ def _read_backup(name: str) -> bytes:
 
 
 def _backup_show(argv: list[str]) -> int:
-    """`backup-show NAME`: print a backup's content."""
+    """
+    `backup-show NAME`: print a backup's content - only of a file `cat`
+    may read. pacnew-apply backs up whatever /etc file it replaces (a root
+    can still restore those by hand), and showing a backup must not read
+    more than reading the file itself would.
+    """
     if len(argv) != 2:
         raise Refused("backup-show takes one backup name")
-    _backup_entry(argv[1])
+    entry = _backup_entry(argv[1])
+    _checked_read_path(entry["original_path"])
     sys.stdout.buffer.write(_read_backup(argv[1]))
     sys.stdout.flush()
     return 0
