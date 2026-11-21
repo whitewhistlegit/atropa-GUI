@@ -1,4 +1,4 @@
-"""atropa.ui.pages.power - Power module (profiles, battery limits, and zram swap)."""
+"""atropa.ui.pages.power - Power module (profiles, battery limits, lid/sleep, and zram swap)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from atropa.backend import power
+from atropa.backend import power, sleep
 from atropa.backend.privilege import path_exists
 from atropa.ui.pages import BasePage, esc
 
@@ -19,6 +19,22 @@ PROFILE_LABELS = {
     "balanced": "Balanced",
     "performance": "Performance",
 }
+
+
+ACTION_LABELS = {
+    "suspend": "Suspend",
+    "suspend-then-hibernate": "Suspend, then hibernate",
+    "hibernate": "Hibernate",
+    "hybrid-sleep": "Hybrid sleep",
+    "lock": "Lock the screen",
+    "poweroff": "Power off",
+    "ignore": "Do nothing",
+}
+
+# Hibernate delays offered for suspend-then-hibernate; None is systemd's own
+# choice (it estimates from the battery, or uses 2 hours).
+DELAYS = [(None, "Automatic"), ("30min", "30 minutes"), ("1h", "1 hour"), ("2h", "2 hours"),
+          ("4h", "4 hours"), ("8h", "8 hours")]
 
 
 def _humanise(name: str) -> str:
@@ -52,6 +68,24 @@ class PowerPage(BasePage):
             "Charge limits are only available on hardware that exposes one - many laptops don't.",
         )
 
+        self._sleep_actions: list[str] = []
+        self._sleep_rows: list = []
+        self.sleep_group = self.add_group(
+            "Lid and power button",
+            "Written to Atropa's own logind and sleep drop-ins; logind is reloaded, so your session stays up.",
+        )
+        self.lid_row = self._action_row("Closing the lid on battery")
+        self.lid_ac_row = self._action_row("Closing the lid when plugged in")
+        self.power_key_row = self._action_row("Pressing the power button")
+        self.delay_row = Adw.ComboRow(title="Hibernate after", subtitle="For “Suspend, then hibernate”")
+        self.delay_row.set_use_markup(False)
+        self._delays = list(DELAYS)
+        self.delay_row.set_model(Gtk.StringList.new([label for _value, label in self._delays]))
+        self.sleep_group.add(self.delay_row)
+        self.sleep_apply_btn = Gtk.Button(label="Apply", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
+        self.sleep_apply_btn.connect("clicked", self._on_apply_sleep_clicked)
+        self.sleep_group.set_header_suffix(self.sleep_apply_btn)
+
         self.swap_group = self.add_group("Swap", "zram devices, total swap, and whether hibernation can work.")
 
         self.zram_group = self.add_group("zram swap", "Compressed swap in RAM, set up by zram-generator.")
@@ -77,6 +111,9 @@ class PowerPage(BasePage):
         self._drop_rows(self.swap_group, "_swap_rows")
         self._swap_rows = [self.start_loading(self.swap_group, "Reading swap…")]
         self.run_async(self._read_swap_state, self._on_swap_loaded)
+
+        self.sleep_apply_btn.set_sensitive(False)
+        self.run_async(self._read_sleep_state, self._on_sleep_loaded)
 
         self._drop_rows(self.zram_group, "_zram_rows")
         self._zram_rows = [self.start_loading(self.zram_group, "Reading zram configuration…")]
@@ -197,6 +234,82 @@ class PowerPage(BasePage):
     def _on_apply_charge_limit(self, name: str, spin: Adw.SpinRow) -> None:
         limit = int(spin.get_value())
         self.run_action(lambda: power.set_charge_limit(name, limit), self.handle_command_result)
+
+    # -- lid, power button and hibernate delay -------------------------------
+
+    def _action_row(self, title: str) -> Adw.ComboRow:
+        row = Adw.ComboRow(title=title, subtitle="Reading…")
+        row.set_use_markup(False)
+        self.sleep_group.add(row)
+        return row
+
+    def _read_sleep_state(self):
+        return sleep.read_settings(), power.hibernate_status().supported
+
+    def _on_sleep_loaded(self, result, error) -> bool:
+        if error:
+            for row in (self.lid_row, self.lid_ac_row, self.power_key_row):
+                row.set_subtitle(f"Couldn't read the logind configuration: {error}")
+                row.set_sensitive(False)
+            return False
+
+        settings, can_hibernate = result
+        # Hibernating actions only where the kernel offers hibernation -
+        # but a value already set is always shown, never silently changed.
+        actions = [a for a in sleep.ACTIONS if can_hibernate or a not in sleep.HIBERNATING_ACTIONS]
+        for setting in (settings.lid, settings.lid_external_power, settings.power_key):
+            if setting.value and setting.value not in actions:
+                actions.append(setting.value)
+        self._sleep_actions = actions
+        model_labels = [ACTION_LABELS.get(a, _humanise(a)) for a in actions]
+
+        for row, setting in (
+            (self.lid_row, settings.lid),
+            (self.lid_ac_row, settings.lid_external_power),
+            (self.power_key_row, settings.power_key),
+        ):
+            row.set_model(Gtk.StringList.new(model_labels))
+            if setting.value in actions:
+                row.set_selected(actions.index(setting.value))
+            row.set_subtitle(f"from {setting.source}")
+            row.set_sensitive(True)
+        self.lid_row.set_visible(settings.has_lid)
+        self.lid_ac_row.set_visible(settings.has_lid)
+
+        # A hand-set delay (say 45min) is offered as itself rather than
+        # being rounded to one of ours.
+        delay = settings.hibernate_delay.value
+        self._delays = list(DELAYS)
+        if delay is not None and delay not in [value for value, _label in self._delays]:
+            self._delays.append((delay, delay))
+        self.delay_row.set_model(Gtk.StringList.new([label for _value, label in self._delays]))
+        self.delay_row.set_selected([value for value, _label in self._delays].index(delay))
+        self.delay_row.set_subtitle(f"For “Suspend, then hibernate” · from {settings.hibernate_delay.source}")
+        self.delay_row.set_visible(can_hibernate)
+        self.sleep_apply_btn.set_sensitive(True)
+        return False
+
+    def _on_apply_sleep_clicked(self, _btn: Gtk.Button) -> None:
+        actions = self._sleep_actions
+        if not actions:
+            return
+        lid, lid_ac, power_key = (
+            actions[row.get_selected()] for row in (self.lid_row, self.lid_ac_row, self.power_key_row)
+        )
+        delay = self._delays[self.delay_row.get_selected()][0]
+
+        def apply():
+            result = sleep.apply_logind(lid, lid_ac, power_key)
+            if result.ok:
+                result = sleep.apply_sleep(delay)
+            return result
+
+        def done(result, error) -> bool:
+            self.handle_command_result(result, error, "Lid and power button settings applied", refresh=False)
+            self.run_async(self._read_sleep_state, self._on_sleep_loaded)
+            return False
+
+        self.run_action(apply, done)
 
     # -- swap and zram state ------------------------------------------------
 

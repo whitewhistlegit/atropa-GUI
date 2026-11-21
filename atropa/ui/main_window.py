@@ -190,7 +190,7 @@ MODULES = [
     ),
     Module(
         "power", "Power", "battery-good-symbolic", PowerPage,
-        "Power profiles, battery limits, and zram swap", "maintenance",
+        "Power profiles, battery limits, lid and sleep, zram swap", "maintenance",
     ),
     Module(
         "flatpak", "Flatpak", "package-x-generic-symbolic", FlatpakPage,

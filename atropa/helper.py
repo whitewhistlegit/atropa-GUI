@@ -87,6 +87,8 @@ WRITE_FILES = frozenset(
         "/etc/snapper/configs/root",
         "/etc/ssh/sshd_config",
         "/etc/sysctl.d/99-atropa-hardening.conf",
+        "/etc/systemd/logind.conf.d/50-atropa.conf",
+        "/etc/systemd/sleep.conf.d/50-atropa.conf",
         "/etc/systemd/zram-generator.conf",
         "/etc/usbguard/rules.conf",
         "/var/lib/aide/aide.db",
@@ -140,7 +142,12 @@ WRITE_DIRS = (
 )
 
 # Directories mkdir -p may create.
-MKDIR_DIRS = frozenset({"/etc/atropa", "/etc/atropa/plugins", "/etc/audit/rules.d"})
+MKDIR_DIRS = frozenset(
+    {
+        "/etc/atropa", "/etc/atropa/plugins", "/etc/audit/rules.d",
+        "/etc/systemd/logind.conf.d", "/etc/systemd/sleep.conf.d",
+    }
+)
 
 # cp: sources are the AIDE database or the legacy plugin tree; destinations
 # are the AIDE database, the plugin directory, or the enabled-state file.
@@ -753,6 +760,9 @@ def _unit_id(name: str) -> str:
 def _systemctl(args):
     if args == ["daemon-reload"]:
         return KEEP, ["daemon-reload"]
+    if args == ["reload", "systemd-logind.service"]:
+        # Re-reads logind.conf without ending sessions, which a restart would.
+        return KEEP, list(args)
     verbs = _ACTIVATING_VERBS | {"stop", "disable"}
     rest = [arg for arg in args[1:] if arg != "--now"]
     now = len(rest) != len(args) - 1
@@ -760,7 +770,7 @@ def _systemctl(args):
         validated = list(args[:1]) + [arg if arg == "--now" else _value(arg, _UNIT_RE, "unit name") for arg in args[1:]]
         activating = args[0] in _ACTIVATING_VERBS
         return (ASK if activating and _unit_id(rest[0]) not in MANAGED_UNITS else KEEP), validated
-    raise Refused("systemctl must be daemon-reload or VERB UNIT (enable/disable may add --now)")
+    raise Refused("systemctl must be daemon-reload, reload systemd-logind.service, or VERB UNIT (enable/disable may add --now)")
 
 
 def _timedatectl(args):
