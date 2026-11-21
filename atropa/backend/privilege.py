@@ -39,6 +39,15 @@ HELPER_PATH = Path("/usr/lib/atropa/atropa-helper")
 # and ask for the password every time.
 ASK_HELPER_PATH = Path("/usr/lib/atropa/atropa-helper-ask")
 
+# Where backups go when the helper is installed: it makes them itself, as
+# root, right before it overwrites a file (see helper.backup_before_write).
+# The manifest is world-readable, the copies root-only.
+SYSTEM_BACKUP_DIR = Path("/var/lib/atropa/backups")
+SYSTEM_BACKUP_MANIFEST = SYSTEM_BACKUP_DIR / "manifest.jsonl"
+
+# Where backups went before that, and still go without the helper (a source
+# checkout). Anything running as the user can change these, so with the
+# helper installed they can be viewed but not restored.
 BACKUP_DIR = Path.home() / ".local" / "share" / "atropa" / "backups"
 BACKUP_MANIFEST = BACKUP_DIR / "manifest.jsonl"
 
@@ -401,11 +410,18 @@ def path_exists(path: str | Path) -> bool | None:
 
 def backup_file(path: str) -> str | None:
     """
-    Copies `path` into BACKUP_DIR with a timestamp suffix before a risky
-    edit touches it. Returns the backup's filename (not full path - that's
-    what restore_file() expects), or None if the source doesn't exist yet
-    (nothing to back up, e.g. a config file being created for the first time).
+    Backs `path` up before a risky edit touches it. With the helper
+    installed this does nothing and returns None: the helper backs the file
+    up itself, as root, when the edit writes it - a copy made here, in the
+    home directory, is one anything running as the user could change before
+    Restore wrote it back as root.
+
+    Without the helper (a source checkout) it copies `path` into BACKUP_DIR
+    with a timestamp suffix and returns the backup's filename, or None if
+    the source doesn't exist yet (nothing to back up).
     """
+    if helper_available():
+        return None
     src = Path(path)
     if path_exists(src) is False:
         return None  # can't-tell (None) falls through to the privileged read below
@@ -476,35 +492,63 @@ def _is_backup_name(name: str) -> bool:
     return isinstance(name, str) and "/" not in name and name not in ("", ".", "..")
 
 
-def restore_file(backup_file_name: str, original_path: str) -> CommandResult:
+def restore_file(backup_file_name: str, original_path: str, stored: str = "home") -> CommandResult:
     """
     Writes a previously-made backup back to its original location. Always
     privileged, since everything we back up lives under /etc or on the
     ESP. Refuses a path restorable() turns down.
+
+    stored="system" is a backup in SYSTEM_BACKUP_DIR: the helper reads it
+    and writes it back itself, so its content never passes through
+    anything the user can change. stored="home" is one in BACKUP_DIR,
+    which is only restored when there's no helper to have made it.
     """
     if not restorable(original_path):
         raise PrivilegeError(f"{original_path} isn't a file Atropa backs up, so it won't restore over it")
     if not _is_backup_name(backup_file_name):
         raise PrivilegeError(f"{backup_file_name!r} isn't the name of a backup")
-    src = BACKUP_DIR / backup_file_name
-    if not src.exists():
-        raise PrivilegeError(f"Backup {backup_file_name} no longer exists")
-    content = src.read_text(encoding="utf-8", errors="replace")
-    result = run_privileged(["tee", original_path], input_text=content)
+    if stored == "system":
+        result = run_privileged(["backup-restore", backup_file_name, original_path])
+    elif stored == "home":
+        if helper_available():
+            raise PrivilegeError(
+                f"{backup_file_name} is kept in your home directory, where it could have been changed; "
+                "Atropa only restores the backups it keeps in " + str(SYSTEM_BACKUP_DIR)
+            )
+        src = BACKUP_DIR / backup_file_name
+        if not src.exists():
+            raise PrivilegeError(f"Backup {backup_file_name} no longer exists")
+        content = src.read_text(encoding="utf-8", errors="replace")
+        result = run_privileged(["tee", original_path], input_text=content)
+    else:
+        raise PrivilegeError(f"unknown backup store {stored!r}")
     if result.ok:
         logger.info("Restored %s from %s", original_path, backup_file_name)
     return result
 
 
-def list_backups(limit: int = 200) -> list[dict]:
-    """
-    Most-recent-first list of {timestamp, original_path, backup_file,
-    restorable} entries; restorable says whether restore_file() takes it.
-    """
-    if not BACKUP_MANIFEST.exists():
+def read_backup(backup_file_name: str, stored: str = "home") -> str:
+    """A backup's content. A system one is root-only, so it's read through the helper."""
+    if not _is_backup_name(backup_file_name):
+        raise PrivilegeError(f"{backup_file_name!r} isn't the name of a backup")
+    if stored == "system":
+        result = run_privileged(["backup-show", backup_file_name])
+        if not result.ok:
+            raise PrivilegeError(result.stderr.strip() or f"Couldn't read {backup_file_name}")
+        return result.stdout
+    return (BACKUP_DIR / backup_file_name).read_text(encoding="utf-8", errors="replace")
+
+
+def _manifest_entries(manifest: Path) -> list[dict]:
+    try:
+        text = manifest.read_text(encoding="utf-8", errors="replace")
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except PermissionError:
+        logger.warning("Can't read %s", manifest)
         return []
     entries = []
-    for line in BACKUP_MANIFEST.read_text(encoding="utf-8", errors="replace").strip().splitlines():
+    for line in text.strip().splitlines():
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
@@ -513,9 +557,28 @@ def list_backups(limit: int = 200) -> list[dict]:
             isinstance(entry.get(key), str) for key in ("timestamp", "original_path", "backup_file")
         ):
             entries.append(entry)
-    entries = list(reversed(entries))[:limit]
+    return entries
+
+
+def list_backups(limit: int = 200) -> list[dict]:
+    """
+    Most-recent-first list of {timestamp, original_path, backup_file,
+    stored, restorable} entries from both stores; stored is "system" or
+    "home" (pass it on to read_backup/restore_file) and restorable says
+    whether restore_file() takes the entry.
+    """
+    helper = helper_available()
+    entries = []
+    for stored, manifest in (("system", SYSTEM_BACKUP_MANIFEST), ("home", BACKUP_MANIFEST)):
+        for entry in _manifest_entries(manifest):
+            entry["stored"] = stored
+            entries.append(entry)
+    # Timestamps are fixed-width (YYYYmmdd_HHMMSS_ffffff), so they sort as text.
+    entries.sort(key=lambda entry: entry["timestamp"], reverse=True)
+    entries = entries[:limit]
     for entry in entries:
-        entry["restorable"] = restorable(entry["original_path"]) and _is_backup_name(entry["backup_file"])
+        store_ok = helper if entry["stored"] == "system" else not helper
+        entry["restorable"] = store_ok and restorable(entry["original_path"]) and _is_backup_name(entry["backup_file"])
     return entries
 
 

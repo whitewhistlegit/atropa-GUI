@@ -64,8 +64,9 @@ Each sidebar entry is a module:
 | **Add-ons** | Enable/disable declarative TOML plugins (see below) |
 | **Activity & Backups** | Log of every privileged command, automatic config-file backups with restore, migration from old ArchYaST data |
 
-Every config file Atropa edits is backed up first to
-`~/.local/share/atropa/backups/`, and every privileged command is logged to
+Every config file Atropa edits is backed up first, by the root helper, to
+`/var/lib/atropa/backups/` (root-owned, so nothing running as you can
+change a backup before it's restored), and every privileged command is logged to
 `~/.local/share/atropa/actions.log`. Commands are always invoked as an
 argument list through `pkexec`/`sudo` - never through a shell - so a package
 name, username or mirror URL cannot turn into a second command. The first

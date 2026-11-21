@@ -106,10 +106,10 @@ single-user Arch machine.
       helper ("No session for cookie"), so the keep-vs-ask prompting was
       verified by polkit's action choice and by running both helpers via
       sudo, not by typing a password.
-- [ ] **Root-owned backups** - move `~/.local/share/atropa/backups` to
-      root-owned storage with a root-owned manifest, written/restored by the
-      helper. Today anything running as the user can change a backup's
-      contents in `~/.local/share/atropa/backups`.
+- [x] **Root-owned backups** - the helper backs a file up itself, as root,
+      before overwriting it, into `/var/lib/atropa/backups`; `backup-show`
+      and `backup-restore` read and restore them. Old home backups stay
+      viewable but aren't restored while the helper is installed.
 
 ## SELinux Denial Review
 
