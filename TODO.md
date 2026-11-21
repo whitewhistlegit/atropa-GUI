@@ -42,9 +42,10 @@ single-user Arch machine.
       cleanup beyond the pacman cache (journal size, `~/.cache`, coredumps).
 - [x] **Power and memory** - `power-profiles-daemon` or TLP, laptop battery
       charge limits, zram swap. Sleep/hibernate state is reported.
-- [ ] **Sleep/hibernate configuration** - lid-close behaviour and hibernate
-      delay in `logind.conf`; applying it needs a logind restart, which can
-      end the graphical session, so it stays a manual edit for now.
+- [x] **Sleep/hibernate configuration** - lid close (on battery and
+      plugged in), power button and the suspend-then-hibernate delay, in
+      Atropa's own logind/sleep drop-ins. logind is reloaded, not
+      restarted, so the session stays up.
 - [x] **Flatpak** - updates and removing unused runtimes, next to the
       pacman page.
 

@@ -1246,10 +1246,28 @@ feasibility, and enabling zram swap by writing
 `/etc/systemd/zram-generator.conf` (backed up first) and starting the setup
 unit. Every read degrades to empty/None instead of raising: a desktop has no
 battery and a machine without power-profiles-daemon still has a Power page.
-Sleep/hibernate is *reported* (advertised states, swap vs RAM) rather than
-reconfigured: changing logind's lid/sleep behaviour needs a logind restart,
-which can end the graphical session, so it stays a manual `/etc/systemd/
-logind.conf` edit.
+
+**Lid and power button** (`sleep.py`). What closing the lid (on battery and
+plugged in) and pressing the power button do, and how long
+suspend-then-hibernate stays suspended. Atropa writes its own drop-ins,
+`/etc/systemd/logind.conf.d/50-atropa.conf` and
+`/etc/systemd/sleep.conf.d/50-atropa.conf`, so a hand-edited `logind.conf`
+is never rewritten; deleting them goes back to it. Applying reloads
+systemd-logind (`systemctl reload`, the one reload the helper allows),
+which re-reads the configuration without ending sessions - a restart would
+end the graphical session, which is why this used to be a manual edit.
+systemd-sleep reads `sleep.conf` at each suspend, so that drop-in needs
+nothing.
+
+`read_settings()` follows systemd's precedence (the first main file of
+/etc, /run, /usr/local/lib, /usr/lib, then every `*.conf` drop-in in file
+name order, a name in /etc hiding the same name below it, last assignment
+wins, an empty one resets) and reports each value with the file it came
+from, so a later drop-in that overrides Atropa's shows up on the page.
+Hibernating actions are only offered when the kernel advertises `disk`;
+a value already set is always shown. The lid rows only appear when
+`/proc/acpi/button/lid` exists. The delay accepts any one-line systemd time
+span, so a hand-set `1h 30min` survives an Apply.
 
 ### Flatpak (`flatpak.py` / `pages/flatpak.py`)
 

@@ -58,7 +58,7 @@ Each sidebar entry is a module:
 | **Package History** | Recent pacman transactions from `pacman.log`; roll one back by reinstalling the versions it replaced from the package cache (asks every time). Clean keeps the previous version so this stays possible |
 | **Firmware** | fwupd devices and updates, streamed |
 | **Mirrors** | Rank Arch mirrors with `reflector` and replace the mirrorlist (backed up first) |
-| **Power** | Power profiles, battery charge limits, zram swap, hibernation feasibility |
+| **Power** | Power profiles, battery charge limits, lid/power-button/hibernate-delay settings, zram swap, hibernation feasibility |
 | **Flatpak** | Installed apps, updates, unused-runtime cleanup |
 | **Dependencies** | Which external tools each module needs, with install buttons for the ones `pacman` can install |
 | **Add-ons** | Enable/disable declarative TOML plugins (see below) |
