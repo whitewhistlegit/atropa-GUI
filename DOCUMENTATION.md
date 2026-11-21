@@ -218,8 +218,7 @@ Tests never load the host's policy: `no_host_policy` (conftest) replaces
 
 ### Operation-level privileged helper (design)
 
-Phases 1 and 2 are implemented; phase 3 (root-owned backups) is the
-remaining TODO.
+All three phases are implemented.
 
 **Why breadth matters now.** `auth_admin_keep` caches the authorization, so
 the helper's reach is what an attacker with a user-level foothold gets
@@ -306,12 +305,35 @@ firewall ports, booleans or AppArmor modes, write the non-root-equivalent
 managed files (mirrorlist, locale.gen, audit rules, ...). That is admin
 power, but no code an attacker controls runs as root.
 
-**Phase 3 - root-owned backups.** Move `~/.local/share/atropa/backups` to a
-root-owned directory with a root-owned manifest, and have the helper do the
-copy/restore. Today `restore_file()` only writes to files Atropa backs up,
-but the backup *contents* are user-writable: a compromised user could plant
-a modified backup and rely on the admin restoring it. The helper already has
-the write policy needed to verify a restore target.
+**Phase 3 - root-owned backups.** Backups used to be copies the app made in
+`~/.local/share/atropa/backups`, where anything running as the user could
+change one and wait for Restore to write it back as root. Now the helper
+makes them itself: `tee`, `install`, `replace-in-file` (when it changes
+something) and `pacnew-apply` copy the file they are about to overwrite
+into `/var/lib/atropa/backups` first (`helper.backup_before_write`). That
+covers every existing regular file under `/etc` plus systemd-boot's
+`loader.conf`, up to 1 MiB; a symlink is never followed into the store.
+
+- Layout: the directory and `manifest.jsonl` are `0755`/`0644` root (names
+  and paths only, so the app lists backups without a password); each
+  `<name>.<timestamp>.bak` is `0600` root, since some originals are
+  root-only.
+- One backup per operation: a write within `BACKUP_WINDOW_SECONDS` (60) of
+  the last backup of the same file is taken to be part of that operation,
+  so a multi-step edit of `pacman.conf` leaves its starting state, not every
+  step. The newest `BACKUP_KEEP_PER_FILE` (30) backups of each file are kept.
+- A failed backup (full disk) is reported on stderr and doesn't stop the
+  write.
+- `backup-show NAME` prints a listed backup (keep tier). `backup-restore
+  NAME PATH` writes it back: `PATH` must be the path the manifest recorded
+  and pass the normal write policy, its tier is the tier of writing `PATH`
+  (restoring `sshd_config` asks every time), and the file being replaced is
+  backed up first so a restore can be undone. The content goes from the
+  store to the file inside the helper, never through the app.
+- With the helper installed, `privilege.backup_file()` does nothing; without
+  it (a source checkout) it still copies into the home directory as before.
+  Old home backups stay listed and viewable, marked "kept in your home
+  folder", but are only restorable when there is no helper.
 
 **Timeouts hold, even for a child that runs as root.** Commands start in
 `privilege._subprocess_run()`, which has `subprocess.run()`'s interface but
@@ -358,12 +380,17 @@ def backup_file(path: str) -> str | None:
     """Returns the backup's filename (not full path), or None if path doesn't exist yet."""
 ```
 
-Backups land in `~/.local/share/atropa/backups/<name>.<timestamp>.bak`,
-with a JSONL manifest (`manifest.jsonl`) recording `{timestamp, original_path,
-backup_file}`. `list_backups()` and `restore_file(backup_file_name,
-original_path)` (writes it back via `tee`, privileged) power the Activity &
-Backups page's restore button. The manifest sits in the user's home, where
-any program they run can add entries, so `restore_file()` only writes to
+With the helper installed, the helper makes backups itself in
+`/var/lib/atropa/backups` as it writes (see "Phase 3 - root-owned backups"),
+and `backup_file()` returns None. Without it, backups land in
+`~/.local/share/atropa/backups/<name>.<timestamp>.bak`. Both stores keep a
+JSONL manifest (`manifest.jsonl`) recording `{timestamp, original_path,
+backup_file}`. `list_backups()` merges them (each entry gets `stored`:
+`"system"` or `"home"`), and `read_backup(name, stored)` and
+`restore_file(backup_file_name, original_path, stored)` power the Activity
+& Backups page. A home manifest can be edited by any program the user
+runs, so home backups are only restored when there is no helper, and
+`restore_file()` only writes to
 paths `restorable()` accepts: the files listed below, profiles under
 `/etc/apparmor.d/`, and `loader/loader.conf` on the ESP. `list_backups()`
 marks each entry `restorable`, and the page disables Restore for the rest.
@@ -439,10 +466,11 @@ authenticate() -> CommandResult                      # asks for the admin passwo
 run_privileged_streaming(argv, on_line, input_text=None, timeout=1800)   -> CommandResult   # live line-by-line output
 run_unprivileged_streaming(argv, on_line, input_text=None, timeout=1800) -> CommandResult   # same, no escalation
 path_exists(path) -> bool | None                     # None = can't tell
-backup_file(path) -> str | None                      # filename only, not full path
+backup_file(path) -> str | None                      # None with the helper (it backs up on write)
 restorable(path) -> bool                             # one of the files Atropa backs up?
-restore_file(backup_file_name, original_path) -> CommandResult   # PrivilegeError unless restorable()
-list_backups(limit=200) -> list[dict]                # most-recent-first, each with a "restorable" flag
+restore_file(backup_file_name, original_path, stored="home") -> CommandResult   # PrivilegeError unless restorable()
+read_backup(backup_file_name, stored="home") -> str  # a "system" one through the helper's backup-show
+list_backups(limit=200) -> list[dict]                # both stores, most-recent-first, "stored" + "restorable"
 get_recent_actions(limit=200) -> list[str]           # most-recent-first tail of actions.log
 ```
 A timeout raises `PrivilegeError` (see "Timeouts hold" in section 1); the
@@ -2830,13 +2858,9 @@ exactly one definition.
   suite never imports GTK), Python 3.13/3.14 in the matrix next to
   3.11/3.12, and tests that run the parsers against real config files
   rather than hand-written snippets
-- The privileged helper is installed and remembers authorization now (see
-  Architecture), but it is still a *command* allowlist rather than one
-  entry point per operation. The next step is an operation-level API; it
-  is also where backups should move to root-owned storage:
-  `restore_file()` only writes to the files Atropa backs up, but anything
-  running as the user can still change a backup's contents in
-  `~/.local/share/atropa/backups`
+- The privileged helper is still a *command* allowlist (validated per
+  program and argument shape, in two tiers) rather than one entry point
+  per operation
 
 ---
 

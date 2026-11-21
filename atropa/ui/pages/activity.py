@@ -170,6 +170,8 @@ class ActivityPage(BasePage):
 
         for entry in result[:100]:
             subtitle = f"{entry['original_path']} · {self._format_timestamp(entry['timestamp'])}"
+            if entry.get("stored") == "home":
+                subtitle += " · kept in your home folder"
             row = Adw.ActionRow(title=esc(entry["backup_file"]), subtitle=esc(subtitle))
 
             view_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER, css_classes=["flat"])
@@ -180,7 +182,14 @@ class ActivityPage(BasePage):
             restore_btn.connect("clicked", self._on_restore_backup, entry)
             if not entry.get("restorable"):
                 restore_btn.set_sensitive(False)
-                restore_btn.set_tooltip_text("Atropa doesn't back up this file, so it won't restore it")
+                if entry.get("stored") == "home" and privilege.helper_available():
+                    restore_btn.set_tooltip_text(
+                        "Made before backups moved to root-owned storage. Anything running as you "
+                        "could have changed it, so Atropa won't write it back as root; View it "
+                        "and copy what you need instead."
+                    )
+                else:
+                    restore_btn.set_tooltip_text("Atropa doesn't back up this file, so it won't restore it")
             row.add_suffix(restore_btn)
 
             self.backups_group.add(row)
@@ -197,11 +206,17 @@ class ActivityPage(BasePage):
             return raw
 
     def _on_view_backup(self, _btn: Gtk.Button, entry: dict) -> None:
-        try:
-            content = (privilege.BACKUP_DIR / entry["backup_file"]).read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            self.notify(f"Couldn't read backup: {exc}", is_error=True)
-            return
+        # A root-owned backup is read through the helper, which may ask
+        # for the password - so off the main thread.
+        self.run_async(
+            lambda: privilege.read_backup(entry["backup_file"], entry.get("stored", "home")),
+            lambda content, error: self._show_backup(entry, content, error),
+        )
+
+    def _show_backup(self, entry: dict, content, error) -> bool:
+        if error:
+            self.notify(f"Couldn't read backup: {error}", is_error=True)
+            return False
 
         buffer = Gtk.TextBuffer()
         buffer.set_text(content)
@@ -214,6 +229,7 @@ class ActivityPage(BasePage):
         dialog.set_extra_child(scroller)
         dialog.add_response("close", "Close")
         dialog.present(self.get_root())
+        return False
 
     def _on_restore_backup(self, _btn: Gtk.Button, entry: dict) -> None:
         self.confirm(
@@ -224,7 +240,9 @@ class ActivityPage(BasePage):
             "(e.g. sshd, fail2ban) for the restored config to take effect.",
             "Restore",
             lambda: self.run_async(
-                lambda: privilege.restore_file(entry["backup_file"], entry["original_path"]),
+                lambda: privilege.restore_file(
+                    entry["backup_file"], entry["original_path"], entry.get("stored", "home")
+                ),
                 lambda result, error: self.handle_command_result(result, error, success_message="Restored"),
             ),
         )

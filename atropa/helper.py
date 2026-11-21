@@ -385,6 +385,7 @@ def _pacnew_apply(argv: list[str]) -> int:
     with open(candidate, "rb") as handle:
         data = handle.read()
     mode = os.stat(candidate).st_mode & 0o7777
+    backup_before_write(live, live)
     fd = os.open(live, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o644)
     with os.fdopen(fd, "wb") as handle:
         handle.write(data)
@@ -921,6 +922,8 @@ def _file_command_tier(argv: list[str]) -> str:
         target = argv[4]
     elif program == "replace-in-file" and len(argv) == 4:
         target = argv[1]
+    elif program == "backup-restore" and len(argv) == 3:
+        target = argv[2]
     if target is None:
         return KEEP  # malformed: the operation itself refuses it
     return _write_tier(target)
@@ -969,7 +972,199 @@ def _shadow_status(argv: list[str]) -> int:
 
 
 # Operations implemented here that aren't files or programs.
-OPERATIONS = frozenset({"shadow-status"})
+OPERATIONS = frozenset({"shadow-status", "backup-show", "backup-restore"})
+
+
+# ------------------------------------------------------------------ backups --
+#
+# The helper backs a file up itself, as root, right before it overwrites
+# it. Backups used to be copies the app made in ~/.local/share/atropa,
+# where anything running as the user could change one and have Restore
+# write it back as root. Here the copy is taken from the real file by the
+# process doing the write, into storage only root can change:
+#
+#   /var/lib/atropa/backups/          0755 root
+#     manifest.jsonl                  0644 root - names and paths only
+#     <name>.<timestamp>.bak          0600 root - the content
+#
+# The manifest is world-readable so the app can list backups without a
+# password; the copies aren't, since some originals are root-only.
+
+BACKUP_STORE = "/var/lib/atropa/backups"
+BACKUP_MANIFEST_NAME = "manifest.jsonl"
+# One backup per operation, not per write: an operation that edits a file
+# in several steps (pacman.conf) would otherwise leave every in-between
+# state. A write within this many seconds of the last backup of the same
+# file is taken to be part of the same operation.
+BACKUP_WINDOW_SECONDS = 60
+BACKUP_KEEP_PER_FILE = 30
+BACKUP_MAX_BYTES = 1024 * 1024
+_BACKUP_NAME_RE = re.compile(r"^[A-Za-z0-9_.@+-]+\.\d{8}_\d{6}_\d{6}(?:-\d+)?\.bak$")
+
+
+def _backed_up(path: str) -> bool:
+    """Files whose overwrite is worth a backup: configuration, not state."""
+    return path.startswith(ETC_ROOT.rstrip("/") + "/") or _is_loader_conf(path)
+
+
+def _manifest_path() -> str:
+    return os.path.join(BACKUP_STORE, BACKUP_MANIFEST_NAME)
+
+
+def _read_manifest() -> list[dict]:
+    import json
+
+    try:
+        with open(_manifest_path(), encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+    except FileNotFoundError:
+        return []
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and all(
+            isinstance(entry.get(key), str) for key in ("timestamp", "original_path", "backup_file")
+        ):
+            entries.append(entry)
+    return entries
+
+
+def _write_manifest(entries: list[dict]) -> None:
+    import json
+
+    temporary = _manifest_path() + ".new"
+    _write(temporary, "".join(json.dumps(entry) + "\n" for entry in entries).encode("utf-8"), mode=0o644)
+    os.replace(temporary, _manifest_path())
+
+
+def _ensure_store() -> None:
+    os.makedirs(BACKUP_STORE, mode=0o755, exist_ok=True)
+    if os.path.islink(BACKUP_STORE) or not os.path.isdir(BACKUP_STORE):
+        raise Refused(f"{BACKUP_STORE} isn't a directory")
+    os.chmod(BACKUP_STORE, 0o755)
+
+
+def backup_before_write(requested: str, target: str, *, force: bool = False) -> str | None:
+    """
+    Copy `target` (the resolved file about to be overwritten) into the
+    store, recorded under `requested` (the path the app asked for, which
+    restore writes back through checked_write_path). Returns the backup's
+    name, or None when there was nothing to do. Never raises: a full disk
+    shouldn't stop a configuration change, and the write happens anyway.
+    """
+    from datetime import datetime
+
+    try:
+        if not _backed_up(target) or os.path.islink(target) or not os.path.isfile(target):
+            return None
+        if os.path.getsize(target) > BACKUP_MAX_BYTES:
+            return None
+        _ensure_store()
+        entries = _read_manifest()
+        now = datetime.now()
+        if not force:
+            for entry in reversed(entries):
+                if entry["original_path"] != requested:
+                    continue
+                try:
+                    made = datetime.strptime(entry["timestamp"], "%Y%m%d_%H%M%S_%f")
+                except ValueError:
+                    break
+                if 0 <= (now - made).total_seconds() < BACKUP_WINDOW_SECONDS:
+                    return None
+                break
+        with open(target, "rb") as handle:
+            data = handle.read()
+        timestamp = now.strftime("%Y%m%d_%H%M%S_%f")
+        base = re.sub(r"[^A-Za-z0-9_.@+-]", "_", os.path.basename(requested)) or "file"
+        name = f"{base}.{timestamp}.bak"
+        attempt = 0
+        while True:
+            try:
+                fd = os.open(
+                    os.path.join(BACKUP_STORE, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
+                )
+                break
+            except FileExistsError:
+                attempt += 1
+                name = f"{base}.{timestamp}-{attempt}.bak"
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        entries.append({"timestamp": timestamp, "original_path": requested, "backup_file": name})
+
+        # Keep the newest BACKUP_KEEP_PER_FILE of each file.
+        same = [entry for entry in entries if entry["original_path"] == requested]
+        dropped = same[: max(0, len(same) - BACKUP_KEEP_PER_FILE)]
+        for entry in dropped:
+            if _BACKUP_NAME_RE.match(entry["backup_file"]):
+                try:
+                    os.unlink(os.path.join(BACKUP_STORE, entry["backup_file"]))
+                except FileNotFoundError:
+                    pass
+        if dropped:
+            entries = [entry for entry in entries if entry not in dropped]
+        _write_manifest(entries)
+        return name
+    except (OSError, Refused) as exc:
+        print(f"atropa-helper: couldn't back up {requested}: {exc}", file=sys.stderr)
+        return None
+
+
+def _backup_entry(name: str) -> dict:
+    if not isinstance(name, str) or not _BACKUP_NAME_RE.match(name):
+        raise Refused(f"{name!r} isn't the name of a backup")
+    for entry in _read_manifest():
+        if entry["backup_file"] == name:
+            return entry
+    raise Refused(f"there's no backup named {name}")
+
+
+def _read_backup(name: str) -> bytes:
+    path = os.path.join(BACKUP_STORE, name)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        return handle.read()
+
+
+def _backup_show(argv: list[str]) -> int:
+    """
+    `backup-show NAME`: print a backup's content - only of a file `cat`
+    may read. pacnew-apply backs up whatever /etc file it replaces (a root
+    can still restore those by hand), and showing a backup must not read
+    more than reading the file itself would.
+    """
+    if len(argv) != 2:
+        raise Refused("backup-show takes one backup name")
+    entry = _backup_entry(argv[1])
+    _checked_read_path(entry["original_path"])
+    sys.stdout.buffer.write(_read_backup(argv[1]))
+    sys.stdout.flush()
+    return 0
+
+
+def _backup_restore(argv: list[str]) -> int:
+    """
+    `backup-restore NAME PATH`: write a backup back where it came from.
+    PATH must be the one the manifest recorded - it's in argv so the tier
+    (needs_fresh_auth) can be told before anything runs - and the write
+    goes through the same policy as any other. The file being replaced is
+    backed up first, so a restore can itself be undone.
+    """
+    if len(argv) != 3:
+        raise Refused("backup-restore takes a backup name and its file")
+    entry = _backup_entry(argv[1])
+    requested = _normal(argv[2])
+    if entry["original_path"] != requested:
+        raise Refused(f"{argv[1]} is a backup of {entry['original_path']}, not {requested}")
+    target = checked_write_path(requested)
+    data = _read_backup(argv[1])
+    backup_before_write(requested, target, force=True)
+    _write(target, data)
+    return 0
+
 
 # -------------------------------------------------------------- file writing --
 
@@ -995,6 +1190,7 @@ def _tee(argv: list[str], data: bytes) -> int:
     if len(args) != 1:
         raise Refused("tee must name exactly one file")
     target = checked_write_path(args[0])
+    backup_before_write(_normal(args[0]), target)
     _write(target, data, append=append)
     return 0
 
@@ -1006,6 +1202,7 @@ def _install(argv: list[str], data: bytes) -> int:
     if not _MODE_RE.match(argv[2]):
         raise Refused(f"install mode {argv[2]!r} isn't a file mode")
     target = checked_write_path(argv[4])
+    backup_before_write(_normal(argv[4]), target)
     _write(target, data, mode=int(argv[2], 8))
     return 0
 
@@ -1026,6 +1223,8 @@ def _replace_in_file(argv: list[str]) -> int:
     with open(target, "r", encoding="utf-8", errors="replace") as handle:
         text = handle.read()
     updated = regex.sub(lambda _match: replacement, text)
+    if updated != text:
+        backup_before_write(_normal(argv[1]), target)
     _write(target, updated.encode("utf-8"))
     return 0
 
@@ -1061,6 +1260,10 @@ def handle(argv: list[str], data: bytes = b"", *, tier: str) -> int | None:
         raise Refused(f"{program} asks for a password every time; it runs through {ASK_HELPER_PATH}")
     if program == "shadow-status":
         return _shadow_status(argv)
+    if program == "backup-show":
+        return _backup_show(argv)
+    if program == "backup-restore":
+        return _backup_restore(argv)
 
     if program == "tee":
         return _tee(argv, data)

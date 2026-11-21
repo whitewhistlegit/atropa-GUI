@@ -27,6 +27,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from atropa import helper
 from atropa.backend import aide, apparmor, hardening, migration, privilege, refpolicy_build, selinux
 
 
@@ -137,6 +138,10 @@ def privilege_paths(monkeypatch, tmp_path):
     log_path = tmp_path / "actions.log"
     monkeypatch.setattr(privilege, "BACKUP_DIR", backup_dir)
     monkeypatch.setattr(privilege, "BACKUP_MANIFEST", manifest)
+    system_backups = tmp_path / "system-backups"
+    monkeypatch.setattr(privilege, "SYSTEM_BACKUP_DIR", system_backups)
+    monkeypatch.setattr(privilege, "SYSTEM_BACKUP_MANIFEST", system_backups / "manifest.jsonl")
+    monkeypatch.setattr(helper, "BACKUP_STORE", str(tmp_path / "helper-backups"))
     monkeypatch.setattr(privilege, "LOG_PATH", log_path)
 
     review_base = tmp_path / "selinux-review"
