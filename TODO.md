@@ -20,7 +20,7 @@ single-user Arch machine.
         file restore, and booting a snapshot via grub-btrfs.
   - [ ] Boot a grub-btrfs snapshot entry once by hand (the menu entries
         were checked in the VM's grub-btrfs.cfg, not booted).
-- [ ] **Upgrade checks**
+- [x] **Upgrade checks**
   - [x] Before: show recent Arch news items that need manual steps.
   - [x] After: list failed units (`systemctl --failed`).
   - [x] Say "reboot needed" when the running kernel no longer matches the
@@ -65,15 +65,20 @@ single-user Arch machine.
       stock `pam_wheel.so use_uid` line in `/etc/pam.d/su` and `su-l`
       (Hardening page); hand-edited files are left alone.
 - [ ] **Bootloader/AppArmor kernel parameter and PAM-wiring automation** -
-      lean on the backup mechanism; e.g. keep the previous kernel cmdline as
-      a separate boot entry so a bad boot can pick the old one.
+      lean on the backup mechanism (now root-owned and made by the helper);
+      e.g. keep the previous kernel cmdline as a separate boot entry so a
+      bad boot can pick the old one. The su restriction above is the only
+      PAM edit so far: one stock line, never a hand-edited file.
 - [ ] **Disk/partition management** (explicitly out of scope at project
       start).
-- [ ] **Btrfs snapshots / Timeshift integration** (see "Snapshot before
-      upgrade" above).
+- [x] **Btrfs snapshots** - Snapper + snap-pac + grub-btrfs (see "Snapshot
+      before upgrade" above). Timeshift isn't integrated; Snapper covers the
+      same need.
 - [x] **Journal/log viewer** - superseded by the Boot Report page.
-- [ ] **Kernel management** - multiple kernels, `mkinitcpio`, headers. Keep
-      a fallback kernel alongside snapshots.
+- [ ] **Kernel management** (next up) - list installed kernels, install or
+      remove one (e.g. `linux-lts` as a fallback alongside snapshots), check
+      each has a boot entry and matching headers. Editing `mkinitcpio.conf`
+      stays out of scope.
 
 ### From the full-repo audit
 
@@ -146,6 +151,93 @@ Seen when its generated modules were reviewed in the Arch test VM,
 - [x] **Name modules after the SELinux domain**, not the process name: `comm`
       is cut at 15 characters, giving `atropa_polkit-agent-he_policykit_auth_t`
       and `atropa__sd-worker__systemd_nsresourced_t`.
+
+### Over-permissive module warnings (design, not built yet)
+
+Warn when a drafted (or hand-edited) module grants more than the program
+should need, judged against what kind of program it is. Builds on what's
+already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
+`label_hint()`, `te_booleans()`.
+
+- [ ] **Parser** - new `backend/te_lint.py` turns a `.te` into rules
+      (kind, source, target, class, perms, line) plus its `require` block;
+      handles hand edits (braces, `~`, `*`, attributes). With setools,
+      attribute targets expand, so `file_type:file write` counts as
+      touching thousands of types.
+- [ ] **Base rules** - a data table: id, severity, match, why, fix.
+  - Dangerous (root-equivalent or switches protection off): `security_t`
+    (`setenforce`/`load_policy`/`setbool`), `selinux_config_t`,
+    `policy_config_t`, `mac_admin`/`mac_override`; `module_load`,
+    `sys_module`, `sys_rawio`, `memory_device_t`, raw disks, `mmap_zero`;
+    `shadow_t`, writes to `passwd_file_t`/`sudo_exec_t`/`etc_t`/PAM;
+    writes to `bin_t`/`lib_t`/`boot_t`/`*_exec_t`; transition to
+    `unconfined_t`, `setcurrent`/`dyntransition`, `ptrace` on another
+    domain; write/unlink on `auditd_log_t`; anything widening a confined
+    user or sandbox domain (`user_t`, `guest_t`, `*_sandbox_t`).
+  - Review (over-permissive): generic targets (`default_t`, `file_t`,
+    `unlabeled_t`, `var_t`, `etc_t`, `tmp_t`, `usr_t` - usually a label
+    problem); `*`/`~` or a full manage set on a shared type; execute on a
+    type the domain can also write; `name_bind`/`name_connect` on
+    `port_t`/`unreserved_port_t`/`reserved_port_t`, rawip/packet sockets,
+    netlink writes; `sys_admin`, `net_admin`, `setuid`/`setgid`,
+    `sys_ptrace`; signals to other domains; more than ~25 rules or
+    distinct targets (suggest `semanage permissive -a` while
+    investigating).
+  - Note (better route exists): `dac_override`/`dac_read_search` (usually
+    a Unix permission bug), boolean-covered rules, already-allowed rules,
+    noise that should be `dontaudit`. The existing sock_file/connectto
+    check becomes one rule here.
+- [ ] **Program categories** - linked toggle buttons per pending module:
+      System service, Boot, User service, D-Bus service, Desktop app, Not
+      sure (= base rules only). The choice is saved next to the `.te` and
+      re-lints live.
+  - Auto-detect a preselected guess, with the reason shown: AVC pid ->
+    systemd unit (system unit -> System service; `BusName=`/`Type=dbus` or
+    a `dbus-1/system-services` file -> D-Bus service; user manager -> User
+    service; `DefaultDependencies=no`/before `sysinit.target`/initrd or
+    generator path -> Boot); user domain plus display-server sockets ->
+    Desktop app; otherwise Not sure.
+  - Expected / out of place per category:
+    - System service: own `*_var_lib_t`/`*_log_t`/`*_run_t`, syslog, its
+      own port, `/etc` reads | home folders, display/audio, exec from tmp.
+    - Boot: device nodes, mount, sysfs/proc writes, raw disk reads, module
+      loading (Review, not Dangerous) | network, home folders.
+    - User service: `user_home_t`, `user_tmp_t`, session bus, PipeWire |
+      `/etc` writes, `var_lib`, any capability, reserved ports, shadow.
+    - D-Bus service: `system_dbusd_t` send_msg/acquire_svc, polkit | home
+      folders, broad capabilities, binding ports.
+    - Desktop app: home, display server, DRI, audio, outgoing HTTP(S) |
+      any capability, `/etc` writes, other users' files, ptrace, binding
+      ports.
+  - A category can lower a severity where something is expected (Boot:
+    `sys_module` -> Review) or raise one (Desktop app: any capability ->
+    Dangerous), but never clears the hard Dangerous list.
+  - Out-of-place findings say so plainly ("a user service shouldn't need
+    to write /etc - wrong category, or this program is doing something
+    odd"); a module mostly outside its category gets a "looks more like a
+    System service" banner.
+- [ ] **UI** - badge per module (Looks fine / Review / Dangerous); each
+      finding shows the highlighted line, why, and a one-click safer option
+      where it's mechanical (switch to `dontaudit`, enable boolean X,
+      relabel with `restorecon`/`semanage fcontext`, drop these perms, split
+      the module). Live re-lint of hand edits. Install: fine -> as today;
+      Review -> confirm listing findings; Dangerous -> disabled until each
+      dangerous finding is acknowledged.
+- [ ] **Backend gate** - `compile_and_load_te()` lints itself and refuses
+      unacknowledged Dangerous findings (`acknowledged={rule ids}`,
+      recorded with the category), so "reinstall all approved" and future
+      callers can't skip it. On top of the ask-tier `semodule -i`, not
+      instead of it.
+- [ ] **Installed modules** - lint approved/installed Atropa modules on page
+      load; compliance report gains "Custom SELinux modules" (warn per
+      module with Dangerous findings).
+- [ ] **Tests** - a should/shouldn't-flag `.te` fixture per rule and per
+      category; detection tests from captured AVCs plus unit files; real
+      drafts (host pending modules incl. Brave/flatpak, the VM's) as a
+      calibration corpus; the backend refusing unacknowledged rules.
+- [ ] **Open decisions** - hard block vs loud warning for Dangerous (design
+      assumes acknowledge-to-proceed); also lint the Build Policy page's
+      modules?; tune the ~25-rule threshold on real modules.
 
 ## Packaging
 
