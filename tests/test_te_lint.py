@@ -276,3 +276,60 @@ def test_sidecar_round_trip(tmp_path):
     assert te_lint.read_meta(tmp_path, "m") == {"category": "desktop_app", "acknowledged": ["a@1"], "reason": "why"}
     (tmp_path / "n.atropa.json").write_text('{"category": "nonsense", "acknowledged": [1, "x@2"]}')
     assert te_lint.read_meta(tmp_path, "n") == {"category": "unsure", "acknowledged": ["x@2"]}
+
+
+# ------------------------------------------------------------- fails closed --
+#
+# The linter is an install gate: anything it doesn't understand must come out
+# dangerous, never silently skipped.
+
+@pytest.mark.parametrize("rule, rule_id", [
+    ("allow { a_t b_t } shadow_t:file read;", "shadow"),                         # set as source
+    ("allow a_t { etc_t shadow_t }:file write;", "shadow"),                       # set as target
+    ("if (some_bool) {\n\tallow a_t shadow_t:file read;\n}", "shadow"),           # conditional block
+    ("if (b) { allow a_t b_t:file read; } else { allow a_t shadow_t:file read; }", "shadow"),
+    ("optional {\n\tallow a_t security_t:security setenforce;\n}", "enforcement"),
+    ("allow a_t ~{ b_t }:file write;", "broad_attribute"),                       # complement = every type
+    ("allow a_t { file_type -shadow_t }:file write;", "broad_attribute"),         # exclusion
+    ("allow a_t file_type:file write;", "broad_attribute"),
+    ("allow domain self:capability sys_admin;", "broad_attribute"),
+    ("permissive sshd_t;", "permissive"),
+    ("typeattribute a_t unconfined_domain_type;", "privileged_attribute"),
+    ("type_transition a_t b_exec_t:process unconfined_t;", "to_unconfined"),
+    ("files_read_etc_files(a_t)", "unparseable"),                               # an m4 macro, no ';'
+    ("files_read_etc_files(a_t);", "unparseable"),
+    ("allow a_t b_t file read;", "unparseable"),                                 # typo: no ':'
+])
+def test_constructs_that_used_to_slip_through_are_dangerous(rule, rule_id):
+    found = te_lint.lint(module(rule), booleans=[])
+    assert te_lint.verdict(found) == te_lint.DANGEROUS
+    assert rule_id in {f.rule_id for f in found}
+
+
+def test_require_blocks_with_nested_braces_are_skipped_whole():
+    text = "module m 1.0;\nrequire {\n\ttype a_t;\n\tclass file { read write };\n\tclass dir { search };\n}\nallow a_t b_t:file read;\n"
+    found = te_lint.lint(text, booleans=[])
+    assert te_lint.verdict(found) == "fine" and [r.target for r in te_lint.parse(text)] == ["b_t"]
+
+
+def test_allowxperm_is_read():
+    rules = te_lint.parse("allowxperm a_t b_t:tcp_socket ioctl { 0x8910 };")
+    assert [(r.kind, r.perms) for r in rules] == [("allowxperm", ["ioctl"])]
+
+
+def test_an_attribute_that_isnt_broad_is_review():
+    found = {f.rule_id: f.severity for f in te_lint.lint(module("allow a_t some_files:file read;"), booleans=[])}
+    assert found == {"attribute_rule": te_lint.REVIEW}
+
+
+def test_unparseable_is_never_lowered_by_a_category():
+    for category in te_lint.CATEGORIES:
+        found = te_lint.lint(module("frobnicate a_t;"), category, booleans=[])
+        assert te_lint.verdict(found) == te_lint.DANGEROUS
+
+
+def test_the_gate_refuses_a_set_that_hides_shadow(fake_run, fake_which, monkeypatch):
+    monkeypatch.setattr(selinux.shutil, "which", lambda name: f"/usr/bin/{name}")
+    text = module("allow { a_t b_t } shadow_t:file read;").replace("module test", "module atropa_sets")
+    with pytest.raises(selinux.LintRefused):
+        selinux.compile_and_load_te(text, "atropa_sets")

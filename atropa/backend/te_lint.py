@@ -87,46 +87,182 @@ class Finding:
 
 
 # ------------------------------------------------------------------ parsing --
+#
+# The linter is a gate, so it fails closed: every statement is accounted
+# for. Declarations are skipped, access rules and transitions are checked,
+# and anything else - a construct this parser doesn't know, a macro, a typo -
+# becomes a dangerous "couldn't read this rule" finding instead of being
+# skipped (a skipped rule is a rule nobody checked).
 
-_STATEMENT_RE = re.compile(
-    r"^(allow|dontaudit|auditallow|neverallow|allowxperm|dontauditxperm)\s+(\S+)\s+(\S+?)\s*:\s*"
-    r"(\{[^}]*\}|\S+)\s+(~?\s*\{[^}]*\}|\*|~?\s*\S+?)\s*;$"
-)
+_ACCESS_KINDS = {"allow", "dontaudit", "auditallow", "neverallow"}
+_XPERM_KINDS = {"allowxperm", "dontauditxperm", "auditallowxperm", "neverallowxperm"}
+_TRANSITION_KINDS = {"type_transition", "type_change", "type_member", "range_transition"}
+_DECLARATIONS = {"module", "type", "attribute", "typealias", "class", "bool", "attribute_role", "roleattribute",
+                 "sensitivity", "category", "level", "user", "policycap", "gen_require", "dominance"}
 
-
-# Up to the line holding only "}": a require block has braces of its own
-# ("class file { read write };").
-_REQUIRE_RE = re.compile(r"\brequire\s*\{.*?^\s*\}\s*$", re.DOTALL | re.MULTILINE)
+_SET = r"(?:~?\s*\{[^}]*\}|\*|~?\s*[^\s{};:]+)"
+_ACCESS_RE = re.compile(rf"^(\w+)\s+({_SET})\s+({_SET})\s*:\s*({_SET})\s+({_SET})$")
+_XPERM_RE = re.compile(rf"^(\w+)\s+({_SET})\s+({_SET})\s*:\s*({_SET})\s+(\w+)\s+(.+)$")
+_TRANSITION_RE = re.compile(rf"^(\w+)\s+({_SET})\s+({_SET})\s*:\s*({_SET})\s+(\S+)(?:\s+\"[^\"]*\")?$")
+_OPENER_RE = re.compile(r"^(?:optional|else|if\s*\([^)]*\))\s*\{")
 
 
 def _words(value: str) -> list[str]:
     return value.strip("{} \t").split()
 
 
-def parse(te_text: str) -> list[Rule]:
-    """The access rules of a .te, statements joined across lines, comments dropped."""
+def _strip_comments(te_text: str) -> list[str]:
+    return [raw.split("#", 1)[0] for raw in te_text.splitlines()]
+
+
+def _statements(te_text: str) -> tuple[list[tuple[int, str]], list[tuple[int, str]]]:
+    """
+    ([(line, statement)], [(line, leftover)]): every ';'-terminated
+    statement outside require blocks, with optional/if/else block braces
+    taken off; leftovers are text that never reached a ';'.
+    """
+    lines = _strip_comments(te_text)
+    text = "\n".join(lines)
+    statements: list[tuple[int, str]] = []
+    leftovers: list[tuple[int, str]] = []
+    position, depth_blocks = 0, 0
+    length = len(text)
+
+    def line_of(index: int) -> int:
+        return text.count("\n", 0, index) + 1
+
+    while position < length:
+        while position < length and text[position].isspace():
+            position += 1
+        if position >= length:
+            break
+        rest = text[position:]
+        require = re.match(r"require\s*\{", rest)
+        if require:
+            # Skip the declarations, braces balanced: "class file { read write };" nests.
+            depth, index = 0, position + require.end() - 1
+            while index < length:
+                if text[index] == "{":
+                    depth += 1
+                elif text[index] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                index += 1
+            position = index + 1
+            continue
+        opener = _OPENER_RE.match(rest)
+        if opener:
+            depth_blocks += 1
+            position += opener.end()
+            continue
+        if rest.startswith("}") and depth_blocks:
+            depth_blocks -= 1
+            position += 1
+            continue
+        # A statement: up to the next ';' outside braces.
+        depth, index = 0, position
+        while index < length:
+            char = text[index]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif char == ";" and depth == 0:
+                break
+            index += 1
+        chunk = " ".join(text[position:index].split())
+        if index < length and text[index] == ";":
+            statements.append((line_of(position), chunk))
+            position = index + 1
+        else:
+            leftovers.append((line_of(position), chunk))
+            position = index + 1 if index < length else length
+    return statements, leftovers
+
+
+def _expand(value: str) -> list[str]:
+    """A source/target: one name, or each name of a { set }. A complement
+    (~) or an exclusion (-name) stays as "*" - every type but a few."""
+    value = value.strip()
+    if value.startswith("~") or value == "*":
+        return ["*"]
+    names = _words(value)
+    if any(name.startswith("-") for name in names):
+        return ["*"]
+    return names
+
+
+def _scan(te_text: str) -> tuple[list[Rule], list[Finding]]:
     rules: list[Rule] = []
-    buffer, start = "", 0
-    # require { ... } only declares names; blank it out (keeping line numbers)
-    # so its braces don't run into the next statement.
-    te_text = _REQUIRE_RE.sub(lambda m: "\n" * m.group(0).count("\n"), te_text)
-    for number, raw in enumerate(te_text.splitlines(), 1):
-        line = raw.split("#", 1)[0].strip()
-        if not line:
+    problems: list[Finding] = []
+    statements, leftovers = _statements(te_text)
+    for line, chunk in leftovers:
+        problems.append(Finding("unparseable", DANGEROUS, f"Couldn't read: {chunk[:80]}",
+                                "Text that isn't a complete statement can't be checked; Atropa won't vouch for it.",
+                                line))
+    for line, statement in statements:
+        keyword = statement.split(None, 1)[0] if statement else ""
+        if keyword in _DECLARATIONS:
             continue
-        if not buffer:
-            start = number
-        buffer = f"{buffer} {line}".strip()
-        if not buffer.endswith(";"):
+        if keyword in _ACCESS_KINDS and (match := _ACCESS_RE.match(statement)):
+            _kind, sources, targets, classes, perms = match.groups()
+            perm_words = perms.replace("~", " ~ ").split() if "~" in perms else _words(perms)
+            for source in _expand(sources):
+                for target in _expand(targets):
+                    rules.append(Rule(keyword, source, target, _words(classes),
+                                      [p for p in perm_words if p not in "{}"], line, statement))
             continue
-        statement, buffer = buffer, ""
-        match = _STATEMENT_RE.match(statement)
-        if not match:
+        if keyword in _XPERM_KINDS and (match := _XPERM_RE.match(statement)):
+            _kind, sources, targets, classes, operation, _values = match.groups()
+            for source in _expand(sources):
+                for target in _expand(targets):
+                    rules.append(Rule(keyword, source, target, _words(classes), [operation], line, statement))
             continue
-        kind, source, target, classes, perms = match.groups()
-        perm_words = perms.replace("~", " ~ ").split() if "~" in perms else _words(perms)
-        rules.append(Rule(kind, source, target, _words(classes), [p for p in perm_words if p not in "{}"], start, statement))
-    return rules
+        if keyword in _TRANSITION_KINDS and (match := _TRANSITION_RE.match(statement)):
+            _kind, sources, _targets, classes, new_type = match.groups()
+            if "process" in _words(classes) and new_type.rstrip(";") in {"unconfined_t", "initrc_t", "kernel_t", "init_t"}:
+                problems.append(Finding("to_unconfined", DANGEROUS, f"New processes become {new_type}",
+                                        "Leaving for an unconfined domain ends confinement altogether.", line))
+            continue
+        if keyword == "permissive":
+            problems.append(Finding("permissive", DANGEROUS, f"Makes {statement.split()[-1]} permissive",
+                                    "A permissive domain isn't confined at all: SELinux only logs what it does. "
+                                    "Use semanage permissive while investigating, not a module.", line))
+            continue
+        if keyword == "typeattribute":
+            attributes = [w.strip(",") for w in statement.split()[2:]]
+            privileged = [a for a in attributes if re.search(r"unconfined|^can_|exempt|bypass|^mls|^mcs", a)]
+            if privileged:
+                problems.append(Finding("privileged_attribute", DANGEROUS,
+                                        f"Adds a type to {', '.join(privileged)}",
+                                        "These attributes exist to exempt types from the policy.", line))
+            else:
+                problems.append(Finding("attribute", REVIEW, f"Adds a type to {', '.join(attributes)}",
+                                        "An attribute carries rules of its own; the type gets all of them.", line))
+            continue
+        if keyword == "role":
+            problems.append(Finding("role_types", REVIEW, f"Role change: {statement[:80]}",
+                                    "Lets a role (and the users in it) run more domains.", line))
+            continue
+        problems.append(Finding("unparseable", DANGEROUS, f"Couldn't read: {statement[:80]}",
+                                "A statement Atropa can't check - a macro, an unsupported construct or a typo - "
+                                "could grant anything; Atropa won't vouch for it.", line))
+    return rules, problems
+
+
+def parse(te_text: str) -> list[Rule]:
+    """The access rules of a .te (sets expanded, one Rule per source and target)."""
+    return _scan(te_text)[0]
+
+
+# Attributes that stand for (nearly) every type of a kind: a rule on one of
+# them is a rule on all of them.
+_BROAD_ATTRIBUTES = {"domain", "file_type", "non_security_file_type", "non_auth_file_type", "exec_type",
+                     "entry_type", "device_node", "filesystem_type", "port_type", "node_type", "netif_type",
+                     "proc_type", "sysctl_type", "security_file_type", "packet_type", "*"}
 
 
 # ---------------------------------------------------------------- the table --
@@ -176,6 +312,13 @@ def _f(rule_id, severity, message, why, rule: Rule | None = None, **extra) -> Fi
 
 def _base_findings(rule: Rule) -> list[Finding]:
     found: list[Finding] = []
+    for name, role in ((rule.source, "source"), (rule.target, "target")):
+        if name in _BROAD_ATTRIBUTES:
+            found.append(_f("broad_attribute", DANGEROUS, f"Applies to every {'type' if name == '*' else name} ({role})",
+                            "A rule on a broad attribute or a complement covers almost every type there is.", rule))
+        elif name != "self" and not name.endswith("_t"):
+            found.append(_f("attribute_rule", REVIEW, f"{name} is an attribute (a group of types), as {role}",
+                            "The rule covers every type in it, now and later.", rule))
     perms = _perms(rule)
     classes = set(rule.classes)
     target = rule.target
@@ -374,13 +517,14 @@ def lint(te_text: str, category: str = "unsure", booleans: list[str] | None = No
     """Findings for a .te, most severe first. `booleans`: ones audit2allow named for it."""
     from . import denial_advice
 
-    rules = parse(te_text)
+    rules, problems = _scan(te_text)
     label = CATEGORIES.get(category, CATEGORIES["unsure"])
     hard = {"enforcement", "selinux_config", "shadow", "credential_write", "code_write", "raw_device",
-            "dyntransition", "ptrace_other", "to_unconfined", "audit_tamper", "mmap_zero", "confined_user"}
-    found: list[Finding] = []
+            "dyntransition", "ptrace_other", "to_unconfined", "audit_tamper", "mmap_zero", "confined_user",
+            "unparseable", "permissive", "privileged_attribute", "broad_attribute"}
+    found: list[Finding] = list(problems)
     out_of_place = 0
-    allows = [r for r in rules if r.kind == "allow"]
+    allows = [r for r in rules if r.kind in ("allow", "allowxperm")]
     for rule in allows:
         base = _base_findings(rule)
         extra, changes = ([], {}) if category == "unsure" else _category_findings(rule, category, label)

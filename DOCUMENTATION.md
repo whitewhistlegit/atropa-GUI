@@ -188,9 +188,14 @@ snapper user-driven) are ask-tier. Only the `root` config is accepted;
 ### Module linter (`te_lint.py`)
 
 Drafted, imported and hand-written modules are linted before they're
-installed. `parse()` reads a .te into rules (statements across lines,
-`require` blocks skipped even with braces of their own, `*`/`~`
-permissions kept); `lint(te, category)` checks each rule against a table:
+installed. The parser fails closed, since the linter is an install gate:
+statements are split on `;`, `require` blocks skipped with balanced braces,
+`if`/`else`/`optional` blocks read, `{ }` sets expanded on source and target
+(a complement or an exclusion counts as every type), and anything it can't
+read - a macro, an unknown construct, a typo - is a dangerous "couldn't read"
+finding rather than a skipped rule. `permissive`, privileged
+`typeattribute`s and rules on broad attributes (`domain`, `file_type`, ...)
+are dangerous too. `lint(te, category)` checks each rule against a table:
 
 - dangerous: SELinux enforcement (`security` setenforce/load_policy/
   setbool), writing SELinux's own config, `shadow_t`, writing
