@@ -239,6 +239,63 @@ already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
       assumes acknowledge-to-proceed); also lint the Build Policy page's
       modules?; tune the ~25-rule threshold on real modules.
 
+### SELinux pages redesign (design, not built yet)
+
+Today denials and modules are spread over four sidebar entries, and the
+same job lives in three places: the SELinux status page has its own denial
+list with "Generate .te" and Install, Denial Review has drafts with View
+and Install, and Load Policy has Pending/Approved plus an editor. Denial
+Review itself is one long scroll of eight groups sorted by classification,
+while modules (and now program categories) are per program, and a draft
+opens as plain text in a popup with nowhere to show lint findings.
+
+- [ ] **Three entries instead of four**:
+  - *SELinux* - configuration only: mode, Setup Mode, relabel, booleans.
+    Its own denial list and review buttons go; one row says "N programs
+    need attention" and opens Denials.
+  - *SELinux: Denials* - replaces Denial Review (below).
+  - *SELinux: Modules* - replaces Load Policy: installed Atropa modules
+    (with lint badges, so old approvals get checked), pending, approved but
+    inactive, "Load .te from disk". Opening any module uses the same
+    detail view as Denials, so a hand-loaded `.te` is linted too.
+  - *SELinux: Build Policy* stays as it is.
+- [ ] **Denials: a list of programs, not of classifications** -
+      `Adw.NavigationSplitView`: programs (SELinux domain + executable) on
+      the left, the selected program on the right (pushed as a page on a
+      narrow window).
+  - Top of the list: "Review now" with the source (kernel log / audit.log,
+    the latter asking for the password) and filter chips with counts:
+    Needs action, Noise, Done.
+  - Each row: program name, category, denial count, and one badge for the
+    best next step: Dangerous / Review / Boolean / Relabel / Noise / Done.
+    Sorted by that badge, then count - impact first.
+- [ ] **Program page**, top to bottom:
+  - Header: program, domain, executable, systemd unit if any.
+  - "What kind of program is this?" - the category toggle buttons, with
+    the detected reason under them; changing it re-lints at once.
+  - Recommended: the single best route first - boolean (with how many of
+    the denials it covers and what else it opens), relabel (`restorecon` /
+    `semanage fcontext`), `dontaudit` for noise, and a module only when
+    none of those cover it.
+  - Draft module: lint findings above the source, each with its badge, a
+    plain reason and the one-click safer option; clicking a finding jumps
+    to its line. The source is an editable view (GtkSourceView if
+    available, a monospace TextView otherwise) with flagged lines tinted
+    by severity; edits re-lint after a short pause.
+  - Denials: expandable rows with the raw AVC, count, path, already-allowed
+    / undefined-class status (the old "Undefined" and "Already allowed"
+    groups become per-denial states here, with the existing Help dialog).
+  - Bottom bar: Discard, Save for later (goes to Modules > Pending), and
+    Install - gated by the linter (Review: confirm listing findings;
+    Dangerous: install stays locked until each dangerous finding is ticked
+    as understood).
+- [ ] **Keep what works** - Setup Mode, the restorecon button, boolean
+      "Turn on" with its rule count, the Undefined-class Help dialog and
+      the per-domain module naming all move into the new views unchanged.
+- [ ] **Smoke test and screenshots** - every new view built under Xvfb in
+      `tests/test_ui_smoke.py`, and rendered in the VM against real denials
+      before merging.
+
 ## Packaging
 
 - [x] Do a full `makepkg -si` with the real `python-build`,
