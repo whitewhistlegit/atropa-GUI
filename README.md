@@ -144,7 +144,7 @@ To uninstall: `pipx uninstall atropa`, then remove
 from the `main` branch, so pacman tracks every installed file and
 `pacman -R atropa-git` removes them all. For a reproducible install of a
 tagged release, [`packaging/arch/atropa/PKGBUILD`](packaging/arch/atropa/PKGBUILD)
-builds the `0.2.0` tarball with a pinned checksum instead of the git head:
+builds the `0.3.0` tarball with a pinned checksum instead of the git head:
 
 ```bash
 sudo pacman -S --needed base-devel python-build python-installer python-pytest
@@ -160,7 +160,7 @@ makepkg -si
 or:
 
 ```bash
-cd packaging/arch/atropa   # atropa 0.2.0, pinned release tarball
+cd packaging/arch/atropa   # atropa 0.3.0, pinned release tarball
 makepkg -si
 ```
 
