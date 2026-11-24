@@ -8,8 +8,8 @@ design specs, kept for the reasoning behind decisions - is in
 [`docs/HISTORY.md`](docs/HISTORY.md); it isn't kept up to date with the
 code, this file is.
 
-Size: **about 24,600 lines of Python - 41 backend modules, 33 pages plus
-the plugin page, and the root helper - and a 1,648-test pytest suite
+Size: **about 24,500 lines of Python - 41 backend modules, 33 pages plus
+the plugin page, and the root helper - and a 1,632-test pytest suite
 (about 15,400 lines).**
 
 **Contents:** 1. Architecture · 2. Module reference (2a Core, 2b Security,
@@ -306,8 +306,8 @@ old per-command behavior.
   `pacman -S` and fail with "target not found".
 - `upgrade_system_streaming(on_line)` — the `-Syu` used by the UI, streamed
   into a live progress dialog
-- `remove(names, purge_config=False)`, `upgrade_system`, `clean_cache`,
-  `list_installed`, `list_explicit`, `list_orphans` — straightforward pacman
+- `remove(names, purge_config=False)`, `clean_cache`,
+  `list_explicit`, `list_orphans` — straightforward pacman
   wraps. The page lists `list_orphans()` under "Orphaned Packages", with a
   remove button per package and "Remove all", which passes exactly the
   names shown to `remove()`
@@ -371,7 +371,7 @@ NetworkManager (`nmcli`) only — systemd-networkd is detected
   (the password goes to `nmcli --ask` on **stdin**, never argv, so it
   never shows in `ps` or the action log),
   `disconnect`, `set_static_ip(connection_name, ip_cidr, gateway, dns)`,
-  `set_dhcp`, `toggle_networking`
+  `set_dhcp`
 
 ### Services (`services.py` / `pages/services.py`)
 `systemctl`/`journalctl` wraps: `list_services(pattern="*.service")`,
@@ -617,7 +617,7 @@ item is never applied from a profile (see Security Quick Setup).
 ### Security (`security.py` / `pages/security.py`)
 Firewall abstraction over `ufw` **or** `firewalld` (whichever is installed;
 `firewall_backend()` returns `"ufw" | "firewalld" | "none"`). SSH hardening
-(`set_ssh_root_login`, `set_ssh_permit_root_login`, `set_ssh_password_auth`,
+(`set_ssh_permit_root_login`, `set_ssh_password_auth`,
 `set_ssh_port`, plus the CIS settings `set_ssh_log_level` (INFO/VERBOSE
 only), `set_ssh_x11_forwarding`, `set_ssh_max_auth_tries`,
 `set_ssh_ignore_rhosts`, `set_ssh_hostbased_authentication`,
@@ -1368,7 +1368,7 @@ not an error.
 ### Dependencies (`dependencies.py` / `pages/dependencies.py`)
 A static catalog of `Dependency(name, module, description, package,
 required, note)`; `check_all() -> list[DependencyStatus]`,
-`missing_required()`, `summary_counts()`. AUR-only tools (paru/yay, aide,
+`missing_required()`. AUR-only tools (paru/yay, aide,
 and SELinux's userspace tools - their notes are built from
 `selinux.SELINUX_TOOL_PACKAGES` and mention the Quick Setup repository as
 the other way to get them) have `package=None` and a note instead of
@@ -1539,9 +1539,7 @@ modules. `ui/selinux_lint.py` has the badge text, the findings as text and
 path goes through.
 
 **Cross-page links.** The SELinux page's "Open Denials" calls the window's
-`_activate_module("selinux_review")`. `main_window.py` still wires
-`set_load_page()` between the SELinux pages; since the redesign nothing
-uses it (see TODO.md).
+`_activate_module("selinux_review")`.
 
 **Lazy construction, no auto-refresh on navigation**: a page is only
 constructed (and its initial `refresh()` run) the first time its sidebar
@@ -1554,7 +1552,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing
 
-**The suite**: `tests/`, 1,648 tests in 51 files - one `test_<module>.py`
+**The suite**: `tests/`, 1,632 tests in 51 files - one `test_<module>.py`
 per backend module plus the helper (`test_helper.py`,
 `test_helper_backups.py`, `test_helper_shapes.py`), `test_resources.py`,
 `test_stock_configs.py`, `test_te_lint.py` and the GTK smoke test - run with

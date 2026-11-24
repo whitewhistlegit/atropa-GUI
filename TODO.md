@@ -34,9 +34,6 @@ including the design specs for what was built, is in
 
 ### Code
 
-- [ ] Remove the leftover `set_load_page()` wiring between the SELinux
-      pages in `main_window.py`, `pages/selinux.py` and
-      `pages/selinux_review.py`: since the redesign nothing uses it.
 - [ ] Lint the Build Policy page's modules the way drafts and loaded
       modules are linted.
 

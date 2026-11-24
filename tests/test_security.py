@@ -295,7 +295,7 @@ def test_set_ssh_permit_root_login_rejects_anything_sshd_does_not_accept(fake_ru
 
 def test_set_sshd_option_replaces_first_global_line_in_place(fake_run, fake_which, privilege_paths, sshd_conf):
     sshd_conf.write_text("Port 22\nPermitRootLogin yes\nUsePAM yes\n")
-    assert security.set_ssh_root_login(False).ok
+    assert security.set_ssh_permit_root_login("no").ok
     assert _written_configs(fake_run, sshd_conf) == ["Port 22\nPermitRootLogin no\nUsePAM yes\n"]
     assert fake_run.last_call() == ["pkexec", "systemctl", "try-reload-or-restart", "sshd"]
 
@@ -371,7 +371,7 @@ def test_set_sshd_option_restores_the_original_when_validation_fails(
     fake_run.set_response(["pkexec", "sshd", "-t"], returncode=1, stderr="syntax error on line 1")
 
     with pytest.raises(RuntimeError, match="Restored the previous config"):
-        security.set_ssh_root_login(False)
+        security.set_ssh_permit_root_login("no")
 
     assert _written_configs(fake_run, sshd_conf) == ["PermitRootLogin no\n", "PermitRootLogin yes\n"]
     assert fake_run.call_containing("try-reload-or-restart") is None
@@ -394,7 +394,7 @@ def test_set_sshd_option_says_so_when_the_restore_also_fails(fake_which, privile
 
     monkeypatch.setattr(security, "run_privileged", fake_privileged)
     with pytest.raises(RuntimeError, match="ALSO failed") as excinfo:
-        security.set_ssh_root_login(False)
+        security.set_ssh_permit_root_login("no")
     assert "Read-only file system" in str(excinfo.value)
 
 
@@ -408,7 +408,7 @@ def test_set_sshd_option_missing_config_raises_without_writing(fake_run, fake_wh
 def test_set_sshd_option_stops_if_writing_fails(fake_run, fake_which, privilege_paths, sshd_conf):
     sshd_conf.write_text("PermitRootLogin yes\n")
     fake_run.set_response(["pkexec", "tee"], returncode=1, stderr="permission denied")
-    assert not security.set_ssh_root_login(False).ok
+    assert not security.set_ssh_permit_root_login("no").ok
     assert fake_run.call_containing("-t") is None  # sshd -t never reached
 
 

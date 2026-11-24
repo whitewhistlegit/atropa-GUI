@@ -46,10 +46,8 @@ def _tier(argv: list[str]) -> str:
         (lambda: network.connect_wifi("Café net"), helper.KEEP),
         (lambda: network.set_static_ip("Wired 1", "192.168.1.50/24", "192.168.1.1", ["1.1.1.1", "9.9.9.9"]), helper.KEEP),
         (lambda: network.set_dhcp("Wired 1"), helper.KEEP),
-        (lambda: network.toggle_networking(False), helper.KEEP),
         (lambda: selinux.set_boolean("ssh_sysadm_login", True), helper.KEEP),
         (lambda: selinux.set_booleans({"a_b": True, "c_d": False}), helper.KEEP),
-        (lambda: selinux.restorecon("/home/me/.ssh"), helper.KEEP),
         (lambda: system_config.set_hostname("my-laptop"), helper.KEEP),
         (lambda: system_config.set_timezone("Europe/Amsterdam"), helper.KEEP),
         (lambda: system_config.set_locale("nl_NL.UTF-8"), helper.KEEP),
@@ -70,6 +68,14 @@ def test_backend_argv_passes_the_helper_in_its_tier(fake_run, fake_which, call, 
     assert sent, "the call made no privileged command"
     for argv in sent:
         assert _tier(argv) == tier, argv
+
+
+def test_restorecon_passes_in_the_keep_tier(monkeypatch, fake_which):
+    sent = []
+    monkeypatch.setattr(selinux, "run_privileged_streaming", lambda argv, on_line: sent.append(argv))
+    for recursive in (True, False):
+        selinux.restorecon_streaming("/home/me/.ssh", recursive, lambda _line: None)
+    assert [_tier(argv) for argv in sent] == [helper.KEEP, helper.KEEP]
 
 
 def test_apparmor_mode_change_passes(fake_run, fake_which, tmp_path, monkeypatch):

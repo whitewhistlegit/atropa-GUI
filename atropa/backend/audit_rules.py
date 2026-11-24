@@ -123,13 +123,6 @@ def active_rule_set_keys() -> set[str] | None:
     return {rule_set.key for rule_set in RULE_SETS if rule_set.key in loaded}
 
 
-def is_audit_rule_set_active(key: str) -> bool:
-    """active_rule_set_keys() for a single rule set - prefer that one when checking several."""
-    if key not in _RULE_SETS_BY_KEY:
-        return False
-    return key in (active_rule_set_keys() or set())
-
-
 def apply_audit_rule_set(key: str) -> CommandResult:
     """
     Writes one rule set to its own file under /etc/audit/rules.d/, then

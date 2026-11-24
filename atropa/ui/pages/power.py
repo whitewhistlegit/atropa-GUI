@@ -69,7 +69,6 @@ class PowerPage(BasePage):
         )
 
         self._sleep_actions: list[str] = []
-        self._sleep_rows: list = []
         self.sleep_group = self.add_group(
             "Lid and power button",
             "Written to Atropa's own logind and sleep drop-ins; logind is reloaded, so your session stays up.",

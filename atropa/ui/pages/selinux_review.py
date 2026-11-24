@@ -42,13 +42,11 @@ def _denial_title(denial) -> str:
 class SelinuxReviewPage(BasePage):
     def __init__(self) -> None:
         super().__init__()
-        self._load_page = None  # main_window wires it; kept for compatibility
         self._programs: list = []
         self._review = None
         self._filter = "needs_action"
         self._program_rows: list = []
         self._content_groups: list = []
-        self._selected_domain: str | None = None
 
         # Programs on the left, the selected program on the right.
         sidebar = Adw.PreferencesPage()
@@ -102,9 +100,6 @@ class SelinuxReviewPage(BasePage):
 
         self.programs_group = self.add_group("Programs")
         self.refresh()
-
-    def set_load_page(self, load_page) -> None:
-        self._load_page = load_page
 
     def refresh(self) -> None:
         self.run_async(selinux.is_in_setup_mode, self._on_setup_mode_status_loaded)
@@ -226,7 +221,6 @@ class SelinuxReviewPage(BasePage):
     # --------------------------------------------------------- program page --
 
     def _on_program_activated(self, _row, program) -> None:
-        self._selected_domain = program.domain
         self._show_program(program)
         self.split.set_show_content(True)
 

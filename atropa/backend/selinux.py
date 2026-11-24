@@ -176,16 +176,9 @@ def set_booleans(values: dict[str, bool], persistent: bool = True) -> CommandRes
     return run_privileged(argv)
 
 
-def restorecon(path: str, recursive: bool = True) -> CommandResult:
-    if not path:
-        raise ValueError("Path is required")
-    flag = "-Rv" if recursive else "-v"
-    return run_privileged(["restorecon", flag, path])
-
-
 def restorecon_streaming(path: str, recursive: bool, on_line) -> CommandResult:
     """
-    Same as restorecon(), but streams restorecon's own per-file output to
+    restorecon -v (-Rv when recursive), streaming restorecon's own per-file output to
     on_line as it runs. A recursive relabel over a large directory (or `/`)
     is exactly the kind of long, silent-looking operation a live progress
     log is meant for.
@@ -419,22 +412,6 @@ class LintRefused(RuntimeError):
             f"{module_name} grants dangerous access that hasn't been acknowledged ({names}). "
             "Open it on SELinux: Denials or SELinux: Modules to review it."
         )
-
-
-def lint_module(te_content: str, module_name: str, module_dir: Path | None = None) -> tuple[str, list]:
-    """(category, findings) for a module, with the category kept next to it."""
-    meta = te_lint.read_meta(module_dir or REVIEW_MODULES_DIR, module_name)
-    return meta["category"], te_lint.lint(te_content, meta["category"])
-
-
-def findings_for_pp(pp_path: str) -> tuple[str, list]:
-    """(category, findings) for a compiled module from its .te next to it; no .te, no findings."""
-    path = Path(pp_path)
-    source = path.with_suffix(".te")
-    if not source.exists():
-        return "unsure", []
-    meta = te_lint.read_meta(path.parent, path.stem)
-    return meta["category"], te_lint.lint(source.read_text(encoding="utf-8", errors="replace"), meta["category"])
 
 
 def save_draft(te_content: str, module_name: str, category: str = "unsure") -> str:

@@ -105,12 +105,6 @@ def set_profile(name: str) -> CommandResult:
     return run_unprivileged(["powerprofilesctl", "set", name], timeout=30)
 
 
-def tlp_active() -> bool:
-    """True when TLP is the running power-management service."""
-    result = run_unprivileged(["systemctl", "is-active", "tlp"], timeout=20)
-    return result.stdout.strip() == "active"
-
-
 # ------------------------------------------------------------------- battery --
 
 

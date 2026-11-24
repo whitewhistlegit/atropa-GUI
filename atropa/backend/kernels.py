@@ -39,7 +39,6 @@ from . import bootloader, pacman
 from .privilege import CommandResult, run_privileged, run_unprivileged
 
 MODULES_DIR = Path("/usr/lib/modules")
-BOOT_DIR = Path("/boot")
 
 # The kernels Arch ships, and what each is for. Any other kernel that is
 # installed is shown and can be removed, but only these are offered.

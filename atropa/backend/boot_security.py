@@ -379,11 +379,6 @@ def enroll_keys(microsoft: bool = True) -> CommandResult:
     return run_privileged(argv, input_text="y\n")
 
 
-def sign_all() -> CommandResult:
-    """Re-sign every file already in sbctl's database (what its pacman hook runs)."""
-    return run_privileged(["sbctl", "sign-all"], timeout=300)
-
-
 # --------------------------------------------------------------- compliance --
 #
 # Shaped for compliance.generate_report() but kept free of a hardening

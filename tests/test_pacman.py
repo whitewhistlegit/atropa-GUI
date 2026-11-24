@@ -80,20 +80,6 @@ def test_nothing_refreshes_the_real_database_without_upgrading():
 
 # --------------------------------------------------------------- list_* --
 
-def test_list_installed_parses_name_version(fake_run):
-    fake_run.set_response(["pacman", "-Q"], stdout="bash 5.2.021-1\nzlib 1.3-1\n", returncode=0)
-    pkgs = pacman.list_installed()
-    assert pkgs == [
-        pacman.Package(name="bash", version="5.2.021-1", installed=True),
-        pacman.Package(name="zlib", version="1.3-1", installed=True),
-    ]
-
-
-def test_list_installed_skips_blank_lines(fake_run):
-    fake_run.set_response(["pacman", "-Q"], stdout="bash 5.2.021-1\n\n\n", returncode=0)
-    assert len(pacman.list_installed()) == 1
-
-
 def test_list_explicit_and_orphans_use_same_parse(fake_run):
     fake_run.set_response(["pacman", "-Qe"], stdout="vim 9.0-1\n", returncode=0)
     fake_run.set_response(["pacman", "-Qdt"], stdout="orphan-lib 1.0-1\n", returncode=0)

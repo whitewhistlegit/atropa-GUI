@@ -285,12 +285,6 @@ def test_sign_boot_files_with_nothing_unsigned_signs_nothing(fake_run, fake_whic
     assert not any(call[:3] == ["pkexec", "sbctl", "sign"] for call in fake_run.calls)
 
 
-def test_sign_all_goes_through_pkexec(fake_run, fake_which):
-    fake_which.add("sbctl")
-    boot_security.sign_all()
-    assert fake_run.last_call() == ["pkexec", "sbctl", "sign-all"]
-
-
 # ------------------------------------------------------------ compliance ---
 
 def test_security_checks_score_encryption_and_secure_boot(fake_run, fake_which, boot_paths):

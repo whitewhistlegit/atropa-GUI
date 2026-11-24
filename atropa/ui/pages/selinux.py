@@ -83,14 +83,8 @@ class SelinuxPage(BasePage):
         bool_group.add(self.bool_filter_row)
         self.bool_group = bool_group
 
-        self._load_page = None  # wired in by main_window after both pages exist
-
         self._suppress_signals = False
         self.refresh()
-
-    def set_load_page(self, load_page) -> None:
-        """Called by main_window so 'Generate .te' can offer to open the result in the Load Policy page."""
-        self._load_page = load_page
 
     def refresh(self) -> None:
         self.run_async(selinux.get_status, self._on_status_loaded)
