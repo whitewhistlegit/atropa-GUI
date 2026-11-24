@@ -97,8 +97,13 @@ class Finding:
 _ACCESS_KINDS = {"allow", "dontaudit", "auditallow", "neverallow"}
 _XPERM_KINDS = {"allowxperm", "dontauditxperm", "auditallowxperm", "neverallowxperm"}
 _TRANSITION_KINDS = {"type_transition", "type_change", "type_member", "range_transition"}
-_DECLARATIONS = {"module", "type", "attribute", "typealias", "class", "bool", "attribute_role", "roleattribute",
-                 "sensitivity", "category", "level", "user", "policycap", "gen_require", "dominance"}
+# Declarations that grant nothing by themselves. Everything else is checked:
+# `type x_t, attr;` puts a type in an attribute (its rules come with it),
+# `typealias` lets rules reach an existing type under another name.
+_DECLARATIONS = {"module", "attribute", "bool", "class", "gen_require"}
+_BASE_ONLY = {"sensitivity", "category", "level", "dominance", "policycap", "mlsconstrain", "constrain",
+              "validatetrans", "mlsvalidatetrans", "sid", "fs_use_xattr", "fs_use_task", "fs_use_trans",
+              "genfscon", "portcon", "netifcon", "nodecon"}
 
 _SET = r"(?:~?\s*\{[^}]*\}|\*|~?\s*[^\s{};:]+)"
 _ACCESS_RE = re.compile(rf"^(\w+)\s+({_SET})\s+({_SET})\s*:\s*({_SET})\s+({_SET})$")
@@ -232,16 +237,32 @@ def _scan(te_text: str) -> tuple[list[Rule], list[Finding]]:
                                     "A permissive domain isn't confined at all: SELinux only logs what it does. "
                                     "Use semanage permissive while investigating, not a module.", line))
             continue
+        if keyword == "typealias":
+            problems.append(Finding("type_alias", DANGEROUS, f"Aliases a type: {statement[:80]}",
+                                    "An alias lets rules reach an existing type under a name the linter "
+                                    "doesn't recognise.", line))
+            continue
+        if keyword == "type":
+            words = statement.replace(",", " , ").split()[1:]
+            if "alias" in words:
+                problems.append(Finding("type_alias", REVIEW, f"Declares a type alias: {statement[:80]}",
+                                        "Rules on the alias name apply to the type.", line))
+                words = words[:words.index("alias")]
+            attributes = [w for w in words[1:] if w != ","]
+            if attributes:
+                problems.extend(_attribute_findings(attributes, line))
+            continue
+        if keyword in _BASE_ONLY:
+            problems.append(Finding("unparseable", DANGEROUS, f"Base-policy statement: {statement[:80]}",
+                                    "This belongs in the base policy, not a module; Atropa won't vouch for it.", line))
+            continue
+        if keyword in {"user", "roleattribute", "attribute_role"}:
+            problems.append(Finding("role_types", REVIEW, f"User or role change: {statement[:80]}",
+                                    "Changes which users and roles reach which domains.", line))
+            continue
         if keyword == "typeattribute":
             attributes = [w.strip(",") for w in statement.split()[2:]]
-            privileged = [a for a in attributes if re.search(r"unconfined|^can_|exempt|bypass|^mls|^mcs", a)]
-            if privileged:
-                problems.append(Finding("privileged_attribute", DANGEROUS,
-                                        f"Adds a type to {', '.join(privileged)}",
-                                        "These attributes exist to exempt types from the policy.", line))
-            else:
-                problems.append(Finding("attribute", REVIEW, f"Adds a type to {', '.join(attributes)}",
-                                        "An attribute carries rules of its own; the type gets all of them.", line))
+            problems.extend(_attribute_findings(attributes, line))
             continue
         if keyword == "role":
             problems.append(Finding("role_types", REVIEW, f"Role change: {statement[:80]}",
@@ -251,6 +272,15 @@ def _scan(te_text: str) -> tuple[list[Rule], list[Finding]]:
                                 "A statement Atropa can't check - a macro, an unsupported construct or a typo - "
                                 "could grant anything; Atropa won't vouch for it.", line))
     return rules, problems
+
+
+def _attribute_findings(attributes: list[str], line: int) -> list[Finding]:
+    privileged = [a for a in attributes if re.search(r"unconfined|^can_|exempt|bypass|^mls|^mcs|_trusted", a)]
+    if privileged:
+        return [Finding("privileged_attribute", DANGEROUS, f"Adds a type to {', '.join(privileged)}",
+                        "These attributes exist to exempt types from the policy.", line)]
+    return [Finding("attribute", REVIEW, f"Adds a type to {', '.join(attributes)}",
+                    "An attribute carries rules of its own; the type gets all of them.", line)]
 
 
 def parse(te_text: str) -> list[Rule]:
@@ -521,7 +551,7 @@ def lint(te_text: str, category: str = "unsure", booleans: list[str] | None = No
     label = CATEGORIES.get(category, CATEGORIES["unsure"])
     hard = {"enforcement", "selinux_config", "shadow", "credential_write", "code_write", "raw_device",
             "dyntransition", "ptrace_other", "to_unconfined", "audit_tamper", "mmap_zero", "confined_user",
-            "unparseable", "permissive", "privileged_attribute", "broad_attribute"}
+            "unparseable", "permissive", "privileged_attribute", "broad_attribute", "type_alias"}
     found: list[Finding] = list(problems)
     out_of_place = 0
     allows = [r for r in rules if r.kind in ("allow", "allowxperm")]

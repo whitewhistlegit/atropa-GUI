@@ -299,6 +299,11 @@ def test_sidecar_round_trip(tmp_path):
     ("files_read_etc_files(a_t)", "unparseable"),                               # an m4 macro, no ';'
     ("files_read_etc_files(a_t);", "unparseable"),
     ("allow a_t b_t file read;", "unparseable"),                                 # typo: no ':'
+    ("typealias shadow_t alias my_t;\nallow a_t my_t:file read;", "type_alias"),  # reach shadow_t by another name
+    ("type evil_t, unconfined_domain_type;", "privileged_attribute"),
+    ("type evil_t, domain, can_change_object_identity;", "privileged_attribute"),
+    ("policycap network_peer_controls;", "unparseable"),
+    ("sensitivity s1;", "unparseable"),
 ])
 def test_constructs_that_used_to_slip_through_are_dangerous(rule, rule_id):
     found = te_lint.lint(module(rule), booleans=[])
@@ -333,3 +338,17 @@ def test_the_gate_refuses_a_set_that_hides_shadow(fake_run, fake_which, monkeypa
     text = module("allow { a_t b_t } shadow_t:file read;").replace("module test", "module atropa_sets")
     with pytest.raises(selinux.LintRefused):
         selinux.compile_and_load_te(text, "atropa_sets")
+
+
+def test_a_plain_type_declaration_is_inert():
+    assert te_lint.verdict(te_lint.lint(module("type myapp_t;", "allow myapp_t b_t:file read;"), booleans=[])) == "fine"
+
+
+def test_a_new_type_in_an_ordinary_attribute_is_review():
+    found = {f.rule_id: f.severity for f in te_lint.lint(module("type myapp_t, domain;"), booleans=[])}
+    assert found == {"attribute": te_lint.REVIEW}
+
+
+def test_user_and_role_statements_are_review():
+    found = {f.rule_id for f in te_lint.lint(module("roleattribute staff_r some_roles;"), booleans=[])}
+    assert found == {"role_types"}
