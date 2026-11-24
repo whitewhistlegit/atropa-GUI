@@ -270,13 +270,20 @@ class BasePage(Gtk.Box):
         if smoke_mode():
             return  # the UI smoke test constructs pages, it doesn't run commands
 
+        def deliver(result: Any, error: Exception | None) -> bool:
+            on_done(result, error)
+            # Always once: GLib re-runs an idle callback that returns
+            # something truthy, and a lambda returning a tuple did exactly
+            # that - re-running a page refresh (pkexec and all) in a loop.
+            return GLib.SOURCE_REMOVE
+
         def worker() -> None:
             result, error = None, None
             try:
                 result = work_fn()
             except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
                 error = exc
-            GLib.idle_add(on_done, result, error)
+            GLib.idle_add(deliver, result, error)
 
         threading.Thread(target=worker, daemon=True).start()
 

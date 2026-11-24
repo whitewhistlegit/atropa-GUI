@@ -258,7 +258,9 @@ class ModuleView(Gtk.Box):
         def install(acks):
             result = selinux.compile_and_load_te(text, name, acks)
             if result.ok and self.on_done:
-                GLib.idle_add(self.on_done)
+                # Once: on_done's return value must not decide whether GLib
+                # calls it again (the Modules page's returns a tuple).
+                GLib.idle_add(lambda: (self.on_done(), GLib.SOURCE_REMOVE)[1])
             return result
 
         selinux_lint.install(
