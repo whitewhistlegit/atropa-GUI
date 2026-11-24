@@ -21,7 +21,8 @@ libadwaita. Atropa runs as your normal user and asks for authentication
 
 Atropa follows your desktop's light or dark style; these show the dark one.
 
-The sidebar groups modules into **Core**, **Security** and **Maintenance**,
+The sidebar groups modules into **Core**, **Security** and **Maintenance**
+(plus **Extensions** for enabled plugins),
 with a search box that also matches feature words (try "firewall" or
 "backup"). `Ctrl+K` / `Ctrl+F` focus search, `Esc` clears it, `F5` refreshes
 the current page, and the header menu has both actions plus **About**.
@@ -37,19 +38,19 @@ Each sidebar entry is a module:
 | **Network** | NetworkManager devices, Wi-Fi, static IP/DHCP (systemd-networkd is detected but read-only) |
 | **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
 | **Services** | systemd units: start/stop/restart/enable/disable, journal tail |
-| **Bootloader** | GRUB / systemd-boot detection, entries, timeout |
+| **Bootloader** | GRUB / systemd-boot detection, entries, timeout, kernel parameters (AppArmor/SELinux LSM lists, hardening options) with a boot entry kept on the old parameters |
 | **Kernels** | Installed kernels, a fallback kernel, headers for DKMS, boot entries, leftover module folders |
 | **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard. On a desktop with no SSH server it opens no ports, skips fail2ban, and shows a desktop baseline instead. Can also add the unsigned SELinux package repository, locked behind the administrator password |
 | **Security Profiles** | Export this machine's security posture to JSON and import it elsewhere, per-section |
 | **Security** | Firewall (ufw or firewalld), SSH hardening with validate-before-reload and automatic rollback, sudoers syntax check |
-| **Hardening** | Kernel sysctl hardening, fail2ban, USBGuard, auditd + CIS audit rule sets, login lockout, password complexity, `arch-audit` vulnerability scan, security audit score |
+| **Hardening** | Kernel sysctl hardening, fail2ban, USBGuard, auditd + CIS audit rule sets, login lockout, password complexity (and wiring `pam_pwquality` in), `su` restricted to wheel, `arch-audit` vulnerability scan, security audit score |
 | **Encryption & Secure Boot** | LUKS root detection, firmware Secure Boot state, sbctl key creation/enrollment/signing (behind confirmations) |
 | **Compliance Report** | Posture report with an exposure summary (firewall, SSH, listening sockets, LUKS, Secure Boot) on top of the CIS-style categories, exportable as Markdown (not an official CIS assessment) |
 | **Inventory & Hygiene** | Read-only scans for unneeded network services and account/file hygiene issues |
 | **File Integrity** | AIDE baseline/check/timer management with changed-path reports saved between launches, config validation, and next-run times (AIDE itself is AUR-only; install it first) |
 | **AppArmor** | Profile modes, capability/network rule toggles, denial review with rule suggestions |
-| **SELinux** | Status, enforcing/permissive (lock-gated), booleans, denial review, per-application policy drafts |
-| **SELinux: Modules** | Installed, pending and new policy modules, each linted; load or batch-import `.te` files |
+| **SELinux** | Status, enforcing/permissive (lock-gated), relabel, `restorecon`, booleans |
+| **SELinux: Modules** | Installed, pending and new policy modules, each checked by the module linter (dangerous rules need acknowledging before install); load or batch-import `.te` files |
 | **SELinux: Denials** | Setup Mode; denials per program with the best next step (boolean, relabel, dontaudit, module) and its drafted module reviewed in place |
 | **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
 | **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
@@ -77,8 +78,8 @@ that authorization is cached, the helper does not run a generic shell or
 `sed`: file writes are performed by the helper against an exact list of
 paths Atropa manages, every other command is checked against the exact
 arguments Atropa uses, and root-equivalent changes (passwords, users,
-SELinux modules and mode, `pacman.conf`, `sshd_config`) ask for the password
-every time. Changes that
+SELinux modules and mode, `pacman.conf`, `sshd_config`, kernel parameters,
+PAM files) ask for the password every time. Changes that
 can lock you out or end your session ask first and say what they affect:
 stopping or restarting a service like the display manager or sshd, locking a
 password, taking the last administrator out of `wheel`, turning the firewall
@@ -132,8 +133,9 @@ terminal first if `pipx ensurepath` just updated your `PATH`).
 To uninstall: `pipx uninstall atropa`, then remove
 `~/.local/share/applications/atropa.desktop`,
 `~/.local/share/icons/hicolor/*/apps/org.atropa.Atropa.png`,
-`/usr/share/polkit-1/actions/org.atropa.pkexec.policy` and
-`/usr/lib/atropa/` (both helpers).
+`/usr/share/polkit-1/actions/org.atropa.pkexec.policy`,
+`/usr/lib/atropa/` (both helpers) and, if you don't want the backups,
+`/var/lib/atropa/`.
 
 ### As a pacman package
 
@@ -161,7 +163,9 @@ cd packaging/arch/atropa   # atropa 0.2.0, pinned release tarball
 makepkg -si
 ```
 
-Run `makepkg -si` again to update. Only pushed commits are packaged by the
+Run `makepkg -si` again to update (`makepkg -C -si` if your
+`makepkg.conf` sets `BUILDDIR`: an old build folder there can make makepkg
+quietly rebuild the previous version). Only pushed commits are packaged by the
 `-git` variant, not local changes. If you used `install.sh` before, undo it first (see the
 uninstall steps above): the pipx copy in `~/.local/bin` would shadow
 `/usr/bin/atropa`, and pacman won't overwrite the polkit policy it copied.
@@ -196,13 +200,16 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,159 tests across every backend module and the privileged helper. It fakes the one
+The suite is 1,648 tests across every backend module, the privileged
+helper, Arch's stock config files and real SELinux drafts. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.
 
-CI (`.github/workflows/ci.yml`) runs the same three steps on Python 3.11 and
-3.12. Architecture, design decisions and the change history are in
-[`DOCUMENTATION.md`](DOCUMENTATION.md).
+CI (`.github/workflows/ci.yml`) runs the same three steps on Python 3.11 to
+3.14, and builds every page under Xvfb (`xvfb-run -a python3 -m pytest
+tests/test_ui_smoke.py`). How everything works is in
+[`DOCUMENTATION.md`](DOCUMENTATION.md), what's open in [`TODO.md`](TODO.md),
+and the project's history in [`docs/HISTORY.md`](docs/HISTORY.md).
 
 ## License
 
