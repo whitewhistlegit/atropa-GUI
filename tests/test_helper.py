@@ -101,6 +101,24 @@ def test_main_execs_the_validated_command_with_a_clean_environment(monkeypatch):
     assert env["HOME"] == "/root"
 
 
+def test_a_multi_call_binary_keeps_the_name_it_was_called_by(monkeypatch, tmp_path):
+    # Arch's /usr/bin/restorecon is a symlink to setfiles, which decides
+    # what to be from argv[0]: run as "setfiles", `-Rv PATH` fails.
+    (tmp_path / "setfiles").write_text("#!/bin/sh\n")
+    (tmp_path / "setfiles").chmod(0o755)
+    (tmp_path / "restorecon").symlink_to("setfiles")
+    calls = []
+    monkeypatch.setattr(helper.check, "__defaults__", ((str(tmp_path),),))
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(helper.os, "execve", lambda path, argv, env: calls.append((path, argv)))
+
+    helper.main(["restorecon", "-Rv", "/home/alice"])
+
+    path, argv = calls[0]
+    assert path == str(tmp_path / "setfiles")  # the real binary runs...
+    assert argv == [str(tmp_path / "restorecon"), "-Rv", "/home/alice"]  # ...as restorecon
+
+
 def test_main_refuses_a_shell(monkeypatch):
     monkeypatch.setattr(helper.os, "geteuid", lambda: 0)
     assert helper.main(["bash", "-c", "id"]) == 126
