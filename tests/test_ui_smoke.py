@@ -71,3 +71,41 @@ def test_smoke_mode_is_on():
     from atropa.ui.pages import smoke_mode
 
     assert smoke_mode() is True
+
+
+def test_selinux_module_view_lints_and_fixes_in_place():
+    """The module view used by Denials and Modules: lint, tint, and a one-click drop."""
+    from atropa.backend import te_lint
+    from atropa.ui.pages.selinux_load import SelinuxLoadPage
+    from atropa.ui.selinux_module_view import ModuleView
+
+    page = SelinuxLoadPage()
+    text = "module m 1.0;\nallow a_t self:capability { sys_admin chown };\nallow a_t shadow_t:file read;\n"
+    view = ModuleView(page, "atropa_m", text, "desktop_app", "a test")
+    assert te_lint.verdict(view.findings) == te_lint.DANGEROUS
+    shadow = next(f for f in view.findings if f.rule_id == "shadow")
+    view._on_fix_clicked(None, shadow)
+    assert "shadow_t" not in view.text().split("\n", 1)[1]
+    assert all(f.rule_id != "shadow" for f in view.findings)
+
+
+def test_selinux_denials_page_shows_a_program():
+    from types import SimpleNamespace
+
+    from atropa.backend import selinux, selinux_programs, te_lint
+    from atropa.ui.pages.selinux_review import SelinuxReviewPage
+
+    denial = selinux.GroupedDenial(key="k", scontext_type="a_t", tcontext_type="shadow_t", tclass="file",
+                                   permissions=["read"], program="a", sample_line="avc", sample_path="/x", count=3,
+                                   hint="label?", booleans=["a_bool"])
+    review = SimpleNamespace(new=[denial], needs_boolean=[], noise=[], already_allowed=[], undefined_in_policy=[],
+                             resolved=[], boolean_rules={"a_bool": 2}, since=None, total_raw_lines=3,
+                             policy_checked=True)
+    te = "module atropa_a_t 1.0;\nallow a_t shadow_t:file read;\n"
+    draft = selinux.ProgramPolicyReview(program="a", safe_name="atropa_a_t", denial_count=3, domain="a_t",
+                                        te_content=te, findings=te_lint.lint(te))
+    programs = selinux_programs.overview(review, [draft])
+    page = SelinuxReviewPage()
+    page._on_review_loaded((review, programs), None)
+    page._on_program_activated(None, programs[0])
+    assert page.content_stack.get_visible_child_name() == "detail"

@@ -151,15 +151,15 @@ MODULES = [
     ),
     Module(
         "selinux", "SELinux", "changes-prevent-symbolic", SelinuxPage,
-        "Modes, booleans, and denial review", "security",
+        "Mode, labels, and booleans", "security",
     ),
     Module(
-        "selinux_load", "SELinux: Load Policy", "document-open-symbolic", SelinuxLoadPage,
-        "Compile and load policy modules", "security",
+        "selinux_load", "SELinux: Modules", "document-open-symbolic", SelinuxLoadPage,
+        "Installed, pending, and new policy modules", "security",
     ),
     Module(
-        "selinux_review", "SELinux: Denial Review", "edit-find-symbolic", SelinuxReviewPage,
-        "Triage denials and draft policy", "security",
+        "selinux_review", "SELinux: Denials", "edit-find-symbolic", SelinuxReviewPage,
+        "What each program was denied, and what to do", "security",
     ),
     Module(
         "refpolicy_build", "SELinux: Build Policy", "system-run-symbolic", RefpolicyBuildPage,

@@ -417,7 +417,7 @@ class LintRefused(RuntimeError):
         names = "; ".join(f.message for f in findings[:3])
         super().__init__(
             f"{module_name} grants dangerous access that hasn't been acknowledged ({names}). "
-            "Review it on the Denial Review page."
+            "Open it on SELinux: Denials or SELinux: Modules to review it."
         )
 
 
@@ -435,6 +435,22 @@ def findings_for_pp(pp_path: str) -> tuple[str, list]:
         return "unsure", []
     meta = te_lint.read_meta(path.parent, path.stem)
     return meta["category"], te_lint.lint(source.read_text(encoding="utf-8", errors="replace"), meta["category"])
+
+
+def save_draft(te_content: str, module_name: str, category: str = "unsure") -> str:
+    """Compile a module into Pending without installing it; returns the .pp path."""
+    _validate_module_name(module_name)
+    pp_path = _compile_te(te_content, module_name, REVIEW_MODULES_DIR)
+    meta = te_lint.read_meta(REVIEW_MODULES_DIR, module_name)
+    te_lint.write_meta(REVIEW_MODULES_DIR, module_name, category, meta["acknowledged"], meta.get("reason"))
+    return pp_path
+
+
+def discard_draft(module_name: str) -> None:
+    """Delete a pending module's files (.te, .mod, .pp and its sidecar)."""
+    _validate_module_name(module_name)
+    for ext in ("te", "mod", "pp", "atropa.json"):
+        (REVIEW_MODULES_DIR / f"{module_name}.{ext}").unlink(missing_ok=True)
 
 
 def set_module_category(module_name: str, category: str) -> None:

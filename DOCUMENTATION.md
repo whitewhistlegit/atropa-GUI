@@ -185,6 +185,41 @@ snapper user-driven) are ask-tier. Only the `root` config is accepted;
 `rollback` and `set-config` are refused. `snapper-cleanup.timer` and
 `grub-btrfsd.service` are in `MANAGED_UNITS`.
 
+### SELinux pages (`pages/selinux.py`, `selinux_review.py`, `selinux_load.py`)
+
+Three entries (plus Build Policy):
+
+- *SELinux* - configuration only: status, enforcing mode (lock + confirm),
+  relabel, restorecon, booleans, and a row that opens Denials.
+- *SELinux: Denials* (`selinux_review.py`) - an `Adw.NavigationSplitView`.
+  The sidebar has Setup Mode, "Review now" (kernel log or audit.log), filter
+  chips (Needs action / Noise / Done / All, with counts) and the programs:
+  one row per SELinux source domain with one badge for its best next step
+  (`selinux_programs.overview()`: Dangerous, Review, Relabel, Boolean,
+  Module, Policy gap, Noise, Done - most urgent first). "Review now" runs
+  `review_all_denials()` and then `build_policy_review()` for the same
+  window, so drafts exist as soon as the list does; nothing is installed.
+  The program page has the recommended route first - boolean (with how
+  many of its denials it covers and how many rules it switches), restorecon
+  for paths a label probably explains, installing the dontaudit module for
+  known noise, the undefined-class Help - then the draft module, then each
+  denial as an expander (sample line, path, hint, matched module) and the
+  audit2why text.
+- *SELinux: Modules* (`selinux_load.py`) - installed by Atropa (active or
+  not, with lint badge and category; Open, Remove, Reinstall, Reinstall all
+  inactive), Pending (Open, Install, Discard), New / Load a .te / Import
+  several, and everything loaded in the policy.
+
+Drafts, pending, installed and hand-loaded modules all open in the same
+`ModuleView` (`ui/selinux_module_view.py`): the category toggle buttons
+with the detected reason, the findings (badge, line, why, and a one-click
+"Drop it" / "Use dontaudit" / "Turn on <boolean>" where the fix is
+mechanical; clicking one jumps to its line), the source - editable,
+flagged lines tinted by severity, re-linted 600 ms after typing stops -
+and Discard / Save for later / Install. Install goes through
+`selinux_lint.install()`, the same acknowledge-each-dangerous-finding
+dialog as everywhere else, and the backend gate behind it.
+
 ### Module linter (`te_lint.py`)
 
 Drafted, imported and hand-written modules are linted before they're
