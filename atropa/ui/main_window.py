@@ -35,6 +35,7 @@ from atropa.ui.pages.apparmor import ApparmorPage  # noqa: E402
 from atropa.ui.pages.boot_report import BootReportPage  # noqa: E402
 from atropa.ui.pages.boot_security import BootSecurityPage  # noqa: E402
 from atropa.ui.pages.bootloader import BootloaderPage  # noqa: E402
+from atropa.ui.pages.kernels import KernelsPage  # noqa: E402
 from atropa.ui.pages.compliance import CompliancePage  # noqa: E402
 from atropa.ui.pages.dependencies import DependenciesPage  # noqa: E402
 from atropa.ui.pages.aide_page import AidePage  # noqa: E402
@@ -103,6 +104,10 @@ MODULES = [
     Module(
         "bootloader", "Bootloader", "drive-harddisk-symbolic", BootloaderPage,
         "Boot entries and the default timeout", "core",
+    ),
+    Module(
+        "kernels", "Kernels", "emblem-system-symbolic", KernelsPage,
+        "Installed kernels, a fallback, and leftovers", "core",
     ),
     Module(
         "users", "Users & Groups", "system-users-symbolic", UsersPage,
@@ -181,7 +186,7 @@ MODULES = [
         "SMART health, filesystem space, and cleanup", "maintenance",
     ),
     Module(
-        "firmware", "Firmware", "application-x-firmware-symbolic", FirmwarePage,
+        "firmware", "Firmware", "applications-engineering-symbolic", FirmwarePage,
         "Firmware devices and updates through fwupd", "maintenance",
     ),
     Module(

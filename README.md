@@ -38,6 +38,7 @@ Each sidebar entry is a module:
 | **Users & Groups** | Create/modify/delete users and groups, lock/unlock and set passwords |
 | **Services** | systemd units: start/stop/restart/enable/disable, journal tail |
 | **Bootloader** | GRUB / systemd-boot detection, entries, timeout |
+| **Kernels** | Installed kernels, a fallback kernel, headers for DKMS, boot entries, leftover module folders |
 | **Security Quick Setup** | One-click recommended baseline (firewall, fail2ban, sysctl, faillock, AppArmor, auditd, USBGuard, SELinux permissive), as a checklist or a guided wizard. On a desktop with no SSH server it opens no ports, skips fail2ban, and shows a desktop baseline instead. Can also add the unsigned SELinux package repository, locked behind the administrator password |
 | **Security Profiles** | Export this machine's security posture to JSON and import it elsewhere, per-section |
 | **Security** | Firewall (ufw or firewalld), SSH hardening with validate-before-reload and automatic rollback, sudoers syntax check |

@@ -661,6 +661,48 @@ reinstall** — picking the wrong disk/EFI target is destructive; it raises
 (`bootctl install`) is safe enough to automate since there's no disk target
 ambiguity.
 
+### Kernels (`kernels.py` / `pages/kernels.py`)
+
+Kernel packages are found by the `pkgbase` file each one installs in
+`/usr/lib/modules/<release>/`, so an AUR kernel counts like a repo one. Per
+kernel: pacman version, running (`uname -r` is its directory name),
+`-headers` installed (only flagged when a `*-dkms` package is installed,
+since DKMS builds against them), and a boot entry:
+
+- GRUB: the `vmlinuz-*` names in `grub.cfg`. grub-mkconfig writes it 0600,
+  so when it isn't readable the page offers "Check", which runs the helper's
+  `grep -oE 'vmlinuz-[A-Za-z0-9._+-]+' /boot/grub/grub.cfg` - kernel file
+  names only, never the command lines.
+- systemd-boot: `linux /vmlinuz-*` in the loader entries, plus unified
+  kernel images in `EFI/Linux/`.
+
+`warnings()` names, most important first: a single kernel (no fallback),
+missing headers with DKMS, a kernel without a boot entry.
+
+- `install(pkgbase, upgrade=False)` - only the Arch kernels in `OFFERED`
+  (`linux`, `linux-lts`, `linux-zen`, `linux-hardened`), with headers when
+  DKMS is in use, then `grub-mkconfig` on GRUB. `pacman.install`'s
+  partial-upgrade refusal passes through; the page then offers
+  `upgrade=True` (`pacman -Syu --needed <kernel>`).
+- `remove(pkgbase)` - `pacman -Rns` with its headers, then `grub-mkconfig`;
+  refused for the running kernel and for the last one.
+- `entry_for()` / `add_boot_entry()` - systemd-boot only: a copy of the
+  running kernel's entry with the kernel and initramfs names swapped,
+  written as `loader/entries/atropa-<pkgbase>.conf`. The helper allows
+  only `atropa-*.conf` there, under `/boot` or `/efi`, and writing one asks
+  every time (an entry carries the kernel command line).
+- Leftover module folders: DKMS builds into `updates/dkms` of every kernel
+  release, and pacman doesn't remove that when the kernel goes, so every
+  old release's folder stays (about 14 MB each with nvidia). The helper's
+  `modules-leftover-remove RELEASE` deletes one only when it isn't the
+  running kernel, is a real directory, has no `pkgbase` and no `kernel/`
+  tree (so a kernel installed by hand is left alone), and `pacman -Qqo`
+  finds no owner.
+
+Alongside this, `loader.conf` writes are now limited to the boot
+directories (`/boot`, `/efi`); the helper used to accept any path ending in
+`/loader/loader.conf`.
+
 ### Security (`security.py` / `pages/security.py`)
 Firewall abstraction over `ufw` **or** `firewalld` (whichever is installed;
 `firewall_backend()` returns `"ufw" | "firewalld" | "none"`). SSH hardening
@@ -2867,7 +2909,8 @@ exactly one definition.
   a very YaST-shaped feature, pairs with the backup mechanism)
 - Journal/log viewer (already runs `journalctl` in several places,
   never surfaced as its own page)
-- Kernel management (multiple kernels, `mkinitcpio`, headers)
+- Kernel management (multiple kernels, `mkinitcpio`, headers) - built: see
+  Kernels; `mkinitcpio.conf` editing stays out
 
 **Still open from the full-repo audit** (rough priority order):
 - Run the SELinux path once on x86_64 through Atropa: Quick Setup's SELinux
