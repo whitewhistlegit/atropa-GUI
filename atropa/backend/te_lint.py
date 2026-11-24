@@ -243,12 +243,13 @@ def _scan(te_text: str) -> tuple[list[Rule], list[Finding]]:
                                     "doesn't recognise.", line))
             continue
         if keyword == "type":
-            words = statement.replace(",", " , ").split()[1:]
-            if "alias" in words:
+            # type NAME [alias NAME | alias { NAMES }] [, ATTR, ATTR ...]: the
+            # attributes are everything after the first comma, alias or not.
+            head, _comma, tail = statement.partition(",")
+            if re.search(r"\balias\b", head):
                 problems.append(Finding("type_alias", REVIEW, f"Declares a type alias: {statement[:80]}",
                                         "Rules on the alias name apply to the type.", line))
-                words = words[:words.index("alias")]
-            attributes = [w for w in words[1:] if w != ","]
+            attributes = [w for w in tail.replace(",", " ").split() if w]
             if attributes:
                 problems.extend(_attribute_findings(attributes, line))
             continue

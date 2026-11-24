@@ -301,6 +301,8 @@ def test_sidecar_round_trip(tmp_path):
     ("allow a_t b_t file read;", "unparseable"),                                 # typo: no ':'
     ("typealias shadow_t alias my_t;\nallow a_t my_t:file read;", "type_alias"),  # reach shadow_t by another name
     ("type evil_t, unconfined_domain_type;", "privileged_attribute"),
+    ("type evil_t alias foo_t, unconfined_domain_type;", "privileged_attribute"),       # attrs after an alias
+    ("type evil_t alias { foo_t bar_t }, unconfined_domain_type;", "privileged_attribute"),
     ("type evil_t, domain, can_change_object_identity;", "privileged_attribute"),
     ("policycap network_peer_controls;", "unparseable"),
     ("sensitivity s1;", "unparseable"),
