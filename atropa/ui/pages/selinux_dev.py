@@ -23,6 +23,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from atropa.backend import policy_draft, policy_fc, policy_source, selinux
 from atropa.ui.pages import BasePage, esc
+from atropa.ui.selinux_explorer import PathExplorer
 
 _DECISION_LABELS = {
     policy_draft.ALLOW: "allow",
@@ -55,8 +56,12 @@ class SelinuxDevPage(BasePage):
         self._content_groups: list = []
         self._buffers: dict[str, Gtk.TextBuffer] = {}  # "te", "fc", "if" for the shown program
         self._labels: dict[str, policy_fc.Program] = {}  # domain -> its package's file groups
+        self._checker = None  # denial_advice.PolicyChecker for the source's compiled policy, if any
+        self._checking: set[str] = set()  # domains whose coverage is being looked up
         self._build_row: Adw.ActionRow | None = None
-        self._last_build: policy_draft.BuildResult | None = None
+        # (the module texts built, result or None while building): the build row shows it while the
+        # texts on screen are still those, so re-rendering a program doesn't forget a build.
+        self._build_state: tuple[dict, object] | None = None
 
         sidebar = Adw.PreferencesPage()
         self.detail = Adw.PreferencesPage()
@@ -111,8 +116,14 @@ class SelinuxDevPage(BasePage):
     @staticmethod
     def _load_source():
         source = policy_source.find_source()
-        kb = policy_source.load(source) if source.usable else None
-        return source, kb
+        if not source.usable:
+            return source, None, None
+        kb = policy_source.load(source)
+        try:
+            runtime = {boolean.name: boolean.active for boolean in selinux.list_booleans()}
+        except Exception:  # noqa: BLE001 - getsebool missing: the compiled defaults then
+            runtime = {}
+        return source, kb, policy_draft.policy_checker(source, runtime)
 
     def _on_source_loaded(self, result, error) -> None:
         if error:
@@ -120,7 +131,10 @@ class SelinuxDevPage(BasePage):
             self.source_row.set_title("Couldn't read the policy source")
             self.source_row.set_subtitle(esc(error))
             return
-        self._source, self._kb = result
+        self._source, self._kb, self._checker = result
+        for rules in self._by_domain.values():  # another source answers differently
+            for rule in rules:
+                rule.coverage = None
         if self._kb is None:
             self.source_row.set_title("No policy source")
             self.source_row.set_subtitle(esc(self._source.note + ". Choose the tree the running policy is built "
@@ -241,7 +255,6 @@ class SelinuxDevPage(BasePage):
             self.detail.remove(group)
         self._content_groups = []
         self._domain = domain
-        self._last_build = None
         rules = self._by_domain[domain]
         self.content_page.set_title(domain)
         self.content_stack.set_visible_child_name("detail")
@@ -250,14 +263,22 @@ class SelinuxDevPage(BasePage):
             "Rules", "One per target and class. Interfaces are the policy source's own, tightest first: "
                      "+N is how many more permissions the interface grants in all.",
         )
+        buttons = Gtk.Box(spacing=6)
+        add_paths = Gtk.Button(label="Add paths…", valign=Gtk.Align.CENTER,
+                               tooltip_text="Pick files the program will need that no test run touched")
+        add_paths.connect("clicked", self._on_add_paths)
+        buttons.append(add_paths)
         if self._kb is not None:
-            tight = Gtk.Button(label="Use tight interfaces", valign=Gtk.Align.CENTER,
-                               tooltip_text=f"Switch each allow rule to its tightest interface, if it grants at most "
+            tight = Gtk.Button(label="Use the policy source", valign=Gtk.Align.CENTER,
+                               tooltip_text=f"Skip each rule its compiled policy already allows, and switch each "
+                                            f"allow rule to its tightest interface if it grants at most "
                                             f"{policy_draft.TIGHT_EXTRA} more permissions")
             tight.connect("clicked", self._on_use_tight)
-            rules_group.set_header_suffix(tight)
+            buttons.append(tight)
+        rules_group.set_header_suffix(buttons)
         for rule in rules:
             rules_group.add(self._rule_row(rule))
+        self._check_coverage(domain)
 
         self._render_labels(rules)
 
@@ -299,7 +320,12 @@ class SelinuxDevPage(BasePage):
         where = ", ".join(rule.programs[:3])
         if rule.path:
             where += f" · {rule.path}"
-        row = Adw.ActionRow(title=esc(_rule_title(rule)), subtitle=esc(f"{rule.count}× · {where}".strip(" ·")))
+        origin = "added path" if rule.declared else f"{rule.count}×"
+        subtitle = f"{origin} · {where}".strip(" ·")
+        note = self._coverage_note(rule)
+        if note:
+            subtitle += f"\n{note}"
+        row = Adw.ActionRow(title=esc(_rule_title(rule)), subtitle=esc(subtitle))
         options = _choice_options(rule)
         dropdown = Gtk.DropDown.new_from_strings([label for label, _, _ in options])
         dropdown.set_valign(Gtk.Align.CENTER)
@@ -322,8 +348,56 @@ class SelinuxDevPage(BasePage):
 
     def _on_use_tight(self, _btn) -> None:
         changed = policy_draft.use_tight_interfaces(self._by_domain.get(self._domain, []))
-        self.notify(f"{changed} rule(s) switched to an interface" if changed else "No close-fitting interfaces")
+        self.notify(f"{changed} rule(s) changed" if changed else "Nothing to change")
         self._show_domain(self._domain)
+
+    # ---------------------------------------------------------- coverage --
+
+    def _coverage_note(self, rule) -> str:
+        if not rule.coverage:
+            return ""
+        where = "Your tree" if self._source and self._source.kind == "tree" else "The loaded policy"
+        if rule.coverage == "allowed":
+            return f"{where} already allows this"
+        booleans = rule.coverage.removeprefix("boolean:").replace(",", ", ")
+        return f"{where} has this behind booleans that are off: {booleans}"
+
+    def _check_coverage(self, domain: str) -> None:
+        rules = self._by_domain.get(domain, [])
+        if self._checker is None or domain in self._checking or all(r.coverage is not None for r in rules):
+            return
+        self._checking.add(domain)
+        checker = self._checker
+
+        def done(_result, error) -> None:
+            self._checking.discard(domain)
+            if error:
+                return
+            if domain == self._domain and checker is self._checker:
+                self._show_domain(domain)
+
+        self.run_async(lambda: policy_draft.check_coverage(rules, checker), done)
+
+    # ------------------------------------------------------------- paths --
+
+    def _on_add_paths(self, _btn) -> None:
+        program = self._labels.get(self._domain)
+        domain = self._domain
+        explorer = PathExplorer(program.files if program else [],
+                                lambda paths: self._on_paths_picked(domain, paths))
+        explorer.present(self.get_root())
+
+    def _on_paths_picked(self, domain: str, paths: list[str]) -> None:
+        new = [r for r in (policy_draft.rule_for_path(p, domain) for p in paths) if r is not None]
+        if self._kb is not None:
+            policy_draft.annotate(new, self._kb)
+        rules = self._by_domain.setdefault(domain, [])
+        added = policy_draft.merge_rules(rules, new)
+        if self._kb is not None:
+            policy_draft.annotate(rules, self._kb)
+        self.notify(f"{added} rule(s) added, {len(new) - added} merged into existing ones")
+        if self._domain == domain:
+            self._show_domain(domain)
 
     # ------------------------------------------------------- file labels --
 
@@ -422,10 +496,20 @@ class SelinuxDevPage(BasePage):
         if self._buffers:
             for ext, text in self._texts().items():
                 self._buffers[ext].set_text(text)
-        if self._build_row is not None:
-            self._last_build = None
-            self._build_row.set_title("Not built yet" if self._kb else "No policy source to build against")
-            self._build_row.set_subtitle("")
+        if self._build_row is None:
+            return
+        state = self._build_state if self._build_state and self._build_state[0] == self._texts() else None
+        result = state[1] if state else None
+        if state is None:
+            title, subtitle = ("Not built yet" if self._kb else "No policy source to build against"), ""
+        elif result is None:
+            title, subtitle = "Building…", ""
+        elif isinstance(result, Exception):
+            title, subtitle = "Build failed to run", str(result)
+        else:
+            title, subtitle = ("Builds" if result.ok else "Doesn't build"), result.summary
+        self._build_row.set_title(title)
+        self._build_row.set_subtitle(esc(subtitle))
 
     def _on_copy(self, _btn) -> None:
         module, texts = self._module_name(), self._texts()
@@ -436,25 +520,20 @@ class SelinuxDevPage(BasePage):
     def _on_build(self, _btn) -> None:
         if self._kb is None:
             return
-        module, texts, kb, domain = self._module_name(), self._texts(), self._kb, self._domain
-        self._build_row.set_title("Building…")
-        self._build_row.set_subtitle("")
+        module, texts, kb = self._module_name(), self._texts(), self._kb
+        self._build_state = (texts, None)
+        self._update_te()
 
         def done(result, error) -> None:
-            if domain != self._domain or self._build_row is None:
-                return
-            if error:
-                self._build_row.set_title("Build failed to run")
-                self._build_row.set_subtitle(esc(error))
-                return
-            self._last_build = result
-            self._build_row.set_title("Builds" if result.ok else "Doesn't build")
-            self._build_row.set_subtitle(esc(result.summary))
+            if self._build_state and self._build_state[0] is texts:
+                self._build_state = (texts, error or result)
+                self._update_te()
 
         self.run_async(lambda: policy_draft.build(module, texts["te"], kb, fc=texts["fc"], if_text=texts["if"]), done)
 
     def _on_show_log(self, _btn) -> None:
-        text = self._last_build.log() + f"\nbuild dir: {self._last_build.workdir}\n" if self._last_build \
+        result = self._build_state[1] if self._build_state and self._build_state[0] == self._texts() else None
+        text = result.log() + f"\nbuild dir: {result.workdir}\n" if isinstance(result, policy_draft.BuildResult) \
             else "Build the module first."
         view = Gtk.TextView(editable=False, monospace=True, top_margin=10, bottom_margin=10, left_margin=10,
                             right_margin=10)

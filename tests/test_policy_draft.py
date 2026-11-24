@@ -141,3 +141,59 @@ def test_against_a_real_built_tree(tmp_path):
     result = policy_draft.build("atropa_dev_test", policy_draft.gen_te("atropa_dev_test", rules), kb,
                                 str(tmp_path / "bad"))
     assert not result.ok and "bogusperm" in result.log()
+
+
+def test_coverage_is_checked_once_and_the_policy_source_skips_what_it_allows():
+    from types import SimpleNamespace
+
+    calls = []
+
+    def check(src, tgt, cls, perms):
+        calls.append((src, tgt, cls))
+        status = {"proc_t": "allowed", "etc_t": "boolean"}.get(tgt, "none")
+        return SimpleNamespace(status=status, booleans=["ssh_sysadm_login"] if status == "boolean" else [])
+
+    rules = policy_draft.rules_from_denials(LINES)["sshd_t"]
+    policy_draft.check_coverage(rules, SimpleNamespace(check=check))
+    policy_draft.check_coverage(rules, SimpleNamespace(check=check))
+    assert len(calls) == len(rules)
+    assert ("sshd_t", "sshd_t", "process") in calls  # "self" asked as the domain itself
+    by_tgt = {r.tgt: r for r in rules}
+    assert (by_tgt["proc_t"].coverage, by_tgt["etc_t"].coverage, by_tgt["self"].coverage) == \
+        ("allowed", "boolean:ssh_sysadm_login", "")
+    assert policy_draft.use_tight_interfaces(rules) == 1
+    assert by_tgt["proc_t"].decision == policy_draft.SKIP
+
+
+def test_compiled_policy_of_a_source(tmp_path):
+    tree = make_tree(tmp_path / "tree")
+    source = policy_source.PolicySource("tree", str(tree), "x", "x")
+    assert policy_source.compiled_policy(source) is None  # not built
+    (tree / "policy.33").write_text("")
+    os.utime(tree / "policy.33", (1, 1))
+    (tree / "policy.35").write_text("")
+    assert policy_source.compiled_policy(source) == str(tree / "policy.35")
+    assert policy_source.compiled_policy(policy_source.PolicySource("headers", "/h", "x", "x")) == ""
+    assert policy_source.compiled_policy(policy_source.PolicySource("none")) is None
+
+
+def test_a_picked_path_becomes_a_read_rule_on_its_label(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy_draft, "actual_label", lambda path: "etc_t")
+    f = tmp_path / "sshd_config"
+    f.write_text("x")
+    rule = policy_draft.rule_for_path(str(f), "sshd_t")
+    assert (rule.tgt, rule.tclass, rule.perms, rule.declared) == ("etc_t", "file", {"getattr", "open", "read"}, True)
+    assert policy_draft.rule_for_path(str(tmp_path), "sshd_t").tclass == "dir"
+    assert policy_draft.rule_for_path(str(tmp_path / "missing"), "sshd_t") is None
+    monkeypatch.setattr(policy_draft, "actual_label", lambda path: "sshd_t")
+    assert policy_draft.rule_for_path(str(f), "sshd_t").tgt == "self"
+
+
+def test_merging_unions_permissions_and_forgets_stale_coverage():
+    rules = policy_draft.rules_from_denials(LINES)["sshd_t"]
+    etc = next(r for r in rules if r.tgt == "etc_t")
+    etc.coverage = "allowed"
+    new = [policy_draft.Rule("sshd_t", "etc_t", "file", frozenset({"lock"}), declared=True),
+           policy_draft.Rule("sshd_t", "etc_t", "dir", frozenset({"search"}), declared=True)]
+    assert policy_draft.merge_rules(rules, new) == 1
+    assert "lock" in etc.perms and etc.coverage is None

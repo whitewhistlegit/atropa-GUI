@@ -8,8 +8,8 @@ design specs, kept for the reasoning behind decisions - is in
 [`docs/HISTORY.md`](docs/HISTORY.md); it isn't kept up to date with the
 code, this file is.
 
-Size: **about 26,500 lines of Python - 45 backend modules, 34 pages plus
-the plugin page, and the root helper - and a 1,673-test pytest suite
+Size: **about 27,000 lines of Python - 45 backend modules, 34 pages plus
+the plugin page, and the root helper - and a 1,678-test pytest suite
 (about 15,400 lines).**
 
 **Contents:** 1. Architecture · 2. Module reference (2a Core, 2b Security,
@@ -1171,8 +1171,9 @@ copied out.
 - **Drafting** (`policy_draft`). Denial lines become one `Rule` per
   (source, target, class), permissions merged. Each rule is allow,
   dontaudit, one of its interfaces (tightest first: fewest permissions
-  granted beyond the denial, on any target), or skip. "Use tight
-  interfaces" picks the first interface within `TIGHT_EXTRA` (12). A rule
+  granted beyond the denial, on any target), or skip. "Use the policy
+  source" skips each rule the source's compiled policy already allows and
+  picks the first interface within `TIGHT_EXTRA` (12) for the rest. A rule
   whose permissions are exactly a policy set is written with the set's
   name (`all_*_perms` excepted). Modules are named `atropa_dev_<domain>`,
   with `_local` added if the policy has a module by that name.
@@ -1208,8 +1209,25 @@ copied out.
   cut it off. The .if gets a read interface per declared config, log or
   state type. The page warns that other programs reading those files under
   their old label lose that access.
-- **Not ported yet**: the compiled-tree coverage check, and the explorer
-  for declaring paths a test run never touched.
+- **Coverage** (`policy_draft.policy_checker()`, `check_coverage()`). The
+  Denials page's `denial_advice.PolicyChecker`, pointed at the source's
+  compiled policy (`policy_source.compiled_policy()`): a tree's newest
+  `policy.NN` - so "your tree already allows this" means the next Install
+  of the tree covers it - or for the running policy's headers, the loaded
+  policy. Booleans take their running values. Each rule shows "already
+  allows this" or "has this behind booleans that are off: ..." (the
+  booleans gating its rules; the checker can't say whether one is enough).
+  Lookups are ~0.25 s each, so they run per program, in the background,
+  when it's opened, and once per rule (`Rule.coverage`, reset when its
+  permissions grow or the source changes).
+- **Adding paths** (`ui/selinux_explorer.py`, `policy_draft.rule_for_path()`).
+  "Add paths…" opens a file browser - the package's own directories first
+  in the sidebar once it's been looked up, each entry with its current
+  label and a "package" tag for files the package owns - for paths the
+  program will need that no test run touched. Each pick becomes a read rule
+  (search for a directory) on the path's real label, merged into an
+  existing rule for the same target and class. scratch's gamepad controls
+  weren't ported.
 
 ### Custom Reference Policy build (`refpolicy_build.py` / `pages/refpolicy_build.py`)
 Builds/installs/activates a user-maintained refpolicy fork (e.g. Arch-
@@ -1638,7 +1656,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing
 
-**The suite**: `tests/`, 1,673 tests in 56 files - one `test_<module>.py`
+**The suite**: `tests/`, 1,678 tests in 56 files - one `test_<module>.py`
 per backend module plus the helper (`test_helper.py`,
 `test_helper_backups.py`, `test_helper_shapes.py`), `test_resources.py`,
 `test_stock_configs.py`, `test_te_lint.py` and the GTK smoke test - run with
