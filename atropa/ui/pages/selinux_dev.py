@@ -4,7 +4,8 @@ atropa.ui.pages.selinux_dev
 SELinux: Dev - experimental drafting against the running policy's own
 source, ported from atropa-scratch. Denials are grouped by program; each
 rule can be written as a plain allow, a dontaudit, an interface call the
-policy source offers, or skipped, and the module is compiled (and, against
+policy source offers, or skipped; the program's package files can be given
+labels of their own (policy_fc); and the module is compiled (and, against
 a tree, linked) to check it. Nothing here installs anything: the Denials
 page remains the way modules get onto the system.
 """
@@ -20,7 +21,7 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from atropa.backend import policy_draft, policy_source, selinux
+from atropa.backend import policy_draft, policy_fc, policy_source, selinux
 from atropa.ui.pages import BasePage, esc
 
 _DECISION_LABELS = {
@@ -52,7 +53,8 @@ class SelinuxDevPage(BasePage):
         self._domain = ""
         self._domain_rows: list = []
         self._content_groups: list = []
-        self._te_buffer: Gtk.TextBuffer | None = None
+        self._buffers: dict[str, Gtk.TextBuffer] = {}  # "te", "fc", "if" for the shown program
+        self._labels: dict[str, policy_fc.Program] = {}  # domain -> its package's file groups
         self._build_row: Adw.ActionRow | None = None
         self._last_build: policy_draft.BuildResult | None = None
 
@@ -257,15 +259,23 @@ class SelinuxDevPage(BasePage):
         for rule in rules:
             rules_group.add(self._rule_row(rule))
 
+        self._render_labels(rules)
+
         module_group = self._detail_group(self._module_name(), "Refpolicy style - only the policy's own build "
                                                                  "compiles it.")
-        self._te_buffer = Gtk.TextBuffer()
-        view = Gtk.TextView(buffer=self._te_buffer, editable=False, monospace=True, cursor_visible=False,
-                            top_margin=8, bottom_margin=8, left_margin=8, right_margin=8)
-        view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        scroller = Gtk.ScrolledWindow(min_content_height=200, css_classes=["card"])
-        scroller.set_child(view)
-        module_group.add(scroller)
+        stack = Gtk.Stack()
+        self._buffers = {}
+        for ext in ("te", "fc", "if"):
+            self._buffers[ext] = Gtk.TextBuffer()
+            view = Gtk.TextView(buffer=self._buffers[ext], editable=False, monospace=True, cursor_visible=False,
+                                top_margin=8, bottom_margin=8, left_margin=8, right_margin=8)
+            view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            scroller = Gtk.ScrolledWindow(min_content_height=200, css_classes=["card"])
+            scroller.set_child(view)
+            stack.add_titled(scroller, ext, f".{ext}")
+        switcher = Gtk.StackSwitcher(stack=stack, halign=Gtk.Align.START, margin_bottom=8)
+        module_group.add(switcher)
+        module_group.add(stack)
 
         actions = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE, margin_top=12)
         self._build_row = Adw.ActionRow(title="Not built yet")
@@ -276,7 +286,8 @@ class SelinuxDevPage(BasePage):
         build_btn.connect("clicked", self._on_build)
         log_btn = Gtk.Button(label="Log", valign=Gtk.Align.CENTER)
         log_btn.connect("clicked", self._on_show_log)
-        copy_btn = Gtk.Button(icon_name="edit-copy-symbolic", valign=Gtk.Align.CENTER, tooltip_text="Copy the .te")
+        copy_btn = Gtk.Button(icon_name="edit-copy-symbolic", valign=Gtk.Align.CENTER,
+                              tooltip_text="Copy the .te, .fc and .if")
         copy_btn.connect("clicked", self._on_copy)
         for button in (copy_btn, log_btn, build_btn):
             self._build_row.add_suffix(button)
@@ -314,25 +325,118 @@ class SelinuxDevPage(BasePage):
         self.notify(f"{changed} rule(s) switched to an interface" if changed else "No close-fitting interfaces")
         self._show_domain(self._domain)
 
+    # ------------------------------------------------------- file labels --
+
+    def _render_labels(self, rules) -> None:
+        group = self._detail_group(
+            "File labels",
+            "The program's package files, folded into .fc entries, with the label the running policy gives each "
+            "now. A new label also gives the program access to it - but every other program that reads those "
+            "files under their old label loses that access unless the policy grants it.",
+        )
+        names = []
+        for rule in rules:
+            names += [n for n in rule.programs if n not in names]
+        entry = Adw.EntryRow(title="Program or package")
+        entry.set_text(self._labels[self._domain].name if self._domain in self._labels else (names[:1] or [""])[0])
+        look = Gtk.Button(label="Look up", valign=Gtk.Align.CENTER)
+        look.connect("clicked", lambda _b: self._on_lookup(entry.get_text().strip()))
+        entry.add_suffix(look)
+        entry.connect("entry-activated", lambda _e: self._on_lookup(entry.get_text().strip()))
+        group.add(entry)
+        program = self._labels.get(self._domain)
+        if program is None:
+            return
+        where = " · ".join(x for x in (program.package, program.path) if x)
+        summary = Adw.ActionRow(title=esc(f"{len(program.groups)} entries" + (f" ({program.hidden} more not shown)"
+                                                                               if program.hidden else "")),
+                                subtitle=esc(where))
+        group.add(summary)
+        for fc_group in program.groups:
+            group.add(self._label_row(fc_group))
+
+    def _label_row(self, g: policy_fc.FcGroup) -> Adw.ActionRow:
+        row = Adw.ActionRow(title=esc(g.regex), subtitle=esc(f"now {g.current or 'unlabelled'} · {g.sample}"))
+        row.set_title_lines(1)
+        type_entry = Gtk.Entry(text=g.type, width_chars=20, valign=Gtk.Align.CENTER)
+        switch = Gtk.Switch(active=g.include, valign=Gtk.Align.CENTER, tooltip_text="Write this label to the .fc")
+
+        def on_type(entry: Gtk.Entry) -> None:
+            text = entry.get_text().strip()
+            if policy_fc.is_ident(text):
+                entry.remove_css_class("error")
+                g.type = text
+                self._update_te()
+            else:
+                entry.add_css_class("error")
+
+        def on_switch(sw: Gtk.Switch, _pspec) -> None:
+            g.include = sw.get_active()
+            self._update_te()
+
+        type_entry.connect("changed", on_type)
+        switch.connect("notify::active", on_switch)
+        row.add_suffix(type_entry)
+        row.add_suffix(switch)
+        return row
+
+    def _on_lookup(self, name: str) -> None:
+        if not name:
+            return
+        domain = self._domain
+        stem = policy_fc.stem_of(domain.removesuffix("_t"))
+        self.notify(f"Looking up {name}…")
+
+        def done(program, error) -> None:
+            if error:
+                self.notify(str(error), is_error=True)
+                return
+            self._labels[domain] = program
+            if self._domain == domain:
+                self._show_domain(domain)
+
+        self.run_async(lambda: policy_fc.load_program(name, stem), done)
+
+    # ------------------------------------------------------------ module --
+
+    def _groups(self) -> list:
+        program = self._labels.get(self._domain)
+        return program.groups if program else []
+
+    def _texts(self) -> dict[str, str]:
+        module, groups = self._module_name(), self._groups()
+        decls = policy_fc.declared_types(groups, self._kb)
+        own = [(src, tgt, cls, policy_fc.render_set(self._kb, name))
+               for src, tgt, cls, name in policy_fc.own_access(self._domain, decls)]
+        program = self._labels.get(self._domain)
+        return {
+            "te": policy_draft.gen_te(module, self._by_domain.get(self._domain, []), decls, own),
+            "fc": policy_fc.gen_fc(groups),
+            "if": policy_fc.gen_if(module, program.name if program else self._domain, decls, self._kb),
+        }
+
     def _te(self) -> str:
-        return policy_draft.gen_te(self._module_name(), self._by_domain.get(self._domain, []))
+        return self._texts()["te"]
 
     def _update_te(self) -> None:
-        if self._te_buffer is not None:
-            self._te_buffer.set_text(self._te())
+        if self._buffers:
+            for ext, text in self._texts().items():
+                self._buffers[ext].set_text(text)
         if self._build_row is not None:
             self._last_build = None
             self._build_row.set_title("Not built yet" if self._kb else "No policy source to build against")
             self._build_row.set_subtitle("")
 
     def _on_copy(self, _btn) -> None:
-        Gdk.Display.get_default().get_clipboard().set(self._te())
-        self.notify("Copied the .te")
+        module, texts = self._module_name(), self._texts()
+        joined = "\n".join(f"# ---- {module}.{ext}\n{text}" for ext, text in texts.items())
+        Gdk.Display.get_default().get_clipboard().set(joined)
+        self.notify("Copied the .te, .fc and .if")
 
     def _on_build(self, _btn) -> None:
         if self._kb is None:
             return
-        module, te, kb, domain = self._module_name(), self._te(), self._kb, self._domain
+        module, texts, kb, domain = self._module_name(), self._texts(), self._kb, self._domain
         self._build_row.set_title("Building…")
         self._build_row.set_subtitle("")
 
@@ -347,7 +451,7 @@ class SelinuxDevPage(BasePage):
             self._build_row.set_title("Builds" if result.ok else "Doesn't build")
             self._build_row.set_subtitle(esc(result.summary))
 
-        self.run_async(lambda: policy_draft.build(module, te, kb), done)
+        self.run_async(lambda: policy_draft.build(module, texts["te"], kb, fc=texts["fc"], if_text=texts["if"]), done)
 
     def _on_show_log(self, _btn) -> None:
         text = self._last_build.log() + f"\nbuild dir: {self._last_build.workdir}\n" if self._last_build \
