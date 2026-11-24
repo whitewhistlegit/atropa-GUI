@@ -1,4 +1,13 @@
-"""atropa.ui.pages.selinux_review - SELinux: Denial Review. Setup Mode + an extensive, classified denial review for bootstrapping a policy."""
+"""
+atropa.ui.pages.selinux_review - SELinux: Denials.
+
+One list of programs (SELinux source domains), each with the single best
+next step, and a page per program: what kind of program it is, the
+recommended route (boolean, relabel, dontaudit for noise, a module only when
+none of those cover it), its drafted module reviewed in place, and the raw
+denials. Setup Mode, restorecon, boolean "Turn on" and the undefined-class
+help are the same as before; only the layout changed.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +18,20 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from atropa.backend import selinux, te_lint
+from atropa.backend import selinux, selinux_programs, te_lint
 from atropa.ui import selinux_lint
 from atropa.ui.pages import BasePage, esc
+from atropa.ui.selinux_module_view import ModuleView
+
+_STEP_CLASS = {
+    "dangerous": "error", "review": "warning", "relabel": "accent", "boolean": "accent", "module": "accent",
+    "policy_gap": "warning", "noise": "dim-label", "done": "success",
+}
+_KIND_LABEL = {
+    "new": "needs a rule", "already_allowed": "allowed, yet denied - a label problem?", "boolean": "a boolean allows it",
+    "noise": "known noise", "undefined_in_policy": "not defined in the policy", "resolved": "stopped recurring",
+}
+_FILTERS = (("needs_action", "Needs action"), ("noise", "Noise"), ("done", "Done"), ("all", "All"))
 
 
 def _denial_title(denial) -> str:
@@ -22,92 +42,65 @@ def _denial_title(denial) -> str:
 class SelinuxReviewPage(BasePage):
     def __init__(self) -> None:
         super().__init__()
-        self._load_page = None  # wired in by main_window.py, same pattern as the SELinux page
+        self._load_page = None  # main_window wires it; kept for compatibility
+        self._programs: list = []
+        self._review = None
+        self._filter = "needs_action"
+        self._program_rows: list = []
+        self._content_groups: list = []
+        self._selected_domain: str | None = None
 
-        intro_group = self.add_group(
-            "SELinux: Denial Review",
-            "For bootstrapping a policy from scratch: set permissive, do normal work for a while, "
-            "then review everything that happened in one pass instead of hunting through 'recent N' "
-            "denials. 'All' always means all still retained by the log backend - journald and "
-            "audit.log both rotate - not a literal complete history.",
+        # Programs on the left, the selected program on the right.
+        sidebar = Adw.PreferencesPage()
+        self.detail = Adw.PreferencesPage()
+        self.empty = Adw.StatusPage(
+            icon_name="edit-find-symbolic", title="Review your denials",
+            description="Fetches the denials since boot (or since Setup Mode started), groups them by program "
+                        "and drafts a module for each - nothing is installed until you say so.",
         )
+        self.content_stack = Gtk.Stack()
+        self.content_stack.add_named(self.empty, "empty")
+        self.content_stack.add_named(self.detail, "detail")
+        self.split = Adw.NavigationSplitView(min_sidebar_width=300, max_sidebar_width=400, sidebar_width_fraction=0.38)
+        self.split.set_sidebar(Adw.NavigationPage(title="Programs", child=sidebar))
+        self.content_page = Adw.NavigationPage(title="Program", child=self.content_stack)
+        self.split.set_content(self.content_page)
+        self.toast_overlay.set_child(self.split)
+        self.preferences_page = sidebar  # add_group() fills the sidebar
+
+        setup_group = self.add_group("Setup Mode")
         self.setup_mode_row = Adw.ActionRow(title="Checking Setup Mode status…")
         self.setup_mode_btn = Gtk.Button(label="…", valign=Gtk.Align.CENTER)
         self.setup_mode_btn.connect("clicked", self._on_setup_mode_btn_clicked)
         self.setup_mode_row.add_suffix(self.setup_mode_btn)
-        intro_group.add(self.setup_mode_row)
+        setup_group.add(self.setup_mode_row)
 
-        run_group = self.add_group(
-            "Run Review",
-            "Scoped to Setup Mode's start time if you're in it, otherwise to since-boot for the "
-            "audit log (journald has its own retention regardless).",
-        )
-        run_journal_btn = Gtk.Button(label="Review (kernel log)", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
-        run_journal_btn.connect("clicked", lambda _b: self._on_run_review("journal"))
-        run_audit_btn = Gtk.Button(label="Review (audit.log, needs auth)", valign=Gtk.Align.CENTER)
-        run_audit_btn.connect("clicked", lambda _b: self._on_run_review("audit_log"))
-        run_row = Adw.ActionRow(title="Fetch and classify all available denials")
-        run_row.add_suffix(run_journal_btn)
-        run_row.add_suffix(run_audit_btn)
-        run_group.add(run_row)
+        review_group = self.add_group("Review")
+        run_row = Adw.ActionRow(title="Review now")
+        journal_btn = Gtk.Button(label="Kernel log", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
+        journal_btn.connect("clicked", lambda _b: self._on_run_review("journal"))
+        audit_btn = Gtk.Button(label="audit.log", valign=Gtk.Align.CENTER, tooltip_text="Asks for your password")
+        audit_btn.connect("clicked", lambda _b: self._on_run_review("audit_log"))
+        run_row.add_suffix(journal_btn)
+        run_row.add_suffix(audit_btn)
+        review_group.add(run_row)
         self.summary_row = Adw.ActionRow(title="No review run yet")
-        run_group.add(self.summary_row)
+        review_group.add(self.summary_row)
+        chips = Gtk.Box(css_classes=["linked"], margin_top=8, halign=Gtk.Align.START)
+        self._chips: dict[str, Gtk.ToggleButton] = {}
+        first = None
+        for key, label in _FILTERS:
+            chip = Gtk.ToggleButton(label=label, active=key == self._filter)
+            if first is None:
+                first = chip
+            else:
+                chip.set_group(first)
+            chip.connect("toggled", self._on_filter_toggled, key)
+            self._chips[key] = chip
+            chips.append(chip)
+        review_group.add(chips)
 
-        self.new_group = self.add_group(
-            "New — needs a policy rule",
-            "No rule in the loaded policy (or Atropa's own modules) allows these, no boolean would, and they "
-            "aren't known noise. A ⚠ marks one a label probably explains - fix that instead of adding a rule.",
-        )
-        self.generate_btn = Gtk.Button(label="Generate Policy for All New Denials", valign=Gtk.Align.CENTER)
-        self.generate_btn.connect("clicked", self._on_generate_clicked)
-        self.generate_btn.set_sensitive(False)
-        generate_row = Adw.ActionRow(
-            title="Drafts one module per SELinux domain, plus a dontaudit module for its known noise"
-        )
-        generate_row.add_suffix(self.generate_btn)
-        self.new_group.add(generate_row)
-
-        self.boolean_group = self.add_group(
-            "A boolean would allow this",
-            "The loaded policy already has a rule for these, behind a boolean that's off. Turning the boolean "
-            "on is the policy's own answer - check what else it switches on before you do.",
-        )
-
-        self.noise_group = self.add_group(
-            "Known noise - dontaudit, not allow",
-            "Probes and lookups a program makes without needing them. Allowing them weakens the policy for "
-            "nothing; Generate drafts dontaudit rules for these (a separate _dontaudit module).",
-        )
-
-        self.already_allowed_group = self.add_group(
-            "Already allowed, but still denied",
-            "A matching rule IS loaded, yet this kept happening - usually a file-context/labeling "
-            "problem, not a missing rule. Try restorecon on the path first.",
-        )
-
-        self.undefined_group = self.add_group(
-            "Policy doesn't define this permission",
-            "The kernel knows a permission/class the compiled policy predates (common with newer "
-            "capability bits like bpf/perfmon on an older policy). Not fixable with an allow rule - "
-            "the policy's own class/permission definitions need updating: rebuild the policy source "
-            "with UNK_PERMS=allow in build.conf (see 'checking deny_unknown status' on the SELinux "
-            "page), or get an updated policy that defines these.",
-        )
-
-        self.resolved_group = self.add_group(
-            "Resolved since last review",
-            "Stopped recurring since the last time you ran a review here.",
-        )
-
-        self._new_rows: list = []
-        self._boolean_rows: list = []
-        self._noise_rows: list = []
-        self._already_allowed_rows: list = []
-        self._undefined_rows: list = []
-        self._resolved_rows: list = []
-        self._review_result_rows: list = []
-        self._last_review = None
-
+        self.programs_group = self.add_group("Programs")
         self.refresh()
 
     def set_load_page(self, load_page) -> None:
@@ -115,6 +108,8 @@ class SelinuxReviewPage(BasePage):
 
     def refresh(self) -> None:
         self.run_async(selinux.is_in_setup_mode, self._on_setup_mode_status_loaded)
+
+    # --------------------------------------------------------- setup mode --
 
     def _on_setup_mode_status_loaded(self, in_setup_mode, error) -> bool:
         if error:
@@ -128,7 +123,7 @@ class SelinuxReviewPage(BasePage):
             self.setup_mode_btn.set_label("Exit Setup Mode")
         else:
             self.setup_mode_row.set_title("Not in Setup Mode")
-            self.setup_mode_row.set_subtitle("")
+            self.setup_mode_row.set_subtitle("Permissive, recording from a start time")
             self.setup_mode_btn.set_label("Start Setup Mode")
         return False
 
@@ -158,154 +153,214 @@ class SelinuxReviewPage(BasePage):
         self.notify("Exited Setup Mode")
         self.refresh()
 
-    # --------------------------------------------------------- run review --
+    # --------------------------------------------------------- review --
 
     def _on_run_review(self, source: str) -> None:
-        self.summary_row.set_title("Running review…")
-        self.summary_row.set_subtitle("")
-        for group, rows_attr in (
-            (self.new_group, "_new_rows"), (self.boolean_group, "_boolean_rows"),
-            (self.noise_group, "_noise_rows"), (self.already_allowed_group, "_already_allowed_rows"),
-            (self.undefined_group, "_undefined_rows"), (self.resolved_group, "_resolved_rows"),
-        ):
-            self.clear_rows(group, getattr(self, rows_attr))
-            setattr(self, rows_attr, [self.start_loading(group, "Scanning…")])
-        self.generate_btn.set_sensitive(False)
-        self.run_async(lambda: selinux.review_all_denials(source=source), self._on_review_loaded)
+        self.summary_row.set_title("Reviewing…")
+        self.summary_row.set_subtitle("Classifying denials and drafting modules")
+        self.clear_rows(self.programs_group, self._program_rows)
+        self._program_rows = [self.start_loading(self.programs_group, "Reviewing…")]
+
+        def work():
+            review = selinux.review_all_denials(source=source)
+            drafts = selinux.build_policy_review(
+                source="audit_log" if "audit_log" in review.source else "journal", since=review.since,
+            ) if review.new or review.noise else []
+            return review, selinux_programs.overview(review, drafts)
+
+        self.run_async(work, self._on_review_loaded)
 
     def _on_review_loaded(self, result, error) -> bool:
-        for group, rows_attr in (
-            (self.new_group, "_new_rows"), (self.boolean_group, "_boolean_rows"),
-            (self.noise_group, "_noise_rows"), (self.already_allowed_group, "_already_allowed_rows"),
-            (self.undefined_group, "_undefined_rows"), (self.resolved_group, "_resolved_rows"),
-        ):
-            self.clear_rows(group, getattr(self, rows_attr))
-            setattr(self, rows_attr, [])
-
+        self.clear_rows(self.programs_group, self._program_rows)
+        self._program_rows = []
         if error:
             self.summary_row.set_title("Review failed")
             self.summary_row.set_subtitle(esc(error))
             return False
-
-        self._last_review = result
-        scope = f"since {result.since}" if result.since else "since boot / all retained"
-        self.summary_row.set_title(
-            f"{result.total_raw_lines} raw line(s) → {len(result.new)} new, {len(result.needs_boolean)} boolean, "
-            f"{len(result.noise)} noise, {len(result.already_allowed)} already-allowed, "
-            f"{len(result.undefined_in_policy)} undefined-in-policy, {len(result.resolved)} resolved"
-        )
-        checked = (
-            "checked against the loaded policy" if result.policy_checked
-            else "not checked against the loaded policy (needs setools)"
-        )
-        self.summary_row.set_subtitle(esc(f"{scope} · {checked}"))
-        self.generate_btn.set_sensitive(bool(result.new))
-
-        if not result.new:
-            row = Adw.ActionRow(title="Nothing new")
-            self.new_group.add(row)
-            self._new_rows.append(row)
-        for denial in result.new:
-            subtitle = f"{denial.count} occurrence(s) · program: {denial.program} · sources: {', '.join(denial.sources)}"
-            if denial.hint:
-                subtitle = f"{denial.hint}\n{subtitle}"
-            row = Adw.ActionRow(title=esc(_denial_title(denial)), subtitle=esc(subtitle))
-            if denial.hint:
-                row.add_prefix(Gtk.Image.new_from_icon_name("dialog-warning-symbolic"))
-                if denial.sample_path and denial.sample_path.startswith("/"):
-                    fix_btn = Gtk.Button(label="Try restorecon", valign=Gtk.Align.CENTER)
-                    fix_btn.connect("clicked", self._on_try_restorecon, denial.sample_path)
-                    row.add_suffix(fix_btn)
-            self.new_group.add(row)
-            self._new_rows.append(row)
-
-        self._render_booleans(result)
-        self._render_noise(result)
-
-        if not result.already_allowed:
-            row = Adw.ActionRow(title="None")
-            self.already_allowed_group.add(row)
-            self._already_allowed_rows.append(row)
-        for denial in result.already_allowed:
-            row = Adw.ActionRow(
-                title=esc(_denial_title(denial)),
-                subtitle=esc(f"Matched module: {denial.matched_module} · {denial.count} occurrence(s) · program: {denial.program}"),
-            )
-            if denial.sample_path:
-                fix_btn = Gtk.Button(label="Try restorecon", valign=Gtk.Align.CENTER)
-                fix_btn.connect("clicked", self._on_try_restorecon, denial.sample_path)
-                row.add_suffix(fix_btn)
-            else:
-                row.add_suffix(Gtk.Label(label="no path available", css_classes=["dim-label"]))
-            self.already_allowed_group.add(row)
-            self._already_allowed_rows.append(row)
-
-        if not result.undefined_in_policy:
-            row = Adw.ActionRow(title="None")
-            self.undefined_group.add(row)
-            self._undefined_rows.append(row)
-        for denial in result.undefined_in_policy:
-            perm_text = denial.permissions[0] if denial.permissions else "(whole class)"
-            row = Adw.ActionRow(
-                title=esc(f"class {denial.tclass}: {perm_text}"),
-                subtitle=esc(f"{denial.count} occurrence(s) - not defined in the compiled policy"),
-            )
-            row.add_prefix(Gtk.Image.new_from_icon_name("dialog-warning-symbolic"))
-            help_btn = Gtk.Button(label="Help", valign=Gtk.Align.CENTER)
-            help_btn.connect("clicked", self._on_undefined_help_clicked, denial)
-            row.add_suffix(help_btn)
-            self.undefined_group.add(row)
-            self._undefined_rows.append(row)
-
-        if not result.resolved:
-            row = Adw.ActionRow(title="None yet")
-            self.resolved_group.add(row)
-            self._resolved_rows.append(row)
-        for denial in result.resolved:
-            row = Adw.ActionRow(
-                title=esc(_denial_title(denial)),
-                subtitle=esc(f"Was seen {denial.count} time(s) before · program: {denial.program}"),
-            )
-            row.add_prefix(Gtk.Image.new_from_icon_name("object-select-symbolic"))
-            self.resolved_group.add(row)
-            self._resolved_rows.append(row)
-
+        self._review, self._programs = result
+        counts = selinux_programs.counts(self._programs)
+        self.summary_row.set_title(f"{len(self._programs)} program(s) · {counts['needs_action']} need action")
+        scope = f"since {self._review.since}" if self._review.since else "since boot / all retained"
+        checked = "checked against the loaded policy" if self._review.policy_checked else "not checked (needs setools)"
+        self.summary_row.set_subtitle(esc(f"{self._review.total_raw_lines} denial line(s) · {scope} · {checked}"))
+        for key, label in _FILTERS:
+            count = len(self._programs) if key == "all" else counts[key]
+            self._chips[key].set_label(f"{label} {count}")
+        self._render_programs()
         return False
 
-    def _render_booleans(self, result) -> None:
-        if not result.needs_boolean:
-            row = Adw.ActionRow(title="None" if result.policy_checked else "Not checked (needs setools)")
-            self.boolean_group.add(row)
-            self._boolean_rows.append(row)
-            return
-        for denial in result.needs_boolean:
-            switches = ", ".join(
-                f"{name} ({result.boolean_rules.get(name, '?')} rules)" for name in denial.booleans
-            )
-            row = Adw.ActionRow(
-                title=esc(_denial_title(denial)),
-                subtitle=esc(f"{denial.count} occurrence(s) · program: {denial.program} · allowed by: {switches}"),
-            )
-            for name in denial.booleans[:2]:
-                button = Gtk.Button(label=f"Turn on {name}", valign=Gtk.Align.CENTER)
-                button.connect("clicked", self._on_turn_on_boolean, name, result.boolean_rules.get(name))
-                row.add_suffix(button)
-            self.boolean_group.add(row)
-            self._boolean_rows.append(row)
+    def _on_filter_toggled(self, chip: Gtk.ToggleButton, key: str) -> None:
+        if chip.get_active():
+            self._filter = key
+            self._render_programs()
 
-    def _render_noise(self, result) -> None:
-        if not result.noise:
-            row = Adw.ActionRow(title="None")
-            self.noise_group.add(row)
-            self._noise_rows.append(row)
+    def _visible(self, program) -> bool:
+        if self._filter == "all":
+            return True
+        if self._filter == "needs_action":
+            return program.step in selinux_programs.NEEDS_ACTION
+        return program.step == self._filter
+
+    def _render_programs(self) -> None:
+        self.clear_rows(self.programs_group, self._program_rows)
+        self._program_rows = []
+        shown = [p for p in self._programs if self._visible(p)]
+        if not shown:
+            row = Adw.ActionRow(title="Nothing here" if self._review else "Run a review first")
+            self.programs_group.add(row)
+            self._program_rows.append(row)
             return
-        for denial in result.noise:
-            row = Adw.ActionRow(
-                title=esc(_denial_title(denial)),
-                subtitle=esc(f"{denial.count} occurrence(s) · program: {denial.program} · {denial.noise_reason}"),
-            )
-            self.noise_group.add(row)
-            self._noise_rows.append(row)
+        for program in shown:
+            category = te_lint.CATEGORIES.get(program.category, "")
+            row = Adw.ActionRow(title=esc(program.title),
+                                subtitle=esc(f"{category} · {program.count} denial(s) · {program.domain}"),
+                                activatable=True)
+            badge = Gtk.Label(label=selinux_programs.STEP_LABELS[program.step], valign=Gtk.Align.CENTER,
+                              css_classes=["caption-heading", _STEP_CLASS[program.step]])
+            row.add_suffix(badge)
+            row.add_suffix(Gtk.Image.new_from_icon_name("go-next-symbolic"))
+            row.connect("activated", self._on_program_activated, program)
+            self.programs_group.add(row)
+            self._program_rows.append(row)
+
+    # --------------------------------------------------------- program page --
+
+    def _on_program_activated(self, _row, program) -> None:
+        self._selected_domain = program.domain
+        self._show_program(program)
+        self.split.set_show_content(True)
+
+    def _detail_group(self, title: str, description: str = "") -> Adw.PreferencesGroup:
+        group = Adw.PreferencesGroup(title=esc(title))
+        if description:
+            group.set_description(esc(description))
+        self.detail.add(group)
+        self._content_groups.append(group)
+        return group
+
+    def _show_program(self, program) -> None:
+        for group in self._content_groups:
+            self.detail.remove(group)
+        self._content_groups = []
+        self.content_page.set_title(program.title)
+        self.content_stack.set_visible_child_name("detail")
+
+        category = te_lint.CATEGORIES.get(program.category, "")
+        header = self._detail_group(program.title, f"{program.domain} · {program.count} denial(s) · {category}")
+        header.set_header_suffix(Gtk.Label(label=selinux_programs.STEP_LABELS[program.step],
+                                           css_classes=["caption-heading", _STEP_CLASS[program.step]]))
+
+        self._render_recommended(program)
+
+        if program.draft is not None:
+            draft = program.draft
+            group = self._detail_group("Draft module", draft.safe_name)
+            if draft.te_content:
+                group.add(ModuleView(
+                    self, draft.safe_name, draft.te_content, draft.category, draft.category_reason,
+                    booleans=draft.booleans, on_done=self._after_change,
+                ))
+            else:
+                group.add(Adw.ActionRow(title="No draft", subtitle=esc(draft.error or "audit2allow produced nothing")))
+
+        self._render_denials(program)
+
+    def _render_recommended(self, program) -> None:
+        group = self._detail_group("Recommended", "The policy's own answers first; a module only for what's left.")
+        rows = 0
+        boolean_rules = self._review.boolean_rules if self._review else {}
+        offered: set[str] = set()
+        for denial in program.denials:
+            for name in denial.booleans[:2]:
+                if name in offered:
+                    continue
+                offered.add(name)
+                covers = sum(name in d.booleans for d in program.denials)
+                row = Adw.ActionRow(title=esc(f"Turn on the boolean {name}"),
+                                    subtitle=esc(f"Covers {covers} of these denials · switches "
+                                                 f"{boolean_rules.get(name, '?')} rule(s) in the policy"))
+                button = Gtk.Button(label="Turn on", valign=Gtk.Align.CENTER)
+                button.connect("clicked", self._on_turn_on_boolean, name, boolean_rules.get(name))
+                row.add_suffix(button)
+                group.add(row)
+                rows += 1
+        paths = []
+        for denial in program.denials:
+            relabel = denial.hint or denial.classification == "already_allowed"
+            if relabel and denial.sample_path and denial.sample_path.startswith("/") and denial.sample_path not in paths:
+                paths.append(denial.sample_path)
+        for path in paths[:5]:
+            row = Adw.ActionRow(title=esc(f"Relabel {path}"),
+                                subtitle="A label problem, not a missing rule - restorecon puts the right label back")
+            button = Gtk.Button(label="restorecon", valign=Gtk.Align.CENTER)
+            button.connect("clicked", self._on_try_restorecon, path)
+            row.add_suffix(button)
+            group.add(row)
+            rows += 1
+        if program.noise_draft is not None and program.noise_draft.pp_path:
+            noise = program.noise_draft
+            row = Adw.ActionRow(title="Silence the known noise",
+                                subtitle=esc(f"Installs {noise.safe_name}: dontaudit rules, nothing allowed"))
+            button = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
+            button.connect("clicked", self._on_install_noise, noise)
+            row.add_suffix(button)
+            group.add(row)
+            rows += 1
+        for denial in program.denials:
+            if denial.classification == "undefined_in_policy":
+                perm = denial.permissions[0] if denial.permissions else "(whole class)"
+                row = Adw.ActionRow(title=esc(f"The policy doesn't define {denial.tclass}: {perm}"),
+                                    subtitle="Not fixable with a rule - the policy itself needs updating")
+                button = Gtk.Button(label="Help", valign=Gtk.Align.CENTER)
+                button.connect("clicked", self._on_undefined_help_clicked, denial)
+                row.add_suffix(button)
+                group.add(row)
+                rows += 1
+        if program.draft is not None and program.draft.te_content and any(d.classification == "new" for d in program.denials):
+            group.add(Adw.ActionRow(title="A module for the rest", subtitle="Review it below before installing"))
+            rows += 1
+        if not rows:
+            group.add(Adw.ActionRow(title="Nothing to do", subtitle="These denials stopped or are already handled"))
+
+    def _render_denials(self, program) -> None:
+        group = self._detail_group("Denials")
+        for denial in sorted(program.denials, key=lambda d: -d.count):
+            expander = Adw.ExpanderRow(title=esc(_denial_title(denial)),
+                                       subtitle=esc(f"{_KIND_LABEL.get(denial.classification, denial.classification)}"
+                                                    f" · {denial.count}× · {denial.program}"))
+            details = [("Sample", denial.sample_line)]
+            if denial.sample_path:
+                details.append(("Path", denial.sample_path))
+            if denial.hint:
+                details.append(("Hint", denial.hint))
+            if denial.noise_reason:
+                details.append(("Noise", denial.noise_reason))
+            if denial.matched_module:
+                details.append(("Matched module", denial.matched_module))
+            for title, value in details:
+                row = Adw.ActionRow(title=title, subtitle=esc(value))
+                row.set_subtitle_selectable(True)
+                expander.add_row(row)
+            group.add(expander)
+        if program.draft is not None and program.draft.why_text:
+            why = Adw.ExpanderRow(title="audit2why explanation")
+            row = Adw.ActionRow(subtitle=esc(program.draft.why_text))
+            row.set_subtitle_selectable(True)
+            why.add_row(row)
+            group.add(why)
+
+    def _after_change(self) -> None:
+        self.notify("Run the review again to see what's left")
+
+    # --------------------------------------------------------- actions --
+
+    def _on_install_noise(self, _btn: Gtk.Button, noise) -> None:
+        selinux_lint.install(
+            self, f"Install {noise.safe_name}?",
+            "Loads the dontaudit rules for this program's known noise. Nothing is allowed by it.",
+            noise.findings,
+            lambda acks: selinux.install_pp_file(noise.pp_path, acks),
+        )
 
     def _on_turn_on_boolean(self, _btn: Gtk.Button, name: str, rule_count) -> None:
         scope = f"It switches {rule_count} rule(s) in the policy, not only the one behind this denial. " if rule_count else ""
@@ -329,126 +384,6 @@ class SelinuxReviewPage(BasePage):
                 f"Restoring context: {path}",
                 lambda on_line: selinux.restorecon_streaming(path, recursive=False, on_line=on_line),
             ),
-        )
-
-    # --------------------------------------------------------- generate policy --
-
-    def _on_generate_clicked(self, _btn: Gtk.Button) -> None:
-        if self._last_review is None:
-            return
-        source = "audit_log" if "audit_log" in self._last_review.source else "journal"
-        since = self._last_review.since
-        self.clear_rows(self.new_group, self._review_result_rows)
-        self._review_result_rows = [self.start_loading(self.new_group, "Generating policy…")]
-        self.run_async(
-            lambda: selinux.build_policy_review(source=source, since=since), self._on_generate_done
-        )
-
-    def _on_generate_done(self, result, error) -> bool:
-        for row in self._review_result_rows:
-            self.new_group.remove(row)
-        self._review_result_rows = []
-
-        if error:
-            self.notify(f"Policy generation failed: {error}", is_error=True)
-            return False
-
-        for review in result:
-            if review.error and not review.te_content:
-                subtitle = f"{review.denial_count} denial(s) · {review.error}"
-            elif review.pp_path:
-                subtitle = f"{review.denial_count} denial(s) · compiled, ready to review"
-            else:
-                subtitle = f"{review.denial_count} denial(s) · {review.error or 'not compiled'}"
-
-            if review.te_content:
-                subtitle += f" · {selinux_lint.badge(review.findings)} · {te_lint.CATEGORIES.get(review.category, '')}"
-            if review.booleans:
-                subtitle += " · a boolean would do: " + ", ".join(review.booleans)
-            row = Adw.ActionRow(title=esc(f"Draft: {review.label}"), subtitle=esc(subtitle))
-            view_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER, css_classes=["flat"])
-            view_btn.connect("clicked", self._on_view_review, review)
-            row.add_suffix(view_btn)
-            if review.pp_path:
-                install_btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER)
-                install_btn.connect("clicked", self._on_install_review, review)
-                row.add_suffix(install_btn)
-            self.new_group.add(row)
-            self._review_result_rows.append(row)
-
-        self.notify(f"Generated {len(result)} draft module(s)")
-        return False
-
-    def _review_text(self, review) -> str:
-        sections = [f"=== {review.label} ({review.denial_count} denial(s)) ==="]
-        if review.findings:
-            sections.append(f"--- What the linter found ({te_lint.CATEGORIES.get(review.category, '')}) ---")
-            sections.extend(selinux_lint.findings_lines(review.findings))
-        if review.booleans:
-            sections.append("--- A boolean would allow (part of) this ---")
-            sections.append(", ".join(review.booleans) + " - see 'A boolean would allow this' above")
-        if review.sample_denials:
-            sections.append("--- Sample denials ---")
-            sections.extend(review.sample_denials)
-        if review.te_content:
-            sections.append("\n--- Proposed policy (.te) ---")
-            sections.append(review.te_content.rstrip())
-        if review.why_text:
-            sections.append("\n--- audit2why explanation ---")
-            sections.append(review.why_text)
-        if review.error:
-            sections.append("\n--- Error ---")
-            sections.append(review.error)
-        return "\n".join(sections)
-
-    def _on_view_review(self, _btn: Gtk.Button, review) -> None:
-        buffer = Gtk.TextBuffer()
-        buffer.set_text(self._review_text(review))
-        text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True)
-        text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
-        scroller = Gtk.ScrolledWindow(min_content_height=320, min_content_width=480)
-        scroller.set_child(text_view)
-
-        def on_category(category: str) -> None:
-            try:
-                selinux.set_module_category(review.safe_name, category)
-            except (ValueError, OSError) as exc:
-                self.notify(str(exc), is_error=True)
-                return
-            review.category = category
-            review.findings = te_lint.lint(review.te_content, category, review.booleans)
-            buffer.set_text(self._review_text(review))
-
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        if review.te_content:
-            category_list = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
-            row = selinux_lint.category_row(review.category, on_category)
-            row.set_subtitle(review.category_reason)
-            category_list.append(row)
-            content.append(category_list)
-        content.append(scroller)
-
-        dialog = Adw.AlertDialog(heading=f"Review: {review.label}")
-        dialog.set_extra_child(content)
-        dialog.add_response("close", "Close")
-        if self._load_page is not None and review.te_content:
-            dialog.add_response("open", "Open in Load Policy page")
-            dialog.set_response_appearance("open", Adw.ResponseAppearance.SUGGESTED)
-
-        def on_response(_dlg, response: str) -> None:
-            if response == "open" and self._load_page is not None:
-                self._load_page.load_te_text(review.te_content, review.safe_name)
-                self.notify("Opened in Load Policy page")
-
-        dialog.connect("response", on_response)
-        dialog.present(self.get_root())
-
-    def _on_install_review(self, _btn: Gtk.Button, review) -> None:
-        selinux_lint.install(
-            self, f"Install policy for {review.label}?",
-            f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i.",
-            review.findings,
-            lambda acks: selinux.install_pp_file(review.pp_path, acks),
         )
 
     # --------------------------------------------------------- undefined-in-policy help --

@@ -49,8 +49,8 @@ Each sidebar entry is a module:
 | **File Integrity** | AIDE baseline/check/timer management with changed-path reports saved between launches, config validation, and next-run times (AIDE itself is AUR-only; install it first) |
 | **AppArmor** | Profile modes, capability/network rule toggles, denial review with rule suggestions |
 | **SELinux** | Status, enforcing/permissive (lock-gated), booleans, denial review, per-application policy drafts |
-| **SELinux: Load Policy** | Compile/load `.te` modules, batch-import `.te` files, pending/approved module history |
-| **SELinux: Denial Review** | Setup Mode, grouped and classified denials, one-click `restorecon`, policy generation |
+| **SELinux: Modules** | Installed, pending and new policy modules, each linted; load or batch-import `.te` files |
+| **SELinux: Denials** | Setup Mode; denials per program with the best next step (boolean, relabel, dontaudit, module) and its drafted module reviewed in place |
 | **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
 | **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
 | **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |

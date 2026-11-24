@@ -222,9 +222,7 @@ already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
     to write /etc - wrong category, or this program is doing something
     odd"); a module mostly outside its category gets a "looks more like a
     System service" banner.
-- [ ] **UI** (partly: badge, findings with the category picker in View, and the
-      acknowledge-to-install dialog are built; one-click safer options and live
-      re-lint of hand edits come with the redesign below) - badge per module (Looks fine / Review / Dangerous); each
+- [x] **UI** - badge per module (Looks fine / Review / Dangerous); each
       finding shows the highlighted line, why, and a one-click safer option
       where it's mechanical (switch to `dontaudit`, enable boolean X,
       relabel with `restorecon`/`semanage fcontext`, drop these perms, split
@@ -248,7 +246,7 @@ already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
       assumes acknowledge-to-proceed); also lint the Build Policy page's
       modules?; tune the ~25-rule threshold on real modules.
 
-### SELinux pages redesign (design, not built yet)
+### SELinux pages redesign
 
 Today denials and modules are spread over four sidebar entries, and the
 same job lives in three places: the SELinux status page has its own denial
@@ -258,7 +256,7 @@ Review itself is one long scroll of eight groups sorted by classification,
 while modules (and now program categories) are per program, and a draft
 opens as plain text in a popup with nowhere to show lint findings.
 
-- [ ] **Three entries instead of four**:
+- [x] **Three entries instead of four**:
   - *SELinux* - configuration only: mode, Setup Mode, relabel, booleans.
     Its own denial list and review buttons go; one row says "N programs
     need attention" and opens Denials.
@@ -268,7 +266,7 @@ opens as plain text in a popup with nowhere to show lint findings.
     inactive, "Load .te from disk". Opening any module uses the same
     detail view as Denials, so a hand-loaded `.te` is linted too.
   - *SELinux: Build Policy* stays as it is.
-- [ ] **Denials: a list of programs, not of classifications** -
+- [x] **Denials: a list of programs, not of classifications** -
       `Adw.NavigationSplitView`: programs (SELinux domain + executable) on
       the left, the selected program on the right (pushed as a page on a
       narrow window).
@@ -278,7 +276,7 @@ opens as plain text in a popup with nowhere to show lint findings.
   - Each row: program name, category, denial count, and one badge for the
     best next step: Dangerous / Review / Boolean / Relabel / Noise / Done.
     Sorted by that badge, then count - impact first.
-- [ ] **Program page**, top to bottom:
+- [x] **Program page**, top to bottom:
   - Header: program, domain, executable, systemd unit if any.
   - "What kind of program is this?" - the category toggle buttons, with
     the detected reason under them; changing it re-lints at once.
@@ -298,10 +296,10 @@ opens as plain text in a popup with nowhere to show lint findings.
     Install - gated by the linter (Review: confirm listing findings;
     Dangerous: install stays locked until each dangerous finding is ticked
     as understood).
-- [ ] **Keep what works** - Setup Mode, the restorecon button, boolean
+- [x] **Keep what works** - Setup Mode, the restorecon button, boolean
       "Turn on" with its rule count, the Undefined-class Help dialog and
       the per-domain module naming all move into the new views unchanged.
-- [ ] **Smoke test and screenshots** - every new view built under Xvfb in
+- [x] **Smoke test and screenshots** - every new view built under Xvfb in
       `tests/test_ui_smoke.py`, and rendered in the VM against real denials
       before merging.
 
