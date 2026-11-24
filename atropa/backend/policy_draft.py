@@ -123,11 +123,16 @@ def render_perms(perms, set_name: str = "") -> str:
     return ps[0] if len(ps) == 1 else "{ " + " ".join(ps) + " }"
 
 
-def gen_te(module: str, rules: list[Rule]) -> str:
-    """The module's .te in refpolicy style."""
+def gen_te(module: str, rules: list[Rule], decls: dict | None = None, own: list | None = None) -> str:
+    """
+    The module's .te in refpolicy style. `decls` ({type: [lines]}) are types
+    the module declares itself and `own` ([(src, tgt, class, perms text)])
+    the access its program needs on them - policy_fc's file labels.
+    """
     if not _MODULE_NAME.match(module):
         raise ValueError(f"{module!r} isn't a valid module name")
-    plain, calls, used = [], [], set()
+    decls, own = decls or {}, own or []
+    plain, calls, used = [], [], {src for src, _, _, _ in own}
     for rule in rules:
         if rule.decision == SKIP:
             continue
@@ -143,8 +148,15 @@ def gen_te(module: str, rules: list[Rule]) -> str:
         plain.append((kind != "allow", f"{kind} {rule.src} {rule.tgt}:{rule.tclass} "
                                        f"{render_perms(rule.perms, rule.perm_set)};"))
     out = [f"policy_module({module}, 1.0.0)", ""]
-    if used:
-        out += ["gen_require(`", "\ttype " + ", ".join(sorted(used)) + ";", "')", ""]
+    required = sorted(t for t in used if t not in decls)
+    if required:
+        out += ["gen_require(`", "\ttype " + ", ".join(required) + ";", "')", ""]
+    for lines in decls.values():
+        out += lines
+    if decls:
+        out.append("")
+    if own:
+        out += [f"allow {src} {tgt}:{cls} {perms};" for src, tgt, cls, perms in own] + [""]
     out += [text for _, text in sorted(plain)]
     if plain and calls:
         out.append("")
@@ -269,13 +281,14 @@ def _build_headers(kb: PolicyKB, mod: str, wd: str, steps: list) -> bool:
     return ok
 
 
-def build(module: str, te: str, kb: PolicyKB, workdir: str | None = None) -> BuildResult:
+def build(module: str, te: str, kb: PolicyKB, workdir: str | None = None, fc: str | None = None,
+          if_text: str | None = None) -> BuildResult:
     """Compile (and for a tree, link) the module without installing anything."""
     if not _MODULE_NAME.match(module):
         raise ValueError(f"{module!r} isn't a valid module name")
     wd = workdir or tempfile.mkdtemp(prefix="atropa-dev-")
     os.makedirs(wd, exist_ok=True)
-    for ext, text in (("te", te), ("fc", gen_fc(module)), ("if", gen_if(module))):
+    for ext, text in (("te", te), ("fc", fc or gen_fc(module)), ("if", if_text or gen_if(module))):
         with open(os.path.join(wd, f"{module}.{ext}"), "w", encoding="utf-8") as f:
             f.write(text)
     steps: list[Step] = []

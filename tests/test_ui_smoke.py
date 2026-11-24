@@ -128,9 +128,20 @@ def test_selinux_dev_page_drafts_with_interfaces(tmp_path):
     page._on_use_tight(None)
 
     def te():
-        start, end = page._te_buffer.get_bounds()
-        return page._te_buffer.get_text(start, end, True)
+        buffer = page._buffers["te"]
+        start, end = buffer.get_bounds()
+        return buffer.get_text(start, end, True)
 
     assert "files_read_etc_files(sshd_t)" in te()
+
+    from atropa.backend import policy_fc
+
+    conf = policy_fc.FcGroup("/etc/ssh/sshd_config", "--", "/etc/ssh/sshd_config", "f", current="etc_t",
+                             type="sshd_conf_t", include=True)
+    page._labels["sshd_t"] = policy_fc.Program("sshd", "/usr/bin/sshd", "openssh", [conf])
+    page._show_domain("sshd_t")
+    assert "type sshd_conf_t;" in te() and "allow sshd_t sshd_conf_t:file read_file_perms;" in te()
+    start, end = page._buffers["fc"].get_bounds()
+    assert "sshd_conf_t" in page._buffers["fc"].get_text(start, end, True)
     page._on_source_loaded((policy_source.PolicySource("none", note="No source"), None), None)
     assert page.source_row.get_title() == "No policy source"

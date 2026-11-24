@@ -8,8 +8,8 @@ design specs, kept for the reasoning behind decisions - is in
 [`docs/HISTORY.md`](docs/HISTORY.md); it isn't kept up to date with the
 code, this file is.
 
-Size: **about 26,000 lines of Python - 44 backend modules, 34 pages plus
-the plugin page, and the root helper - and a 1,666-test pytest suite
+Size: **about 26,500 lines of Python - 45 backend modules, 34 pages plus
+the plugin page, and the root helper - and a 1,673-test pytest suite
 (about 15,400 lines).**
 
 **Contents:** 1. Architecture · 2. Module reference (2a Core, 2b Security,
@@ -42,7 +42,7 @@ atropa/
     security.py hardening.py audit_rules.py boot_security.py compliance.py inventory.py
     account_hygiene.py aide.py quicksetup.py profiles.py apparmor.py
     selinux.py denial_advice.py te_lint.py selinux_programs.py refpolicy_build.py
-    policy_source.py policy_draft.py m4lite.py
+    policy_source.py policy_draft.py policy_fc.py m4lite.py
     boot_report.py disk_health.py firmware.py power.py sleep.py flatpak.py
     dependencies.py plugins.py plugin_registry.py migration.py
   resources/
@@ -1128,7 +1128,7 @@ acknowledged or not. Calibrated on 36 real drafts from an enforcing
 desktop: none comes out dangerous under its detected category
 (`tests/fixtures/te`).
 
-### SELinux: Dev (`policy_source.py`, `policy_draft.py`, `m4lite.py` / `pages/selinux_dev.py`)
+### SELinux: Dev (`policy_source.py`, `policy_draft.py`, `policy_fc.py`, `m4lite.py` / `pages/selinux_dev.py`)
 
 Experimental drafting, ported from the atropa-scratch prototype. The
 Denials page drafts with `audit2allow`: plain `allow` rules that
@@ -1184,9 +1184,32 @@ copied out.
   which proves each required type and interface exists. Against headers:
   `make -f <headers>/Makefile HEADERDIR=<headers> NAME=<policy>`, since the
   Makefile otherwise picks its headers from `SELINUXTYPE`.
-- **Not ported yet**: scratch's `.fc` proposals from a package's file
-  list, the compiled-tree coverage check, and the explorer for declaring
-  paths a test run never touched.
+- **File labels** (`policy_fc`, scratch's pkgscan and generate). "Look up"
+  takes the program's name (the denials' `comm=`, editable), finds its
+  binary and package (`pacman -Qqo`, `-Qlq`), and folds the package's files
+  into .fc entries: a directory only this package owns becomes
+  `dir(/.*)?`, files in shared directories stay exact, docs/man/locale and
+  the like are dropped, unit files starting with the program's name merge.
+  Each entry shows the running policy's label now (`matchpathcon`) and a
+  proposed type from its location (`<stem>_conf_t` under /etc,
+  `_var_lib_t`, `_log_t`, `_cache_t`, `_runtime_t`, `_exec_t`, ...),
+  editable, with a switch for writing it to the .fc. Pre-selected only
+  when the current label is generic, the path plainly the program's, and
+  the proposal neither an `_exec_t` (it decides which domain a binary runs
+  in; a policy may leave one generic on purpose) nor a catch-all `_file_t`
+  (usually the program's own install tree under /opt - relabelling it to a
+  plain file type stops the program mapping its own libraries; scratch
+  pre-selected these and granted manage on them). Shared config locations
+  (/etc/pam.d, /etc/xdg, ...) keep their label. Types the policy lacks are
+  declared with the macro for their kind (`files_config_file`,
+  `logging_log_file`, ...; `files_type` when the source defines none), and
+  the program gets access to each - read for config and `_file_t`, manage
+  for state, log, cache, spool, runtime and tmp - so the relabel doesn't
+  cut it off. The .if gets a read interface per declared config, log or
+  state type. The page warns that other programs reading those files under
+  their old label lose that access.
+- **Not ported yet**: the compiled-tree coverage check, and the explorer
+  for declaring paths a test run never touched.
 
 ### Custom Reference Policy build (`refpolicy_build.py` / `pages/refpolicy_build.py`)
 Builds/installs/activates a user-maintained refpolicy fork (e.g. Arch-
@@ -1615,7 +1638,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing
 
-**The suite**: `tests/`, 1,666 tests in 55 files - one `test_<module>.py`
+**The suite**: `tests/`, 1,673 tests in 56 files - one `test_<module>.py`
 per backend module plus the helper (`test_helper.py`,
 `test_helper_backups.py`, `test_helper_shapes.py`), `test_resources.py`,
 `test_stock_configs.py`, `test_te_lint.py` and the GTK smoke test - run with
