@@ -263,6 +263,23 @@ def find_source(trees: list[str] | None = None, running: str | None = None,
     return PolicySource("none", running=running, note="; ".join(why))
 
 
+def compiled_policy(source: PolicySource) -> str | None:
+    """
+    The binary policy a source describes, for "does it already allow this?":
+    a tree's own build output (policy.NN, the newest if several), or for the
+    running policy's headers the loaded policy itself ("" - setools' default).
+    None for a tree that hasn't been built.
+    """
+    if source.kind == "headers":
+        return ""
+    if source.kind != "tree":
+        return None
+    candidates = glob.glob(os.path.join(source.root, "policy.[0-9]*"))
+    candidates += glob.glob(os.path.join(source.root, "tmp/policy_root/etc/selinux/*/policy/policy.[0-9]*"))
+    candidates = [c for c in candidates if os.path.isfile(c)]
+    return max(candidates, key=os.path.getmtime) if candidates else None
+
+
 # -- loading -------------------------------------------------------------------
 
 def _read(path) -> str:

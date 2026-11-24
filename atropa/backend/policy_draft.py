@@ -18,6 +18,7 @@ from __future__ import annotations
 import glob
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -46,6 +47,8 @@ class Rule:
     iface: str = ""
     choices: list = field(default_factory=list)  # [(interface, extra perms)], tightest first
     perm_set: str = ""  # a policy set that is exactly perms
+    coverage: str | None = None  # None unchecked, "" not granted, "allowed", or "boolean:a,b" (granted when on)
+    declared: bool = False  # added from the path explorer, not from a denial
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -94,18 +97,121 @@ def annotate(rules: list[Rule], kb: PolicyKB) -> None:
 
 
 # An interface may grant at most this many permissions beyond the denial
-# before "Use tight interfaces" picks it.
+# before "Use the policy source" picks it.
 TIGHT_EXTRA = 12
 
 
 def use_tight_interfaces(rules: list[Rule]) -> int:
-    """Switch every allow rule with a close-fitting interface to it. Returns how many changed."""
+    """
+    "Use the policy source": skip each rule the source's compiled policy
+    already allows, and switch each remaining allow rule with a close-fitting
+    interface to it. Returns how many rules changed.
+    """
     changed = 0
     for rule in rules:
-        if rule.decision == ALLOW and rule.choices and rule.choices[0][1] <= TIGHT_EXTRA:
+        if rule.coverage == "allowed" and rule.decision != SKIP:
+            rule.decision, rule.iface = SKIP, ""
+            changed += 1
+        elif rule.decision == ALLOW and rule.choices and rule.choices[0][1] <= TIGHT_EXTRA:
             rule.decision, rule.iface = IFACE, rule.choices[0][0]
             changed += 1
     return changed
+
+
+def policy_checker(source, runtime: dict[str, bool]):
+    """
+    A denial_advice.PolicyChecker for the source's compiled policy (see
+    policy_source.compiled_policy), or None: no setools, a tree not built
+    yet, or a policy file setools can't read. `runtime` is the running
+    booleans' values, for rules behind a boolean.
+    """
+    from . import denial_advice, policy_source
+
+    path = policy_source.compiled_policy(source)
+    if path is None:
+        return None
+    try:
+        import setools
+
+        policy = setools.SELinuxPolicy(path) if path else setools.SELinuxPolicy()
+        return denial_advice.PolicyChecker(runtime, policy=policy, setools_module=setools)
+    except Exception:  # noqa: BLE001 - optional: ImportError, an unreadable policy, ...
+        return None
+
+
+def check_coverage(rules: list[Rule], checker) -> None:
+    """Fill rule.coverage for rules not checked yet. Each lookup costs ~0.25 s: run it off the main thread."""
+    for rule in rules:
+        if rule.coverage is not None:
+            continue
+        verdict = checker.check(rule.src, rule.src if rule.tgt == "self" else rule.tgt, rule.tclass,
+                                sorted(rule.perms))
+        if verdict.status == "allowed":
+            rule.coverage = "allowed"
+        elif verdict.status == "boolean":
+            rule.coverage = "boolean:" + ",".join(verdict.booleans)
+        else:
+            rule.coverage = ""
+
+
+# What a path picked in the explorer gets by default: read it (or search a directory).
+DEFAULT_PERMS = {
+    "file": {"getattr", "open", "read"},
+    "dir": {"getattr", "search", "open", "read"},
+    "lnk_file": {"getattr", "read"},
+    "sock_file": {"getattr", "write"},
+    "fifo_file": {"getattr", "open", "read"},
+    "chr_file": {"getattr", "open", "read"},
+    "blk_file": {"getattr", "open", "read"},
+}
+
+
+def class_for_mode(mode: int) -> str:
+    return {
+        stat.S_IFDIR: "dir", stat.S_IFREG: "file", stat.S_IFLNK: "lnk_file", stat.S_IFSOCK: "sock_file",
+        stat.S_IFIFO: "fifo_file", stat.S_IFCHR: "chr_file", stat.S_IFBLK: "blk_file",
+    }.get(stat.S_IFMT(mode), "file")
+
+
+def actual_label(path: str) -> str:
+    """The type a path carries now ("" if unreadable)."""
+    try:
+        raw = os.getxattr(path, "security.selinux", follow_symlinks=False)
+        return raw.rstrip(b"\0").decode().split(":")[2]
+    except (OSError, IndexError, UnicodeDecodeError):
+        return ""
+
+
+def rule_for_path(path: str, domain: str) -> Rule | None:
+    """A read rule for a path the program will need but no test run touched (the explorer's picks)."""
+    from .policy_fc import system_label
+
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    cls = class_for_mode(st.st_mode)
+    tgt = actual_label(path) or system_label(path, "d" if cls == "dir" else "f") or "unlabeled_t"
+    if not _IDENT.match(tgt):
+        return None
+    return Rule(domain, "self" if tgt == domain else tgt, cls, frozenset(DEFAULT_PERMS.get(cls, {"getattr"})),
+                path=path, declared=True)
+
+
+def merge_rules(rules: list[Rule], new: list[Rule]) -> int:
+    """Add `new` to `rules`, unioning permissions into an existing (target, class) rule. Returns how many were added."""
+    index = {r.key: r for r in rules}
+    added = 0
+    for rule in new:
+        old = index.get(rule.key)
+        if old is None:
+            rules.append(rule)
+            index[rule.key] = rule
+            added += 1
+        elif not rule.perms <= old.perms:
+            old.perms = old.perms | rule.perms
+            old.coverage, old.perm_set = None, ""
+    return added
 
 
 def module_name_for(domain: str, kb: PolicyKB | None = None) -> str:

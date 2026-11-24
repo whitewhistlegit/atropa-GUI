@@ -120,7 +120,7 @@ def test_selinux_dev_page_drafts_with_interfaces(tmp_path):
     tree = make_tree(tmp_path / "tree")
     source = policy_source.find_source([str(tree)], running="atropa-refpolicy", share_dir=tmp_path)
     page = SelinuxDevPage()
-    page._on_source_loaded((source, policy_source.load(source)), None)
+    page._on_source_loaded((source, policy_source.load(source), None), None)
     assert "atropa-refpolicy" in page.source_row.get_title()
     page._on_denials_read((len(LINES), policy_draft.rules_from_denials(LINES)), None)
     page._on_domain_activated(None, "sshd_t")
@@ -143,5 +143,44 @@ def test_selinux_dev_page_drafts_with_interfaces(tmp_path):
     assert "type sshd_conf_t;" in te() and "allow sshd_t sshd_conf_t:file read_file_perms;" in te()
     start, end = page._buffers["fc"].get_bounds()
     assert "sshd_conf_t" in page._buffers["fc"].get_text(start, end, True)
-    page._on_source_loaded((policy_source.PolicySource("none", note="No source"), None), None)
+    page._on_source_loaded((policy_source.PolicySource("none", note="No source"), None, None), None)
     assert page.source_row.get_title() == "No policy source"
+
+
+def test_selinux_dev_page_shows_coverage_and_adds_picked_paths(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from atropa.backend import policy_draft, policy_source
+    from atropa.ui.pages.selinux_dev import SelinuxDevPage
+    from atropa.ui.selinux_explorer import PathExplorer
+    from tests.test_policy_draft import LINES
+    from tests.test_policy_source import make_tree
+
+    tree = make_tree(tmp_path / "tree")
+    source = policy_source.find_source([str(tree)], running="atropa-refpolicy", share_dir=tmp_path)
+    checker = SimpleNamespace(check=lambda s, t, c, p: SimpleNamespace(
+        status="allowed" if t == "proc_t" else "none", booleans=[]))
+    page = SelinuxDevPage()
+    page._on_source_loaded((source, policy_source.load(source), checker), None)
+    page._on_denials_read((len(LINES), policy_draft.rules_from_denials(LINES)), None)
+    rules = page._by_domain["sshd_t"]
+    policy_draft.check_coverage(rules, checker)  # what the page runs in the background
+    proc = next(r for r in rules if r.tgt == "proc_t")
+    assert page._coverage_note(proc) == "Your tree already allows this"
+    page._on_domain_activated(None, "sshd_t")
+    page._on_use_tight(None)
+    assert proc.decision == policy_draft.SKIP
+
+    picked = tmp_path / "data.conf"
+    picked.write_text("x")
+    monkeypatch.setattr(policy_draft, "actual_label", lambda path: "etc_t")
+    before = len(rules)
+    page._on_paths_picked("sshd_t", [str(picked), str(tmp_path)])
+    assert len(rules) == before + 1  # etc_t:file merged into the denial's rule; etc_t:dir is new
+    assert any(r.declared and r.tclass == "dir" for r in rules)
+
+    explorer = PathExplorer([f"{tree}/", f"{tree}/build.conf"], lambda paths: None)
+    explorer.go(str(tree))
+    row = explorer.list.get_row_at_index(0)
+    explorer.toggle(row)
+    assert explorer.picked == [row.path]

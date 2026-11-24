@@ -154,9 +154,11 @@ class Program:
     package: str = ""
     groups: list = None
     hidden: int = 0  # groups beyond MAX_GROUPS, not shown
+    files: list = None  # the package's file list (directories end in "/")
 
     def __post_init__(self):
         self.groups = self.groups or []
+        self.files = self.files or []
 
 
 def is_ident(name: str) -> bool:
@@ -331,7 +333,7 @@ def load_program(name: str, stem: str) -> Program:
     if path is None and package is None:
         raise LookupError(f"{name}: no such program or installed package")
     files = package_files(package) if package else [path]
-    program = Program(os.path.basename(path or name), path or "", package or "")
+    program = Program(os.path.basename(path or name), path or "", package or "", files=files)
     program.groups, program.hidden = group_paths(files, program.name, program.path)
     label_groups(program.groups, stem)
     return program
