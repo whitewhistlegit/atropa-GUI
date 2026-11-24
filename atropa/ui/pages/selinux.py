@@ -12,6 +12,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gtk  # noqa: E402
 
 from atropa.backend import selinux
+from atropa.ui import selinux_lint
 from atropa.ui.pages import BasePage, esc
 
 
@@ -331,7 +332,7 @@ class SelinuxPage(BasePage):
             if review.error and not review.te_content:
                 subtitle = f"{review.denial_count} denial(s) · {review.error}"
             elif review.pp_path:
-                subtitle = f"{review.denial_count} denial(s) · compiled, ready to review"
+                subtitle = f"{review.denial_count} denial(s) · compiled · {selinux_lint.badge(review.findings)}"
             else:
                 subtitle = f"{review.denial_count} denial(s) · {review.error or 'not compiled'}"
 
@@ -352,6 +353,9 @@ class SelinuxPage(BasePage):
 
     def _on_view_review(self, _btn: Gtk.Button, review) -> None:
         sections = [f"=== {review.label} ({review.denial_count} denial(s)) ==="]
+        if review.findings:
+            sections.append("--- What the linter found ---")
+            sections.extend(selinux_lint.findings_lines(review.findings))
         if review.sample_denials:
             sections.append("--- Sample denials ---")
             sections.extend(review.sample_denials)
@@ -388,12 +392,11 @@ class SelinuxPage(BasePage):
         dialog.present(self.get_root())
 
     def _on_install_review(self, _btn: Gtk.Button, review) -> None:
-        self.confirm(
-            f"Install policy for {review.label}?",
-            f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i. "
-            "Review the proposed rules first if you haven't already.",
-            "Install",
-            lambda: self.run_action(lambda: selinux.install_pp_file(review.pp_path), self.handle_command_result),
+        selinux_lint.install(
+            self, f"Install policy for {review.label}?",
+            f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i.",
+            review.findings,
+            lambda acks: selinux.install_pp_file(review.pp_path, acks),
         )
 
     def _on_mode_lock_clicked(self, _btn: Gtk.Button) -> None:

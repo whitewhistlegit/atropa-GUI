@@ -1,0 +1,55 @@
+module atropa_libvirt 1.0.0;
+
+########################################
+#
+# atropa_libvirt - AVCs seen starting libvirtd and the kali VM
+# Observed 2026-11-13 (permissive) on atropa-refpolicy. Review before loading.
+#
+
+require {
+	type virtd_t;
+	type init_tmpfs_t;
+	type virt_tmpfs_t;
+	type systemd_machined_t;
+}
+
+# 1. REQUIRED: libvirtd failed to start without this.
+#    systemd places LoadCredential files for the service under
+#    /run/credentials/libvirtd.service/ labeled init_tmpfs_t.
+#    Observed: { open } path=/run/credentials/libvirtd.service/secrets-encryption-key
+#    (read/getattr added because open alone is never enough; trim if you prefer
+#    to widen only on observed denials).
+allow virtd_t init_tmpfs_t:file { open read getattr };
+
+# 2. qemu display memfd, observed: { map } path=/memfd:displaysurface (virt_tmpfs_t)
+allow virtd_t virt_tmpfs_t:file map;
+
+# 3. systemd-machined inspecting the processes of the VM it registers.
+#    Observed: { search } dir, { open read } file under /proc/<qemu pid>/
+allow systemd_machined_t virtd_t:dir search;
+allow systemd_machined_t virtd_t:file { open read getattr };
+
+# 4. CAPABILITY: sys_rawio, observed from "daemon-init" (reads /dev/cpu/0/msr).
+#    libvirt only uses the MSR to probe host CPU features and copes without it,
+#    so this is silenced instead of granted. Change to
+#    "allow virtd_t self:capability sys_rawio;" if a feature then goes missing.
+dontaudit virtd_t self:capability sys_rawio;
+
+########################################
+#
+# NOT an allow rule on purpose: /etc/sasl2/qemu.conf (and libvirt.conf)
+#
+# Observed: { open read } comm=qemu-system-x86 path=/etc/sasl2/qemu.conf
+#           virtd_t -> saslauthd_keytab_t
+# Base policy labels /etc/sasl2(/.*)? as saslauthd_keytab_t, so libvirt's config
+# files there inherit a keytab type. Granting virtd_t read on every
+# saslauthd_keytab_t file is too broad. Prefer a more specific file context in
+# the .fc file instead, e.g.:
+#
+#   /etc/sasl2/(libvirt|qemu)\.conf	--	gen_context(system_u:object_r:etc_t,s0)
+#
+# (then `restorecon -v /etc/sasl2/*.conf`; qemu is only reading configuration).
+# If you'd rather keep the label, use this instead:
+#
+#   gen_require(`type saslauthd_keytab_t;')
+#   allow virtd_t saslauthd_keytab_t:file { open read getattr };

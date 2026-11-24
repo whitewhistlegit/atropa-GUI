@@ -185,6 +185,51 @@ snapper user-driven) are ask-tier. Only the `root` config is accepted;
 `rollback` and `set-config` are refused. `snapper-cleanup.timer` and
 `grub-btrfsd.service` are in `MANAGED_UNITS`.
 
+### Module linter (`te_lint.py`)
+
+Drafted, imported and hand-written modules are linted before they're
+installed. The parser fails closed, since the linter is an install gate:
+statements are split on `;`, `require` blocks skipped with balanced braces,
+`if`/`else`/`optional` blocks read, `{ }` sets expanded on source and target
+(a complement or an exclusion counts as every type), and anything it can't
+read - a macro, an unknown construct, a typo - is a dangerous "couldn't read"
+finding rather than a skipped rule. `permissive`, privileged
+`typeattribute`s and rules on broad attributes (`domain`, `file_type`, ...)
+are dangerous too. `lint(te, category)` checks each rule against a table:
+
+- dangerous: SELinux enforcement (`security` setenforce/load_policy/
+  setbool), writing SELinux's own config, `shadow_t`, writing
+  passwd/sudo/`etc_t`/PAM, writing `bin_t`/`lib_t`/`boot_t`/`*_exec_t`,
+  `/dev/mem` or raw disk writes, `module_load`, `mmap_zero`, dynamic
+  transitions, `ptrace` on another domain, transitions to
+  `unconfined_t`, writing `auditd_log_t`, `sys_module`/`sys_rawio`/
+  `mac_admin`/`mac_override`, anything widening a guest or sandbox domain;
+- review: generic targets (`default_t`, `file_t`, `unlabeled_t`, `var_t`,
+  `tmp_t`, `usr_t` - usually a label problem), wildcards, full manage sets
+  on shared types, write-then-execute, broad port types, raw sockets,
+  netlink writes, broad capabilities, signals to other domains, execmem,
+  widening `user_t`/`staff_t`, more than 25 rules or types;
+- note: `dac_override`/`dac_read_search`, booleans audit2allow named, known
+  noise (`noise_reason`), sock_file write without connectto.
+
+Categories (System service, Boot, User service, D-Bus service, Desktop app,
+Not sure) adjust that: Boot lowers module loading to review, a Desktop app
+makes any capability dangerous, and each adds "out of place for a ..."
+findings. The hard dangerous list is never lowered. `detect_category()`
+reads the denying process's cgroup (system unit, user manager unit, app
+scope) while it runs, else a short list of known domains, else Not sure.
+The category and the acknowledged findings live in
+`<module>.atropa.json` next to the module and move to approved/ with it.
+
+The gate is in the backend: `compile_and_load_te()`, `install_pp_file()`
+(when the .te is next to the .pp) and `reinstall_all_approved_modules()`
+raise `LintRefused` - or, for reinstall, hold the module back - while a
+dangerous finding isn't acknowledged. The compliance report's "Custom
+SELinux modules" warns about installed modules with dangerous findings,
+acknowledged or not. Calibrated on 36 real drafts from an enforcing
+desktop: none comes out dangerous under its detected category
+(`tests/fixtures/te`).
+
 ### Denial Review advice (`backend/denial_advice.py`)
 
 audit2allow turns every denial into an allow rule; Denial Review now judges

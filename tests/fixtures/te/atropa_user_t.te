@@ -1,0 +1,13 @@
+
+module atropa_user_t 1.0;
+
+require {
+	type nsfs_t;
+	type systemd_user_tmpfs_t;
+	type user_t;
+	class file { getattr read write };
+}
+
+#============= user_t ==============
+allow user_t nsfs_t:file getattr;
+allow user_t systemd_user_tmpfs_t:file { read write };

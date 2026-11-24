@@ -9,7 +9,8 @@ gi.require_version("Adw", "1")
 
 from gi.repository import Adw, Gtk  # noqa: E402
 
-from atropa.backend import selinux
+from atropa.backend import selinux, te_lint
+from atropa.ui import selinux_lint
 from atropa.ui.pages import BasePage, esc
 
 
@@ -360,10 +361,10 @@ class SelinuxReviewPage(BasePage):
             else:
                 subtitle = f"{review.denial_count} denial(s) · {review.error or 'not compiled'}"
 
+            if review.te_content:
+                subtitle += f" · {selinux_lint.badge(review.findings)} · {te_lint.CATEGORIES.get(review.category, '')}"
             if review.booleans:
                 subtitle += " · a boolean would do: " + ", ".join(review.booleans)
-            if review.warnings:
-                subtitle += " · ⚠ " + review.warnings[0]
             row = Adw.ActionRow(title=esc(f"Draft: {review.label}"), subtitle=esc(subtitle))
             view_btn = Gtk.Button(label="View", valign=Gtk.Align.CENTER, css_classes=["flat"])
             view_btn.connect("clicked", self._on_view_review, review)
@@ -378,11 +379,11 @@ class SelinuxReviewPage(BasePage):
         self.notify(f"Generated {len(result)} draft module(s)")
         return False
 
-    def _on_view_review(self, _btn: Gtk.Button, review) -> None:
+    def _review_text(self, review) -> str:
         sections = [f"=== {review.label} ({review.denial_count} denial(s)) ==="]
-        if review.warnings:
-            sections.append("--- Before installing ---")
-            sections.extend(f"⚠ {warning}" for warning in review.warnings)
+        if review.findings:
+            sections.append(f"--- What the linter found ({te_lint.CATEGORIES.get(review.category, '')}) ---")
+            sections.extend(selinux_lint.findings_lines(review.findings))
         if review.booleans:
             sections.append("--- A boolean would allow (part of) this ---")
             sections.append(", ".join(review.booleans) + " - see 'A boolean would allow this' above")
@@ -398,16 +399,37 @@ class SelinuxReviewPage(BasePage):
         if review.error:
             sections.append("\n--- Error ---")
             sections.append(review.error)
+        return "\n".join(sections)
 
+    def _on_view_review(self, _btn: Gtk.Button, review) -> None:
         buffer = Gtk.TextBuffer()
-        buffer.set_text("\n".join(sections))
+        buffer.set_text(self._review_text(review))
         text_view = Gtk.TextView(buffer=buffer, editable=False, monospace=True)
         text_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
         scroller = Gtk.ScrolledWindow(min_content_height=320, min_content_width=480)
         scroller.set_child(text_view)
 
+        def on_category(category: str) -> None:
+            try:
+                selinux.set_module_category(review.safe_name, category)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), is_error=True)
+                return
+            review.category = category
+            review.findings = te_lint.lint(review.te_content, category, review.booleans)
+            buffer.set_text(self._review_text(review))
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        if review.te_content:
+            category_list = Gtk.ListBox(css_classes=["boxed-list"], selection_mode=Gtk.SelectionMode.NONE)
+            row = selinux_lint.category_row(review.category, on_category)
+            row.set_subtitle(review.category_reason)
+            category_list.append(row)
+            content.append(category_list)
+        content.append(scroller)
+
         dialog = Adw.AlertDialog(heading=f"Review: {review.label}")
-        dialog.set_extra_child(scroller)
+        dialog.set_extra_child(content)
         dialog.add_response("close", "Close")
         if self._load_page is not None and review.te_content:
             dialog.add_response("open", "Open in Load Policy page")
@@ -422,12 +444,11 @@ class SelinuxReviewPage(BasePage):
         dialog.present(self.get_root())
 
     def _on_install_review(self, _btn: Gtk.Button, review) -> None:
-        self.confirm(
-            f"Install policy for {review.label}?",
-            f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i. "
-            "Review the proposed rules first if you haven't already.",
-            "Install",
-            lambda: self.run_async(lambda: selinux.install_pp_file(review.pp_path), self.handle_command_result),
+        selinux_lint.install(
+            self, f"Install policy for {review.label}?",
+            f"This loads {review.safe_name}.pp into the running SELinux policy with semodule -i.",
+            review.findings,
+            lambda acks: selinux.install_pp_file(review.pp_path, acks),
         )
 
     # --------------------------------------------------------- undefined-in-policy help --

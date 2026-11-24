@@ -41,6 +41,7 @@ _CATEGORY_MAP: dict[str, str] = {
     "Login lockout (faillock)": "Authentication & Access Control",
     "Sudoers configuration": "Authentication & Access Control",
     "su restricted to wheel": "Authentication & Access Control",
+    "Custom SELinux modules": "Mandatory Access Control",
     "AppArmor": "Mandatory Access Control",
     "SELinux": "Mandatory Access Control",
     "USBGuard": "Device Control",
@@ -102,6 +103,32 @@ class ComplianceReport:
     exposure: Exposure = field(default_factory=lambda: Exposure("unknown", ""))
 
 
+def _selinux_module_checks() -> list:
+    """
+    The modules Atropa installed (approved/), linted under the category each
+    was installed for. Acknowledged or not, a dangerous rule stays a warning:
+    acknowledging says you meant it, not that it's safe.
+    """
+    from . import selinux, te_lint
+
+    directory = selinux.APPROVED_MODULES_DIR
+    sources = sorted(directory.glob("*.te")) if directory.is_dir() else []
+    if not sources:
+        return []
+    dangerous = []
+    for source in sources:
+        category = te_lint.read_meta(directory, source.stem)["category"]
+        findings = te_lint.lint(source.read_text(encoding="utf-8", errors="replace"), category)
+        if te_lint.verdict(findings) == te_lint.DANGEROUS:
+            dangerous.append(source.stem)
+    if dangerous:
+        return [hardening.AuditCheck(
+            "Custom SELinux modules", "warn",
+            f"{len(dangerous)} of {len(sources)} grant dangerous access: {', '.join(dangerous[:5])}",
+        )]
+    return [hardening.AuditCheck("Custom SELinux modules", "pass", f"{len(sources)} module(s), none dangerous")]
+
+
 def _extra_checks() -> list:
     checks = []
 
@@ -117,6 +144,8 @@ def _extra_checks() -> list:
         checks.append(
             hardening.AuditCheck("Login lockout (faillock)", "warn", "pam_faillock isn't wired into PAM")
         )
+
+    checks += _selinux_module_checks()
 
     su = hardening.su_restriction_status()
     if su.trusting:

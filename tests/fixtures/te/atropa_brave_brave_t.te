@@ -1,0 +1,14 @@
+
+module atropa_brave_brave_t 1.0;
+
+require {
+	type brave_t;
+	type xdg_pictures_t;
+	class dir search;
+}
+
+#============= brave_t ==============
+
+#!!!! This avc can be allowed using one of the these booleans:
+#     brave_read_all_user_content, brave_manage_all_user_content
+allow brave_t xdg_pictures_t:dir search;

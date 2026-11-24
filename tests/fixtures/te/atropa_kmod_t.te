@@ -1,0 +1,10 @@
+
+module atropa_kmod_t 1.0;
+
+require {
+	type kmod_t;
+	class capability2 perfmon;
+}
+
+#============= kmod_t ==============
+allow kmod_t self:capability2 perfmon;

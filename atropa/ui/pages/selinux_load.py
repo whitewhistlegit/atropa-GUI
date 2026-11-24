@@ -12,6 +12,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, Gtk  # noqa: E402
 
 from atropa.backend import selinux
+from atropa.ui import selinux_lint
 from atropa.ui.pages import BasePage, esc
 
 TE_TEMPLATE = """module local_policy 1.0;
@@ -219,13 +220,17 @@ class SelinuxLoadPage(BasePage):
             self.notify("The .te content is empty", is_error=True)
             return
 
-        self.confirm(
-            f"Compile and load '{module_name}'?",
-            "This compiles the policy text and installs it into the running SELinux "
-            "policy with semodule -i. Review the .te content carefully before continuing - "
-            "it takes effect immediately.",
-            "Compile & Load",
-            lambda: self.run_async(lambda: selinux.compile_and_load_te(te_content, module_name), self.handle_command_result),
+        try:
+            _category, findings = selinux.lint_module(te_content, module_name)
+        except ValueError as exc:
+            self.notify(str(exc), is_error=True)
+            return
+        selinux_lint.install(
+            self, f"Compile and load '{module_name}'?",
+            "This compiles the policy text and installs it into the running SELinux policy with semodule -i. "
+            "It takes effect immediately.",
+            findings,
+            lambda acks: selinux.compile_and_load_te(te_content, module_name, acks),
         )
 
     def _on_modules_loaded(self, result, error) -> bool:
@@ -313,7 +318,8 @@ class SelinuxLoadPage(BasePage):
             return False
 
         for name, pp_path in result:
-            row = Adw.ActionRow(title=esc(name), subtitle=esc(pp_path))
+            _category, findings = selinux.findings_for_pp(pp_path)
+            row = Adw.ActionRow(title=esc(name), subtitle=esc(f"{selinux_lint.badge(findings)} · {pp_path}"))
 
             install_btn = Gtk.Button(label="Install", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])
             install_btn.connect("clicked", self._on_install_pending, name, pp_path)
@@ -328,11 +334,12 @@ class SelinuxLoadPage(BasePage):
         return False
 
     def _on_install_pending(self, _btn: Gtk.Button, module_name: str, pp_path: str) -> None:
-        self.confirm(
-            f"Install policy module '{module_name}'?",
+        _category, findings = selinux.findings_for_pp(pp_path)
+        selinux_lint.install(
+            self, f"Install policy module '{module_name}'?",
             f"Loads {pp_path} into the running SELinux policy with semodule -i.",
-            "Install",
-            lambda: self.run_async(lambda: selinux.install_pp_file(pp_path), self.handle_command_result),
+            findings,
+            lambda acks: selinux.install_pp_file(pp_path, acks),
         )
 
     def _on_discard_pending(self, _btn: Gtk.Button, pp_path: str) -> None:
