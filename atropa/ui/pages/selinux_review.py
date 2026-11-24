@@ -34,6 +34,17 @@ _KIND_LABEL = {
 _FILTERS = (("needs_action", "Needs action"), ("noise", "Noise"), ("done", "Done"), ("all", "All"))
 
 
+_WHY_MAX_LINES = 200
+
+
+def _clip_lines(text: str, limit: int = _WHY_MAX_LINES) -> str:
+    """At most `limit` lines: GTK lays a label out whole, and a multi-megabyte one froze the page."""
+    lines = text.splitlines()
+    if len(lines) <= limit:
+        return text
+    return "\n".join(lines[:limit]) + f"\n… {len(lines) - limit:,} more lines not shown"
+
+
 def _denial_title(denial) -> str:
     perms = ",".join(denial.permissions) or "?"
     return f"{denial.scontext_type} → {denial.tcontext_type} : {denial.tclass} {{{perms}}}"
@@ -338,7 +349,7 @@ class SelinuxReviewPage(BasePage):
             group.add(expander)
         if program.draft is not None and program.draft.why_text:
             why = Adw.ExpanderRow(title="audit2why explanation")
-            row = Adw.ActionRow(subtitle=esc(program.draft.why_text))
+            row = Adw.ActionRow(subtitle=esc(_clip_lines(program.draft.why_text)))
             row.set_subtitle_selectable(True)
             why.add_row(row)
             group.add(why)

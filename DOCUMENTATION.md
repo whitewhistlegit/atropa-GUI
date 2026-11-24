@@ -9,7 +9,7 @@ design specs, kept for the reasoning behind decisions - is in
 code, this file is.
 
 Size: **about 24,500 lines of Python - 41 backend modules, 33 pages plus
-the plugin page, and the root helper - and a 1,634-test pytest suite
+the plugin page, and the root helper - and a 1,637-test pytest suite
 (about 15,400 lines).**
 
 **Contents:** 1. Architecture · 2. Module reference (2a Core, 2b Security,
@@ -1552,7 +1552,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing
 
-**The suite**: `tests/`, 1,634 tests in 52 files - one `test_<module>.py`
+**The suite**: `tests/`, 1,637 tests in 52 files - one `test_<module>.py`
 per backend module plus the helper (`test_helper.py`,
 `test_helper_backups.py`, `test_helper_shapes.py`), `test_resources.py`,
 `test_stock_configs.py`, `test_te_lint.py` and the GTK smoke test - run with

@@ -779,7 +779,7 @@ def build_policy_review(
         names = programs[(domain_key, noise)]
         domain = "?" if domain_key.startswith("?") else domain_key
         safe_name = _review_module_name(names[0], domain, dontaudit=noise)
-        joined = "\n".join(denials)
+        joined = "\n".join(distinct_denials(denials))
         review = ProgramPolicyReview(
             program=", ".join(names), safe_name=safe_name, denial_count=len(denials),
             sample_denials=denials[:sample_size], domain=domain, dontaudit=noise,
@@ -868,6 +868,30 @@ _UNDEFINED_CLASS_RE = re.compile(r"[Cc]lass (\S+) not defined in policy")
 def _extract_context_type(line: str, field_name: str) -> str:
     m = re.search(_CONTEXT_TYPE_RE_TEMPLATE.format(field=field_name), line)
     return m.group(1) if m else "?"
+
+
+def distinct_denials(lines: list[str]) -> list[str]:
+    """
+    One line per distinct denial (source type, target type, class,
+    permissions), first seen first. audit2allow's rules and audit2why's
+    explanation depend only on those, so this is the same answer from far
+    less input: a busy program's thousands of identical denials made
+    audit2why print one block each - 18 MB for one program on a real
+    desktop, which then froze the Denials page laying it out.
+    """
+    seen: set[tuple] = set()
+    out = []
+    for line in lines:
+        perm_m = _PERM_SET_RE.search(line)
+        tclass_m = _TCLASS_RE.search(line)
+        key = (
+            _extract_context_type(line, "scontext"), _extract_context_type(line, "tcontext"),
+            tclass_m.group(1) if tclass_m else "?", tuple(sorted(perm_m.group(1).split())) if perm_m else (),
+        )
+        if key not in seen:
+            seen.add(key)
+            out.append(line)
+    return out
 
 
 def _extract_path(line: str) -> str | None:

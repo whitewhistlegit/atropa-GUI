@@ -1368,3 +1368,39 @@ def test_missing_tool_errors_name_the_real_aur_package(fake_which):
         selinux.generate_te("avc: denied", "atropa_x")
     with pytest.raises(RuntimeError, match="selinux-python.*AUR"):
         selinux.explain_denial("avc: denied")
+
+
+# ---------------------------------------------------------- distinct_denials --
+
+def _avc(pid, perms="read", tclass="file", tcontext="xdg_data_t"):
+    return (f'type=AVC msg=audit(1795483114.{pid}:{pid}): avc:  denied  {{ {perms} }} for  pid={pid} comm="brave" '
+            f'scontext=unconfined_u:unconfined_r:brave_t:s0 tcontext=unconfined_u:object_r:{tcontext}:s0 '
+            f'tclass={tclass} permissive=0')
+
+
+def test_distinct_denials_keeps_one_line_per_denial_first_seen_first():
+    lines = [_avc(1), _avc(2), _avc(3, perms="write"), _avc(4, perms="read write"), _avc(5, perms="write read"),
+             _avc(6, tclass="dir"), _avc(7, tcontext="xdg_config_t"), _avc(8)]
+    assert selinux.distinct_denials(lines) == [_avc(1), _avc(3, perms="write"), _avc(4, perms="read write"),
+                                               _avc(6, tclass="dir"), _avc(7, tcontext="xdg_config_t")]
+
+
+def test_build_policy_review_feeds_audit2allow_and_audit2why_each_denial_once(monkeypatch, tmp_path):
+    monkeypatch.setattr(selinux, "REVIEW_MODULES_DIR", tmp_path)
+    monkeypatch.setattr(selinux, "list_avc_denials", lambda limit: [_avc(i) for i in range(1, 5000)])
+    fed = {}
+
+    def fake_te(text, name, dontaudit=False):
+        fed["audit2allow"] = text
+        return f"module {name} 1.0;\nrequire {{\n\ttype brave_t;\n\ttype xdg_data_t;\n\tclass file read;\n}}\n" \
+               "allow brave_t xdg_data_t:file read;\n"
+
+    def fake_why(text):
+        fed["audit2why"] = text
+        return "explained"
+
+    monkeypatch.setattr(selinux, "generate_te", fake_te)
+    monkeypatch.setattr(selinux, "explain_denial", fake_why)
+    monkeypatch.setattr(selinux, "compile_te_to_pp", lambda *a, **k: str(tmp_path / "x.pp"), raising=False)
+    selinux.build_policy_review(source="journal")
+    assert fed["audit2allow"] == fed["audit2why"] == _avc(1)
