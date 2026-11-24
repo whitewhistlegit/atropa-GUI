@@ -1,0 +1,14 @@
+
+module atropa_systemd-tmpfile_systemd_tmpfiles_t 1.0;
+
+require {
+	type systemd_tmpfiles_t;
+	type systemd_machined_t;
+	type xdm_tmp_t;
+	class sock_file read;
+	class unix_stream_socket connectto;
+}
+
+#============= systemd_tmpfiles_t ==============
+allow systemd_tmpfiles_t systemd_machined_t:unix_stream_socket connectto;
+allow systemd_tmpfiles_t xdm_tmp_t:sock_file read;

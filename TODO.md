@@ -158,19 +158,19 @@ Seen when its generated modules were reviewed in the Arch test VM,
       is cut at 15 characters, giving `atropa_polkit-agent-he_policykit_auth_t`
       and `atropa__sd-worker__systemd_nsresourced_t`.
 
-### Over-permissive module warnings (design, not built yet)
+### Over-permissive module warnings
 
 Warn when a drafted (or hand-edited) module grants more than the program
 should need, judged against what kind of program it is. Builds on what's
 already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
 `label_hint()`, `te_booleans()`.
 
-- [ ] **Parser** - new `backend/te_lint.py` turns a `.te` into rules
+- [x] **Parser** - new `backend/te_lint.py` turns a `.te` into rules
       (kind, source, target, class, perms, line) plus its `require` block;
       handles hand edits (braces, `~`, `*`, attributes). With setools,
       attribute targets expand, so `file_type:file write` counts as
       touching thousands of types.
-- [ ] **Base rules** - a data table: id, severity, match, why, fix.
+- [x] **Base rules** - a data table: id, severity, match, why, fix.
   - Dangerous (root-equivalent or switches protection off): `security_t`
     (`setenforce`/`load_policy`/`setbool`), `selinux_config_t`,
     `policy_config_t`, `mac_admin`/`mac_override`; `module_load`,
@@ -193,7 +193,7 @@ already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
     a Unix permission bug), boolean-covered rules, already-allowed rules,
     noise that should be `dontaudit`. The existing sock_file/connectto
     check becomes one rule here.
-- [ ] **Program categories** - linked toggle buttons per pending module:
+- [x] **Program categories** - linked toggle buttons per pending module:
       System service, Boot, User service, D-Bus service, Desktop app, Not
       sure (= base rules only). The choice is saved next to the `.te` and
       re-lints live.
@@ -222,26 +222,29 @@ already there: `te_warnings()`, `PolicyChecker`, `noise_reason()`,
     to write /etc - wrong category, or this program is doing something
     odd"); a module mostly outside its category gets a "looks more like a
     System service" banner.
-- [ ] **UI** - badge per module (Looks fine / Review / Dangerous); each
+- [ ] **UI** (partly: badge, findings with the category picker in View, and the
+      acknowledge-to-install dialog are built; one-click safer options and live
+      re-lint of hand edits come with the redesign below) - badge per module (Looks fine / Review / Dangerous); each
       finding shows the highlighted line, why, and a one-click safer option
       where it's mechanical (switch to `dontaudit`, enable boolean X,
       relabel with `restorecon`/`semanage fcontext`, drop these perms, split
       the module). Live re-lint of hand edits. Install: fine -> as today;
       Review -> confirm listing findings; Dangerous -> disabled until each
       dangerous finding is acknowledged.
-- [ ] **Backend gate** - `compile_and_load_te()` lints itself and refuses
+- [x] **Backend gate** - `compile_and_load_te()` lints itself and refuses
       unacknowledged Dangerous findings (`acknowledged={rule ids}`,
       recorded with the category), so "reinstall all approved" and future
       callers can't skip it. On top of the ask-tier `semodule -i`, not
       instead of it.
-- [ ] **Installed modules** - lint approved/installed Atropa modules on page
+- [x] **Installed modules** - lint approved/installed Atropa modules on page
       load; compliance report gains "Custom SELinux modules" (warn per
       module with Dangerous findings).
-- [ ] **Tests** - a should/shouldn't-flag `.te` fixture per rule and per
+- [x] **Tests** - a should/shouldn't-flag `.te` fixture per rule and per
       category; detection tests from captured AVCs plus unit files; real
       drafts (host pending modules incl. Brave/flatpak, the VM's) as a
       calibration corpus; the backend refusing unacknowledged rules.
-- [ ] **Open decisions** - hard block vs loud warning for Dangerous (design
+- [x] **Open decisions** - decided: acknowledge-to-install; Build Policy not
+      linted yet; 25 kept (the real drafts top out at 7 rules). Was: hard block vs loud warning for Dangerous (design
       assumes acknowledge-to-proceed); also lint the Build Policy page's
       modules?; tune the ~25-rule threshold on real modules.
 

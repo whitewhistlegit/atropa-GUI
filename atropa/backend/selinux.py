@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import denial_advice
+from . import denial_advice, te_lint
 from .privilege import CommandResult, backup_file, run_privileged, run_privileged_streaming, run_unprivileged
 
 SELINUX_CONFIG = Path("/etc/selinux/config")
@@ -401,23 +401,79 @@ def _compile_te(te_content: str, module_name: str, workdir: Path) -> str:
 
 
 def _move_to_approved(module_name: str, source_dir: Path) -> None:
-    """Moves a module's .te/.mod/.pp trio from source_dir into APPROVED_MODULES_DIR, if present there."""
+    """Moves a module's .te/.mod/.pp trio (and its lint sidecar) from source_dir into APPROVED_MODULES_DIR."""
     APPROVED_MODULES_DIR.mkdir(parents=True, exist_ok=True)
-    for ext in ("te", "mod", "pp"):
+    for ext in ("te", "mod", "pp", "atropa.json"):
         src = source_dir / f"{module_name}.{ext}"
         if src.exists():
             src.replace(APPROVED_MODULES_DIR / f"{module_name}.{ext}")
 
 
-def compile_and_load_te(te_content: str, module_name: str) -> CommandResult:
+class LintRefused(RuntimeError):
+    """A module with dangerous findings that weren't acknowledged; .findings has them."""
+
+    def __init__(self, module_name: str, findings: list):
+        self.findings = findings
+        names = "; ".join(f.message for f in findings[:3])
+        super().__init__(
+            f"{module_name} grants dangerous access that hasn't been acknowledged ({names}). "
+            "Review it on the Denial Review page."
+        )
+
+
+def lint_module(te_content: str, module_name: str, module_dir: Path | None = None) -> tuple[str, list]:
+    """(category, findings) for a module, with the category kept next to it."""
+    meta = te_lint.read_meta(module_dir or REVIEW_MODULES_DIR, module_name)
+    return meta["category"], te_lint.lint(te_content, meta["category"])
+
+
+def findings_for_pp(pp_path: str) -> tuple[str, list]:
+    """(category, findings) for a compiled module from its .te next to it; no .te, no findings."""
+    path = Path(pp_path)
+    source = path.with_suffix(".te")
+    if not source.exists():
+        return "unsure", []
+    meta = te_lint.read_meta(path.parent, path.stem)
+    return meta["category"], te_lint.lint(source.read_text(encoding="utf-8", errors="replace"), meta["category"])
+
+
+def set_module_category(module_name: str, category: str) -> None:
+    """Remember what kind of program a pending module is for (re-lints with it)."""
+    _validate_module_name(module_name)
+    if category not in te_lint.CATEGORIES:
+        raise ValueError(f"{category!r} isn't a category")
+    meta = te_lint.read_meta(REVIEW_MODULES_DIR, module_name)
+    te_lint.write_meta(REVIEW_MODULES_DIR, module_name, category, meta["acknowledged"])
+
+
+def _gate(te_content: str, module_name: str, module_dir: Path, acknowledged) -> list[str]:
+    """
+    The install gate: refuses (LintRefused) while a dangerous finding isn't
+    acknowledged, whatever called it. Returns the acknowledgements to keep
+    with the module - previous ones plus these.
+    """
+    meta = te_lint.read_meta(module_dir, module_name)
+    acks = set(meta["acknowledged"]) | set(acknowledged or ())
+    findings = te_lint.lint(te_content, meta["category"])
+    missing = te_lint.unacknowledged(findings, acks)
+    if missing:
+        raise LintRefused(module_name, missing)
+    te_lint.write_meta(module_dir, module_name, meta["category"], acks, meta.get("reason"))
+    return sorted(acks)
+
+
+def compile_and_load_te(te_content: str, module_name: str, acknowledged=()) -> CommandResult:
     """
     Compiles arbitrary .te policy text (from audit2allow, hand-written, or
     loaded from disk) and installs it. Only the final semodule -i step
     (which modifies the live policy) is privileged. On success, the
-    compiled files move from modules/ to approved/.
+    compiled files move from modules/ to approved/. Refused (LintRefused)
+    while te_lint finds something dangerous that isn't in `acknowledged`.
     """
     if not shutil.which("semodule"):
         raise missing_tool_error("semodule")
+    _validate_module_name(module_name)
+    _gate(te_content, module_name, REVIEW_MODULES_DIR, acknowledged)
     pp_path = _compile_te(te_content, module_name, REVIEW_MODULES_DIR)
     result = run_privileged(["semodule", "-i", pp_path])
     if result.ok:
@@ -493,7 +549,7 @@ def import_te_files(paths: list[str]) -> list[ImportedTeFile]:
     return results
 
 
-def install_pp_file(pp_path: str) -> CommandResult:
+def install_pp_file(pp_path: str, acknowledged=()) -> CommandResult:
     """
     Installs an already-compiled .pp (from a review batch or elsewhere) via
     semodule -i. If it was sitting in the pending modules/ directory, its
@@ -504,6 +560,9 @@ def install_pp_file(pp_path: str) -> CommandResult:
     path = Path(pp_path)
     if not path.exists():
         raise RuntimeError(f"{pp_path} no longer exists")
+    source = path.with_suffix(".te")
+    if source.exists():  # a .pp without its source (from elsewhere) can't be linted
+        _gate(source.read_text(encoding="utf-8", errors="replace"), path.stem, path.parent, acknowledged)
     result = run_privileged(["semodule", "-i", str(path)])
     if result.ok and path.parent == REVIEW_MODULES_DIR:
         _move_to_approved(path.stem, REVIEW_MODULES_DIR)
@@ -567,7 +626,23 @@ def reinstall_all_approved_modules() -> CommandResult:
     inactive = [m for m in list_approved_modules() if not m["active"]]
     if not inactive:
         return CommandResult(0, "nothing to reinstall", "")
-    return run_privileged(["semodule", "-i", *(m["path"] for m in inactive)])
+    # Each one through the gate with the acknowledgements it was installed
+    # with: one approved before the linter existed isn't let back in blind.
+    allowed, held = [], []
+    for module in inactive:
+        source = Path(module["path"]).with_suffix(".te")
+        try:
+            if source.exists():
+                _gate(source.read_text(encoding="utf-8", errors="replace"), module["name"], APPROVED_MODULES_DIR, ())
+            allowed.append(module["path"])
+        except LintRefused:
+            held.append(module["name"])
+    if not allowed:
+        return CommandResult(1, "", f"Held back, dangerous findings not acknowledged: {', '.join(held)}")
+    result = run_privileged(["semodule", "-i", *allowed])
+    if held and result.ok:
+        return CommandResult(0, result.stdout, f"Held back, dangerous findings not acknowledged: {', '.join(held)}")
+    return result
 
 
 
@@ -604,6 +679,9 @@ class ProgramPolicyReview:
     dontaudit: bool = False  # drafted from known noise: dontaudit rules, not allow
     warnings: list[str] = field(default_factory=list)  # problems installing the draft won't reveal
     booleans: list[str] = field(default_factory=list)  # audit2allow: these would allow (part of) it
+    category: str = "unsure"  # te_lint.CATEGORIES key: what kind of program this is
+    category_reason: str = ""  # why that category was guessed
+    findings: list = field(default_factory=list)  # te_lint.Finding, most severe first
 
     @property
     def label(self) -> str:
@@ -718,6 +796,14 @@ def build_policy_review(
             review.te_content = generate_te(joined, safe_name, dontaudit=noise)
             review.warnings = denial_advice.te_warnings(review.te_content)
             review.booleans = denial_advice.te_booleans(review.te_content)
+            meta_file = te_lint.meta_path(REVIEW_MODULES_DIR, safe_name)
+            if meta_file.exists():  # a category the user picked stays
+                meta = te_lint.read_meta(REVIEW_MODULES_DIR, safe_name)
+                review.category, review.category_reason = meta["category"], meta.get("reason", "chosen earlier")
+            else:
+                review.category, review.category_reason = te_lint.detect_category(denials, domain)
+                te_lint.write_meta(REVIEW_MODULES_DIR, safe_name, review.category, reason=review.category_reason)
+            review.findings = te_lint.lint(review.te_content, review.category, review.booleans)
         except Exception as exc:  # noqa: BLE001 - surfaced per-program, one bad program shouldn't abort the batch
             review.error = str(exc)
             reviews.append(review)
