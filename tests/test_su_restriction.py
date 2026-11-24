@@ -106,4 +106,4 @@ def test_su_writes_are_ask_tier():
     assert helper.needs_fresh_auth(["replace-in-file", "/etc/pam.d/su", "x", "y"])
     assert helper.needs_fresh_auth(["replace-in-file", "/etc/pam.d/su-l", "x", "y"])
     with pytest.raises(helper.Refused):
-        helper.checked_write_path("/etc/pam.d/system-auth")
+        helper.checked_write_path("/etc/pam.d/sudo")

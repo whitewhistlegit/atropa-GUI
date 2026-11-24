@@ -509,6 +509,55 @@ def set_password_complexity_policy(
     return result
 
 
+
+# The one place pam_pwquality can go on Arch: stock /etc/pam.d/passwd only
+# includes system-auth, so password changes run system-auth's password
+# section. It is put BEFORE the pam_systemd_home line, not between it and
+# pam_unix: that line's [success=1] skips the next line, so in between it
+# would skip the quality check for homed users and still run pam_unix.
+# pam_unix gets use_authtok so it sets the password pam_pwquality checked
+# instead of asking again. Only the stock shape is edited - a hand-edited
+# system-auth is left alone, since a bad line there breaks every login.
+PAM_SYSTEM_AUTH = Path("/etc/pam.d/system-auth")
+PWQUALITY_MODULE = Path("/usr/lib/security/pam_pwquality.so")
+_PWQUALITY_LINE = "password   required                    pam_pwquality.so"
+_HOMED_PASSWORD_RE = re.compile(r"^-password\s+\[success=1 default=ignore\]\s+pam_systemd_home\.so\s*$")
+_UNIX_PASSWORD_RE = re.compile(r"^password\s+required\s+pam_unix\.so\s+try_first_pass\s+nullok\s+shadow\s*$")
+_UNIX_AUTHTOK_RE = re.compile(r"^password\s+required\s+pam_unix\.so\s+try_first_pass\s+nullok\s+shadow\s+use_authtok\s*$")
+_UNIX_PASSWORD_LINE = "password   required                    pam_unix.so          try_first_pass nullok shadow"
+
+
+def wire_pwquality() -> CommandResult:
+    """Add pam_pwquality to system-auth's password section (stock layout only)."""
+    if not PWQUALITY_MODULE.exists():
+        raise RuntimeError("pam_pwquality isn't installed - install libpwquality first")
+    text = PAM_SYSTEM_AUTH.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    if any(line.split("#", 1)[0].split()[2:3] == ["pam_pwquality.so"] for line in lines if line.strip()):
+        return CommandResult(0, "pam_pwquality is already wired in", "")
+    unix = [i for i, line in enumerate(lines) if _UNIX_PASSWORD_RE.match(line)]
+    homed = [i for i, line in enumerate(lines) if _HOMED_PASSWORD_RE.match(line)]
+    if len(unix) != 1 or len(homed) > 1 or (homed and homed[0] != unix[0] - 1):
+        raise RuntimeError(
+            f"{PAM_SYSTEM_AUTH} isn't laid out the way pambase ships it, so Atropa won't edit it. "
+            f"Add '{_PWQUALITY_LINE}' above the password lines yourself, and 'use_authtok' to pam_unix's."
+        )
+    lines[unix[0]] = lines[unix[0]].rstrip() + " use_authtok"
+    lines.insert(homed[0] if homed else unix[0], _PWQUALITY_LINE)
+    return run_privileged(["tee", str(PAM_SYSTEM_AUTH)], input_text="\n".join(lines) + "\n")
+
+
+def unwire_pwquality() -> CommandResult:
+    """Undo wire_pwquality(): only the exact lines it wrote."""
+    text = PAM_SYSTEM_AUTH.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    ours = [i for i, line in enumerate(lines) if line == _PWQUALITY_LINE]
+    if not ours:
+        return CommandResult(0, "pam_pwquality isn't wired in by Atropa", "")
+    lines = [line for line in lines if line != _PWQUALITY_LINE]
+    lines = [_UNIX_PASSWORD_LINE if _UNIX_AUTHTOK_RE.match(line) else line for line in lines]
+    return run_privileged(["tee", str(PAM_SYSTEM_AUTH)], input_text="\n".join(lines) + "\n")
+
 # ------------------------------------------------------ su restriction --
 #
 # CIS 5.6 / 6.1.x-style: only members of wheel may use `su`. Arch's
