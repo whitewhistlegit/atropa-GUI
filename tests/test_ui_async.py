@@ -37,3 +37,13 @@ def test_run_async_calls_on_done_once_even_if_it_returns_truthy(monkeypatch):
     loop.run()
 
     assert calls == [(42, None)]
+
+
+def test_audit2why_text_is_clipped_for_display():
+    from atropa.ui.pages import selinux_review
+
+    short = "a\nb"
+    assert selinux_review._clip_lines(short) == short
+    clipped = selinux_review._clip_lines("\n".join(str(i) for i in range(438_316)))
+    assert clipped.count("\n") == selinux_review._WHY_MAX_LINES
+    assert clipped.endswith("438,116 more lines not shown")
