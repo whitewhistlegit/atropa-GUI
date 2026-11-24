@@ -53,6 +53,7 @@ Each sidebar entry is a module:
 | **SELinux: Modules** | Installed, pending and new policy modules, each checked by the module linter (dangerous rules need acknowledging before install); load or batch-import `.te` files |
 | **SELinux: Denials** | Setup Mode; denials per program with the best next step (boolean, relabel, dontaudit, module) and its drafted module reviewed in place |
 | **SELinux: Build Policy** | Build/install/activate a Reference Policy source tree (modular builds); fetches Atropa's own policy on request |
+| **SELinux: Dev** | Experimental: drafts denials with the running policy's own interfaces and permission sets, and compiles them against its source tree or headers to check them; installs nothing |
 | **Config Changes** | Review `.pacnew`/`.pacsave` files left by upgrades: diff, replace, or keep the current config |
 | **Boot Report** | What went wrong since this boot: journal errors, failed units, recent crashes |
 | **Disk Health** | SMART health (one-click root read where the kernel requires it), filesystem usage, `fstrim.timer`, journal/cache/coredump cleanup |
@@ -200,7 +201,7 @@ ruff check .
 python3 -m pytest -q
 ```
 
-The suite is 1,637 tests across every backend module, the privileged
+The suite is 1,666 tests across every backend module, the privileged
 helper, Arch's stock config files and real SELinux drafts. It fakes the one
 subprocess boundary (`privilege._subprocess_run`) rather than mocking each
 module, so the code under test is the same code that runs on the machine.

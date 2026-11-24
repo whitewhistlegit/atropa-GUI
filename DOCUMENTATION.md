@@ -8,8 +8,8 @@ design specs, kept for the reasoning behind decisions - is in
 [`docs/HISTORY.md`](docs/HISTORY.md); it isn't kept up to date with the
 code, this file is.
 
-Size: **about 24,500 lines of Python - 41 backend modules, 33 pages plus
-the plugin page, and the root helper - and a 1,637-test pytest suite
+Size: **about 26,000 lines of Python - 44 backend modules, 34 pages plus
+the plugin page, and the root helper - and a 1,666-test pytest suite
 (about 15,400 lines).**
 
 **Contents:** 1. Architecture · 2. Module reference (2a Core, 2b Security,
@@ -42,6 +42,7 @@ atropa/
     security.py hardening.py audit_rules.py boot_security.py compliance.py inventory.py
     account_hygiene.py aide.py quicksetup.py profiles.py apparmor.py
     selinux.py denial_advice.py te_lint.py selinux_programs.py refpolicy_build.py
+    policy_source.py policy_draft.py m4lite.py
     boot_report.py disk_health.py firmware.py power.py sleep.py flatpak.py
     dependencies.py plugins.py plugin_registry.py migration.py
   resources/
@@ -66,7 +67,7 @@ The sidebar (`MODULES` in `main_window.py`), by section:
 - **Security**: Security Quick Setup, Security Profiles, Security,
   Hardening, Encryption & Secure Boot, Compliance Report, Inventory &
   Hygiene, File Integrity, AppArmor, SELinux, SELinux: Modules, SELinux:
-  Denials, SELinux: Build Policy
+  Denials, SELinux: Build Policy, SELinux: Dev
 - **Maintenance**: Config Changes, Package History, Snapshots, Boot Report,
   Disk Health, Firmware, Mirrors, Power, Flatpak, Dependencies, Add-ons,
   Activity & Backups
@@ -907,8 +908,10 @@ Three pages plus Build Policy (below):
   one row per SELinux source domain with one badge for its best next step
   (`selinux_programs.overview()`: Dangerous, Review, Relabel, Boolean,
   Module, Policy gap, Noise, Done - most urgent first). "Review now" runs
-  `review_all_denials()` and then `build_policy_review()` for the same
-  window, so drafts exist as soon as the list does; nothing is installed.
+  `review_all_denials()` and then `build_policy_review()` on the lines the
+  review just read (`ExtensiveDenialReview.lines`), so drafts exist as soon
+  as the list does and the audit log is read once, not twice; nothing is
+  installed.
   The program page has the recommended route first - boolean (with how
   many of its denials it covers and how many rules it switches), restorecon
   for paths a label probably explains, installing the dontaudit module for
@@ -1124,6 +1127,66 @@ SELinux modules" warns about installed modules with dangerous findings,
 acknowledged or not. Calibrated on 36 real drafts from an enforcing
 desktop: none comes out dangerous under its detected category
 (`tests/fixtures/te`).
+
+### SELinux: Dev (`policy_source.py`, `policy_draft.py`, `m4lite.py` / `pages/selinux_dev.py`)
+
+Experimental drafting, ported from the atropa-scratch prototype. The
+Denials page drafts with `audit2allow`: plain `allow` rules that
+`checkmodule` compiles on its own. This page drafts in refpolicy style -
+interface calls and permission-set names from the policy's own source -
+which only the policy's own build can compile. It never installs: Build
+compiles (and against a tree, links) in a temp dir, and the .te can be
+copied out.
+
+- **Which source** (`policy_source.find_source()`). Interface names,
+  permission sets and m4 build options differ between trees, so a source is
+  used only when it builds the running policy (`SELINUXTYPE`): a tree the
+  user picked, or Atropa's download (`ATROPA_POLICY_DIR`), whose
+  `build.conf` `NAME` matches; else `/usr/share/selinux/<SELINUXTYPE>/include`;
+  else nothing - and the page says why, naming the trees and headers it
+  skipped. Another policy's headers are never a stand-in: on an Atropa
+  install `refpolicy-arch` ships headers and `atropa-refpolicy` (the running
+  one) doesn't, and refpolicy-arch's own Makefile refuses to build against
+  them for that reason. Picked trees are saved, most recent first, in
+  `selinux-review/policy-trees.json`; a picked tree for another policy is
+  saved but not used, with a toast saying so.
+- **Reading it** (`policy_source.load()`). `build.conf` is make syntax;
+  distro headers write `DISTRO ?= arch` and `override UBAC := n`, which
+  `parse_build_conf()` reads (scratch read only `NAME = x` lines, so
+  `distro_arch` and `init_systemd` were never defined for headers). Classes
+  come from the tree's `flask/access_vectors`, or for headers from
+  `/sys/fs/selinux/class` (the running policy, readable without root).
+  Permission sets come from `support/*.spt`; every single-argument
+  interface is expanded with `m4lite` into the allow rules it grants `$1`,
+  indexed by (target, class). Types come from a tree's `.te` files; headers
+  have none. A parsed source is pickled under `~/.cache/atropa/policy-source`
+  (0700 dir, 0600 file, written only by Atropa), keyed by the size and
+  mtime of every file read; parsing takes about 0.5 s.
+- **m4lite** is a subset of m4: enough to rank suggestions, never to
+  decide correctness - the real build does that. `tunable_policy()` blocks
+  are dropped: an interface that grants a permission only while a tunable
+  is on doesn't cover it on a machine where the tunable is off, and no
+  compile or link step would notice. `optional_policy()` blocks are kept;
+  the link catches a missing module.
+- **Drafting** (`policy_draft`). Denial lines become one `Rule` per
+  (source, target, class), permissions merged. Each rule is allow,
+  dontaudit, one of its interfaces (tightest first: fewest permissions
+  granted beyond the denial, on any target), or skip. "Use tight
+  interfaces" picks the first interface within `TIGHT_EXTRA` (12). A rule
+  whose permissions are exactly a policy set is written with the set's
+  name (`all_*_perms` excepted). Modules are named `atropa_dev_<domain>`,
+  with `_local` added if the policy has a module by that name.
+- **Build** (`policy_draft.build()`). Against a tree: the tree's own
+  `Rules.modular` steps - m4 with its support macros,
+  `tmp/generated_definitions.conf` and `tmp/all_interfaces.conf` (so the
+  tree must have been built once), `checkmodule`, `semodule_package` - then
+  `semodule_link`/`semodule_expand` against every `.pp` the tree built,
+  which proves each required type and interface exists. Against headers:
+  `make -f <headers>/Makefile HEADERDIR=<headers> NAME=<policy>`, since the
+  Makefile otherwise picks its headers from `SELINUXTYPE`.
+- **Not ported yet**: scratch's `.fc` proposals from a package's file
+  list, the compiled-tree coverage check, and the explorer for declaring
+  paths a test run never touched.
 
 ### Custom Reference Policy build (`refpolicy_build.py` / `pages/refpolicy_build.py`)
 Builds/installs/activates a user-maintained refpolicy fork (e.g. Arch-
@@ -1552,7 +1615,7 @@ Pages that need fresh data have their own Refresh/Re-scan button.
 
 ## 4. Testing
 
-**The suite**: `tests/`, 1,637 tests in 52 files - one `test_<module>.py`
+**The suite**: `tests/`, 1,666 tests in 55 files - one `test_<module>.py`
 per backend module plus the helper (`test_helper.py`,
 `test_helper_backups.py`, `test_helper_shapes.py`), `test_resources.py`,
 `test_stock_configs.py`, `test_te_lint.py` and the GTK smoke test - run with

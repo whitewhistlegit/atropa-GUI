@@ -169,9 +169,7 @@ class SelinuxReviewPage(BasePage):
 
         def work():
             review = selinux.review_all_denials(source=source)
-            drafts = selinux.build_policy_review(
-                source="audit_log" if "audit_log" in review.source else "journal", since=review.since,
-            ) if review.new or review.noise else []
+            drafts = selinux.build_policy_review(lines=review.lines) if review.new or review.noise else []
             return review, selinux_programs.overview(review, drafts)
 
         self.run_async(work, self._on_review_loaded)
