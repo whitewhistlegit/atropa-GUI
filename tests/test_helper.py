@@ -415,6 +415,7 @@ def test_policy_covers_every_path_the_backend_manages(monkeypatch):
         str(audit_rules.AUDIT_RULES_DIR / "99-atropa.rules"),
         str(plugins.PLUGINS_DIR / "example" / "manifest.toml"),
         "/boot/loader/loader.conf",
+        "/boot/loader/entries/atropa-linux-lts.conf",
         "/.autorelabel",
     ]
     for path in managed:

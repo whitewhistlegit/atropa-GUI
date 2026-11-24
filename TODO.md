@@ -75,10 +75,15 @@ single-user Arch machine.
       before upgrade" above). Timeshift isn't integrated; Snapper covers the
       same need.
 - [x] **Journal/log viewer** - superseded by the Boot Report page.
-- [ ] **Kernel management** (next up) - list installed kernels, install or
-      remove one (e.g. `linux-lts` as a fallback alongside snapshots), check
-      each has a boot entry and matching headers. Editing `mkinitcpio.conf`
-      stays out of scope.
+- [x] **Kernel management** - Kernels page: installed kernels (found by
+      their `pkgbase` file, so AUR kernels count) with running / headers /
+      boot entry, a fallback-kernel warning, install (headers added when
+      DKMS is in use, GRUB menu regenerated, upgrade-and-install when the
+      system is behind) and remove (never the running or last kernel), a
+      copied systemd-boot entry, and removal of leftover DKMS module
+      folders. Editing `mkinitcpio.conf` stays out of scope.
+  - [ ] Boot the fallback kernel once on real hardware with DKMS (checked in
+        the VM's GRUB menu, not booted).
 
 ### From the full-repo audit
 

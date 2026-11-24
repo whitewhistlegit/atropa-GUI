@@ -246,8 +246,26 @@ def _resolved(path: str) -> str:
 
 def _is_loader_conf(path: str) -> bool:
     # systemd-boot's timeout lives on whatever ESP was detected (/efi,
-    # /boot or /boot/efi); the exact file is what matters, not the ESP.
-    return path.endswith("/loader/loader.conf")
+    # /boot or /boot/efi). Any of those, but only those: matching the file
+    # name alone let any directory called "loader" take a root write.
+    return path.startswith(BOOT_DIRS) and path.endswith("/loader/loader.conf")
+
+
+_LOADER_ENTRY_RE = re.compile(r"^atropa-[a-z0-9][a-z0-9._+-]*\.conf$")
+
+
+def _is_loader_entry(path: str) -> bool:
+    # A systemd-boot entry Atropa adds for an installed kernel. Only its own
+    # atropa-*.conf names: entries written by hand or by kernel-install stay
+    # untouched. An entry carries the kernel command line, so writing one
+    # asks every time (see _write_tier).
+    parts = path.split("/")
+    return (
+        path.startswith(BOOT_DIRS)
+        and len(parts) >= 4
+        and parts[-3:-1] == ["loader", "entries"]
+        and bool(_LOADER_ENTRY_RE.match(parts[-1]))
+    )
 
 
 def _is_battery_limit(path: str) -> bool:
@@ -278,7 +296,7 @@ def checked_write_path(path: str) -> str:
     target = _resolved(path)
     if target in WRITE_FILES or target.startswith(WRITE_DIRS):
         return target
-    if _is_loader_conf(target):
+    if _is_loader_conf(target) or _is_loader_entry(target):
         return target
     raise Refused(f"{target} isn't a file Atropa is allowed to write")
 
@@ -514,11 +532,14 @@ def _cat(args):
 def _grep(args):
     if len(args) == 3 and args[:2] == ["-E", "^menuentry"] and _resolved(args[2]) == "/boot/grub/grub.cfg":
         return KEEP, list(args)
+    # Only the kernel file names grub.cfg boots, never the command lines.
+    if len(args) == 3 and args[:2] == ["-oE", "vmlinuz-[A-Za-z0-9._+-]+"] and _resolved(args[2]) == "/boot/grub/grub.cfg":
+        return KEEP, list(args)
     if len(args) == 4 and args[:3] == ["-rH", "--include=*.conf", ""]:
         loader = _under(args[3], BOOT_DIRS, "boot directory")
         if os.path.basename(loader) == "loader":
             return KEEP, [*args[:3], loader]
-    raise Refused("grep only reads grub.cfg's menu entries or a systemd-boot loader directory")
+    raise Refused("grep only reads grub.cfg's menu entries or kernel names, or a systemd-boot loader directory")
 
 
 def _firewall_cmd(args):
@@ -919,7 +940,7 @@ def validate_command(argv: list[str]) -> tuple[str, list[str]]:
 
 def _write_tier(path: str) -> str:
     normal = _normal(path)
-    if normal in ASK_WRITE_FILES or normal.startswith(ASK_WRITE_DIRS):
+    if normal in ASK_WRITE_FILES or normal.startswith(ASK_WRITE_DIRS) or _is_loader_entry(normal):
         return ASK
     return KEEP
 
@@ -985,8 +1006,48 @@ def _shadow_status(argv: list[str]) -> int:
     return 0
 
 
+# ---------------------------------------------------- leftover module dirs --
+
+
+MODULES_ROOT = "/usr/lib/modules"
+_RELEASE_RE = re.compile(r"^[0-9][A-Za-z0-9._+-]*$")
+
+
+def _modules_leftover_remove(argv: list[str]) -> int:
+    """
+    `modules-leftover-remove RELEASE`: delete /usr/lib/modules/RELEASE when
+    an old kernel left it behind - in practice DKMS output in updates/dkms,
+    which pacman doesn't remove with the kernel. Refused unless all of:
+    not the running kernel, a real directory (no symlink), no pkgbase file
+    (no kernel package claims it), no kernel/ tree (so not a kernel
+    installed by hand), and no package owns it.
+    """
+    import shutil
+    import subprocess
+
+    if len(argv) != 2 or not _RELEASE_RE.match(argv[1]):
+        raise Refused("modules-leftover-remove takes one kernel release")
+    release = argv[1]
+    if release == os.uname().release:
+        raise Refused(f"{release} is the running kernel")
+    path = os.path.join(MODULES_ROOT, release)
+    if os.path.islink(path) or not os.path.isdir(path) or os.path.realpath(path) != path:
+        raise Refused(f"{path} isn't a module directory")
+    for name in ("pkgbase", "kernel"):
+        if os.path.lexists(os.path.join(path, name)):
+            raise Refused(f"{path} has {name}, so it belongs to an installed kernel")
+    owner = subprocess.run(
+        [_system_binary("pacman"), "-Qqo", path],
+        capture_output=True, text=True, env={"PATH": ":".join(SAFE_PATH), "LC_ALL": "C.UTF-8"}, check=False,
+    )
+    if owner.returncode == 0:
+        raise Refused(f"{path} is owned by {owner.stdout.strip()}")
+    shutil.rmtree(path)
+    return 0
+
+
 # Operations implemented here that aren't files or programs.
-OPERATIONS = frozenset({"shadow-status", "backup-show", "backup-restore"})
+OPERATIONS = frozenset({"shadow-status", "backup-show", "backup-restore", "modules-leftover-remove"})
 
 
 # ------------------------------------------------------------------ backups --
@@ -1278,6 +1339,8 @@ def handle(argv: list[str], data: bytes = b"", *, tier: str) -> int | None:
         return _backup_show(argv)
     if program == "backup-restore":
         return _backup_restore(argv)
+    if program == "modules-leftover-remove":
+        return _modules_leftover_remove(argv)
 
     if program == "tee":
         return _tee(argv, data)
