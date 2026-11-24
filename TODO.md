@@ -97,8 +97,9 @@ single-user Arch machine.
       `bootctl --print-esp-path` answering there).
 - [x] CI: a GTK smoke test that builds every page under Xvfb, Python
       3.13/3.14 in the matrix next to 3.11/3.12.
-- [ ] CI: parser tests against real config files rather than hand-written
-      snippets.
+- [x] CI: parser tests against real config files rather than hand-written
+      snippets - `tests/test_stock_configs.py` runs the parsers and edits
+      against unmodified files from Arch's packages (`tests/fixtures/stock`).
 - [x] **Single privileged helper** - one root-owned helper
       (`/usr/lib/atropa/atropa-helper`) with an `auth_admin_keep` polkit
       action, so one password covers an operation instead of one prompt per
