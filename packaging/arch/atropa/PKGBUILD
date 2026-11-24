@@ -3,7 +3,7 @@
 # is the -git variant; this one pins a checksum so an install is reproducible.
 pkgname=atropa
 _pkgname=atropa-GUI
-pkgver=0.2.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc="A YaST-inspired system control center for Arch Linux"
 arch=('any')
@@ -37,7 +37,7 @@ optdepends=(
 )
 conflicts=('atropa-git')
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/atropa-$pkgver.tar.gz")
-sha256sums=('7856d8581a39c96dc9344ab74b6ca339bc5a32d915b3c647f40bffae74a8022d')
+sha256sums=('fee79f00bbac8e8650d6f0fee0f7639df7d3fd96cc2d283f20be309057ba8a44')
 
 build() {
     cd "$_pkgname-$pkgver"
