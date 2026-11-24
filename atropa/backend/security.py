@@ -442,10 +442,6 @@ def _set_sshd_option(key: str, value: str) -> CommandResult:
     return run_privileged(["systemctl", "try-reload-or-restart", "sshd"])
 
 
-def set_ssh_root_login(allow: bool) -> CommandResult:
-    return set_ssh_permit_root_login("yes" if allow else "no")
-
-
 def set_ssh_permit_root_login(value: str) -> CommandResult:
     """
     Sets PermitRootLogin to an exact value, for replaying a captured

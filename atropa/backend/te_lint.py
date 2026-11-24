@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 DANGEROUS = "dangerous"
@@ -707,7 +707,3 @@ def write_meta(module_dir: Path, module_name: str, category: str, acknowledged=(
     if reason:
         data["reason"] = reason
     meta_path(module_dir, module_name).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
-def as_dict(finding: Finding) -> dict:
-    return {**asdict(finding), "key": finding.key}

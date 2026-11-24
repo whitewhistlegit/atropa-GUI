@@ -130,18 +130,6 @@ def _detect_aur_helper() -> str | None:
     return None
 
 
-def list_installed() -> list[Package]:
-    """Return all explicitly + dependency installed packages."""
-    result = run_unprivileged(["pacman", "-Q"])
-    packages = []
-    for line in result.stdout.strip().splitlines():
-        if not line.strip():
-            continue
-        name, _, version = line.partition(" ")
-        packages.append(Package(name=name, version=version, installed=True))
-    return packages
-
-
 def list_explicit() -> list[Package]:
     """Packages the user explicitly installed (not pulled in as a dependency)."""
     result = run_unprivileged(["pacman", "-Qe"])
@@ -203,14 +191,9 @@ def _parse_ss_output(text: str) -> list[Package]:
     return packages
 
 
-def upgrade_system() -> CommandResult:
-    """pacman -Syu : full system upgrade."""
-    return run_privileged(["pacman", "-Syu", "--noconfirm"])
-
-
 def upgrade_system_streaming(on_line) -> CommandResult:
     """
-    Same as upgrade_system(), but streams pacman's own progress output
+    pacman -Syu --noconfirm, streaming pacman's own progress output
     (download percentages, package-by-package install lines) to on_line as
     it happens - a full upgrade can take minutes, and a single toast at the
     end leaves the user staring at a frozen-looking UI in the meantime.

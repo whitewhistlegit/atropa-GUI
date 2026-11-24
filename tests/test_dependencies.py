@@ -64,23 +64,6 @@ def test_missing_required_never_includes_optional_tools(fake_which):
     assert all(dep.required for dep in missing)
 
 
-def test_summary_counts_matches_catalog_size(fake_which):
-    counts = dependencies.summary_counts()
-    assert counts["total"] == len(dependencies.CATALOG)
-    assert counts["installed"] + counts["missing"] == counts["total"]
-
-
-def test_summary_counts_all_missing_except_default_pkexec(fake_which):
-    counts = dependencies.summary_counts()
-    assert counts["installed"] == 1  # only pkexec, from the default fake_which fixture
-
-
-def test_summary_counts_updates_as_more_tools_appear(fake_which):
-    fake_which.update({"pacman", "systemctl", "ufw"})
-    counts = dependencies.summary_counts()
-    assert counts["installed"] == 4  # pkexec + the three added above
-
-
 def test_selinux_tools_point_at_their_aur_packages_not_pacman():
     # Arch has no official SELinux userspace: an Install button running
     # `pacman -S policycoreutils` could only fail, and audit2allow/audit2why

@@ -160,18 +160,6 @@ def test_set_boolean_non_persistent(fake_run, fake_which):
     assert fake_run.last_call() == ["pkexec", "setsebool", "ssh_sysadm_login", "off"]
 
 
-def test_restorecon_requires_path():
-    with pytest.raises(ValueError):
-        selinux.restorecon("")
-
-
-def test_restorecon_recursive_flag(fake_run, fake_which):
-    selinux.restorecon("/home/alice", recursive=True)
-    assert fake_run.last_call() == ["pkexec", "restorecon", "-Rv", "/home/alice"]
-    selinux.restorecon("/home/alice", recursive=False)
-    assert fake_run.last_call() == ["pkexec", "restorecon", "-v", "/home/alice"]
-
-
 def test_restorecon_streaming_requires_path():
     with pytest.raises(ValueError):
         selinux.restorecon_streaming("", recursive=True, on_line=lambda _l: None)

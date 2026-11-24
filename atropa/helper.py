@@ -1408,9 +1408,15 @@ def _replace_in_file(argv: list[str]) -> int:
     return 0
 
 
-def _exec(program: str, argv: list[str]) -> int:
-    # Keep argv[0] the resolved path, never whatever name the caller used.
-    argv = [program, *argv[1:]]
+def _exec(program: str, argv: list[str], name: str | None = None) -> int:
+    # argv[0] is the resolved path, never whatever path the caller used -
+    # except that a multi-call binary picks its behaviour from argv[0]'s
+    # name: /usr/bin/restorecon is a symlink to setfiles, and run as
+    # "setfiles" it reads -Rv as setfiles options and fails. So `name` (an
+    # already-validated bare command name) keeps the name it was called by,
+    # in the resolved binary's directory.
+    arg0 = os.path.join(os.path.dirname(program), name) if name else program
+    argv = [arg0, *argv[1:]]
     environment = {
         "PATH": ":".join(SAFE_PATH),
         "LC_ALL": "C.UTF-8",
@@ -1530,7 +1536,7 @@ def main(argv: list[str] | None = None) -> int:
     except Refused as exc:
         print(f"atropa-helper: refused: {exc}", file=sys.stderr)
         return 126
-    return _exec(validated[0], validated)
+    return _exec(validated[0], validated, name=args[0])
 
 
 if __name__ == "__main__":

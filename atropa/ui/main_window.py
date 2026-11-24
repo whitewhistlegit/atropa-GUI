@@ -588,16 +588,6 @@ class AtropaWindow(Adw.ApplicationWindow):
         self.stack.add_titled(page_widget, key, self._titles.get(key, key))
         self._pages[key] = page_widget
 
-        # Let 'Generate .te' on the SELinux page(s) hand results to the Load
-        # Policy page - wire in whichever order the pages get materialized.
-        if key in ("selinux", "selinux_review") and "selinux_load" in self._pages:
-            page_widget.set_load_page(self._pages["selinux_load"])
-        if key == "selinux_load":
-            if "selinux" in self._pages:
-                self._pages["selinux"].set_load_page(page_widget)
-            if "selinux_review" in self._pages:
-                self._pages["selinux_review"].set_load_page(page_widget)
-
         return page_widget
 
     # -- search -------------------------------------------------------------

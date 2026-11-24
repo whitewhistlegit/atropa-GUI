@@ -132,10 +132,3 @@ def check_all() -> list[DependencyStatus]:
 def missing_required() -> list[Dependency]:
     """Required tools that are missing - Atropa can't do much useful work without these."""
     return [dep for dep in CATALOG if dep.required and shutil.which(dep.name) is None]
-
-
-def summary_counts() -> dict:
-    """{'installed': n, 'missing': n, 'total': n} across the whole catalog."""
-    statuses = check_all()
-    installed = sum(1 for s in statuses if s.installed)
-    return {"installed": installed, "missing": len(statuses) - installed, "total": len(statuses)}

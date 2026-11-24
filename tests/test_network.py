@@ -104,10 +104,3 @@ def test_set_dhcp(fake_run, fake_which):
     fake_run.set_response(["pkexec", "nmcli", "connection", "modify"], returncode=0)
     network.set_dhcp("Wired 1")
     assert fake_run.call_containing("up") is not None
-
-
-def test_toggle_networking_on_off(fake_run, fake_which):
-    network.toggle_networking(True)
-    assert fake_run.last_call() == ["pkexec", "nmcli", "networking", "on"]
-    network.toggle_networking(False)
-    assert fake_run.last_call() == ["pkexec", "nmcli", "networking", "off"]

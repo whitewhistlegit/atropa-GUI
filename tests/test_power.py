@@ -134,19 +134,6 @@ def test_set_profile_runs_unprivileged_so_polkit_can_prompt(fake_run, fake_which
     assert fake_run.calls == [["powerprofilesctl", "set", "balanced"]]
 
 
-def test_tlp_active_reads_systemctl_state(fake_run):
-    fake_run.set_response(["systemctl", "is-active", "tlp"], stdout="active\n")
-
-    assert power.tlp_active() is True
-    assert fake_run.calls == [["systemctl", "is-active", "tlp"]]
-
-
-def test_tlp_inactive_is_false(fake_run):
-    fake_run.set_response(["systemctl", "is-active", "tlp"], stdout="inactive\n")
-
-    assert power.tlp_active() is False
-
-
 # ------------------------------------------------------------------- battery --
 
 

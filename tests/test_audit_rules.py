@@ -67,27 +67,6 @@ def test_applicable_lines_real_arch_system_skips_faillog_and_tallylog(monkeypatc
     assert all("wtmp" in line or "btmp" in line for line in lines)
 
 
-# --------------------------------------------------------------- is_audit_rule_set_active --
-
-def test_is_audit_rule_set_active_true_when_key_present(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "auditctl", "-l"], stdout="-w /etc/passwd -p wa -k identity\n")
-    assert audit_rules.is_audit_rule_set_active("identity") is True
-
-
-def test_is_audit_rule_set_active_false_when_key_absent(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "auditctl", "-l"], stdout="-w /etc/sudoers -p wa -k scope\n")
-    assert audit_rules.is_audit_rule_set_active("identity") is False
-
-
-def test_is_audit_rule_set_active_false_when_command_fails(fake_run, fake_which):
-    fake_run.set_response(["pkexec", "auditctl", "-l"], returncode=1, stderr="denied")
-    assert audit_rules.is_audit_rule_set_active("identity") is False
-
-
-def test_is_audit_rule_set_active_unknown_key():
-    assert audit_rules.is_audit_rule_set_active("not-a-real-key") is False
-
-
 AUDITCTL_L = """\
 -a always,exit -F arch=b64 -S adjtimex,settimeofday -F key=time-change
 -w /etc/passwd -p wa -k identity

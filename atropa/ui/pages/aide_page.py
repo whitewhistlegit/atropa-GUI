@@ -46,7 +46,6 @@ class AidePage(BasePage):
             "checked against the live filesystem to catch unexpected changes. AIDE is AUR-only on Arch (dropped "
             "from the official repos) - install it with your AUR helper first; Atropa manages it from there.",
         )
-        self.not_installed_row: Adw.ActionRow | None = None
         self.installed_row = Adw.ActionRow(title="AIDE")
         self.baseline_row = Adw.ActionRow(title="Baseline database")
         self.init_btn = Gtk.Button(label="Initialize baseline", valign=Gtk.Align.CENTER, css_classes=["suggested-action"])

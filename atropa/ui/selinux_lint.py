@@ -29,15 +29,6 @@ def badge(findings: list) -> str:
     return f"{_SEVERITY_LABEL[verdict]} ({count})"
 
 
-def findings_lines(findings: list) -> list[str]:
-    lines = []
-    for finding in findings:
-        where = f"line {finding.line}: " if finding.line else ""
-        lines.append(f"[{_SEVERITY_LABEL[finding.severity]}] {where}{finding.message}")
-        lines.append(f"    {finding.why}")
-    return lines
-
-
 def install(page, heading: str, body: str, findings: list, install_fn: Callable[[list[str]], object]) -> None:
     """
     Confirm, then run install_fn(acknowledged_keys) as the page's action.
@@ -91,14 +82,3 @@ def install(page, heading: str, body: str, findings: list, install_fn: Callable[
 
     dialog.connect("response", on_response)
     dialog.present(page.get_root())
-
-
-def category_row(current: str, on_changed: Callable[[str], None]) -> Adw.ComboRow:
-    """'What kind of program is this?' as a combo row."""
-    keys = list(te_lint.CATEGORIES)
-    row = Adw.ComboRow(title="What kind of program is this?")
-    row.set_use_markup(False)
-    row.set_model(Gtk.StringList.new([te_lint.CATEGORIES[k] for k in keys]))
-    row.set_selected(keys.index(current) if current in keys else keys.index("unsure"))
-    row.connect("notify::selected", lambda r, _p: on_changed(keys[r.get_selected()]))
-    return row

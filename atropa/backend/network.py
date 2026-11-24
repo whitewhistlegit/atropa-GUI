@@ -116,7 +116,3 @@ def set_dhcp(connection_name: str) -> CommandResult:
     if result.ok:
         run_privileged(["nmcli", "connection", "up", connection_name])
     return result
-
-
-def toggle_networking(enabled: bool) -> CommandResult:
-    return run_privileged(["nmcli", "networking", enabled and "on" or "off"])
