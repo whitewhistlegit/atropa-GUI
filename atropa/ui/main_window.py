@@ -54,6 +54,7 @@ from atropa.ui.pages.profiles import ProfilesPage  # noqa: E402
 from atropa.ui.pages.quicksetup import QuickSetupPage  # noqa: E402
 from atropa.ui.pages.security import SecurityPage  # noqa: E402
 from atropa.ui.pages.selinux import SelinuxPage  # noqa: E402
+from atropa.ui.pages.selinux_dev import SelinuxDevPage  # noqa: E402
 from atropa.ui.pages.snapshots import SnapshotsPage  # noqa: E402
 from atropa.ui.pages.refpolicy_build import RefpolicyBuildPage  # noqa: E402
 from atropa.ui.pages.rollback import RollbackPage  # noqa: E402
@@ -164,6 +165,10 @@ MODULES = [
     Module(
         "refpolicy_build", "SELinux: Build Policy", "system-run-symbolic", RefpolicyBuildPage,
         "Build and install a policy tree", "security",
+    ),
+    Module(
+        "selinux_dev", "SELinux: Dev", "applications-engineering-symbolic", SelinuxDevPage,
+        "Experimental: draft with the policy source's interfaces", "security",
     ),
     Module(
         "pacnew", "Config Changes", "document-revert-symbolic", PacnewPage,

@@ -717,7 +717,8 @@ _SINCE_UNSET = object()
 
 
 def build_policy_review(
-    source: str = "journal", denial_limit: int = 500, sample_size: int = 5, since=_SINCE_UNSET
+    source: str = "journal", denial_limit: int = 500, sample_size: int = 5, since=_SINCE_UNSET,
+    lines: list[str] | None = None,
 ) -> list[ProgramPolicyReview]:
     """
     Fetches denials, groups them by program, and for each program:
@@ -749,8 +750,14 @@ def build_policy_review(
     narrower window than the review it was supposedly generating policy
     for, on any system not using Setup Mode - which is the common case,
     since Setup Mode is opt-in.
+
+    `lines` skips the fetch entirely: the Denials page passes the lines its
+    review just read, rather than reading the audit log a second time (on a
+    large log that second ausearch took as long as the review itself).
     """
-    if since is not _SINCE_UNSET:
+    if lines is not None:
+        pass  # the caller already has them: review_all_denials()'s lines, fetched once per review
+    elif since is not _SINCE_UNSET:
         lines = list_all_denials(since=since, source=("audit_log" if source == "audit_log" else "journal"))
     else:
         lines = list_avc_denials_from_audit_log(denial_limit) if source == "audit_log" else list_avc_denials(denial_limit)
@@ -1216,6 +1223,7 @@ class ExtensiveDenialReview:
     noise: list[GroupedDenial] = field(default_factory=list)
     boolean_rules: dict[str, int] = field(default_factory=dict)  # boolean -> rules it switches
     policy_checked: bool = False  # setools could load the running policy
+    lines: list[str] = field(default_factory=list, repr=False)  # the raw denial lines, for drafting
 
 
 def review_all_denials(source: str = "both", since_setup_mode: bool = True) -> ExtensiveDenialReview:
@@ -1266,6 +1274,7 @@ def review_all_denials(source: str = "both", since_setup_mode: bool = True) -> E
         noise=[g for g in grouped if g.classification == "noise"],
         boolean_rules=boolean_rules,
         policy_checked=checker is not None,
+        lines=lines,
     )
 
 

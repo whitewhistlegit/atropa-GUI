@@ -109,3 +109,28 @@ def test_selinux_denials_page_shows_a_program():
     page._on_review_loaded((review, programs), None)
     page._on_program_activated(None, programs[0])
     assert page.content_stack.get_visible_child_name() == "detail"
+
+
+def test_selinux_dev_page_drafts_with_interfaces(tmp_path):
+    from atropa.backend import policy_draft, policy_source
+    from atropa.ui.pages.selinux_dev import SelinuxDevPage
+    from tests.test_policy_draft import LINES
+    from tests.test_policy_source import make_tree
+
+    tree = make_tree(tmp_path / "tree")
+    source = policy_source.find_source([str(tree)], running="atropa-refpolicy", share_dir=tmp_path)
+    page = SelinuxDevPage()
+    page._on_source_loaded((source, policy_source.load(source)), None)
+    assert "atropa-refpolicy" in page.source_row.get_title()
+    page._on_denials_read((len(LINES), policy_draft.rules_from_denials(LINES)), None)
+    page._on_domain_activated(None, "sshd_t")
+    assert page.content_stack.get_visible_child_name() == "detail"
+    page._on_use_tight(None)
+
+    def te():
+        start, end = page._te_buffer.get_bounds()
+        return page._te_buffer.get_text(start, end, True)
+
+    assert "files_read_etc_files(sshd_t)" in te()
+    page._on_source_loaded((policy_source.PolicySource("none", note="No source"), None), None)
+    assert page.source_row.get_title() == "No policy source"

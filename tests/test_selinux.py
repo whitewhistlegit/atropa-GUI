@@ -1404,3 +1404,34 @@ def test_build_policy_review_feeds_audit2allow_and_audit2why_each_denial_once(mo
     monkeypatch.setattr(selinux, "compile_te_to_pp", lambda *a, **k: str(tmp_path / "x.pp"), raising=False)
     selinux.build_policy_review(source="journal")
     assert fed["audit2allow"] == fed["audit2why"] == _avc(1)
+
+
+def test_build_policy_review_drafts_from_given_lines_without_fetching(monkeypatch, tmp_path):
+    monkeypatch.setattr(selinux, "REVIEW_MODULES_DIR", tmp_path)
+
+    def no_fetch(*_a, **_k):
+        raise AssertionError("drafting fetched the denials a second time")
+
+    for name in ("list_avc_denials", "list_avc_denials_from_audit_log", "list_all_denials"):
+        monkeypatch.setattr(selinux, name, no_fetch)
+    fed = {}
+
+    def fake_te(text, name, dontaudit=False):
+        fed["audit2allow"] = text
+        return f"module {name} 1.0;\nrequire {{\n\ttype brave_t;\n\ttype xdg_data_t;\n\tclass file read;\n}}\n" \
+               "allow brave_t xdg_data_t:file read;\n"
+
+    monkeypatch.setattr(selinux, "generate_te", fake_te)
+    monkeypatch.setattr(selinux, "explain_denial", lambda text: "explained")
+    [review] = selinux.build_policy_review(lines=[_avc(1), _avc(2)])
+    assert review.domain == "brave_t"
+    assert fed["audit2allow"] == _avc(1)
+
+
+def test_review_all_denials_keeps_its_lines_for_drafting(monkeypatch):
+    lines = [_avc(1), _avc(2)]
+    monkeypatch.setattr(selinux, "list_all_denials", lambda since=None, source="both": lines)
+    monkeypatch.setattr(selinux, "_policy_checker", lambda: None)
+    monkeypatch.setattr(selinux, "list_semodules", lambda: [])
+    review = selinux.review_all_denials(source="journal", since_setup_mode=False)
+    assert review.lines == lines
