@@ -64,11 +64,13 @@ single-user Arch machine.
 - [x] **`su` restriction to the wheel group** (CIS 6.1.x) - uncomments the
       stock `pam_wheel.so use_uid` line in `/etc/pam.d/su` and `su-l`
       (Hardening page); hand-edited files are left alone.
-- [ ] **Bootloader/AppArmor kernel parameter and PAM-wiring automation** -
-      lean on the backup mechanism (now root-owned and made by the helper);
-      e.g. keep the previous kernel cmdline as a separate boot entry so a
-      bad boot can pick the old one. The su restriction above is the only
-      PAM edit so far: one stock line, never a hand-edited file.
+- [x] **Bootloader/AppArmor kernel parameter and PAM-wiring automation** -
+      Bootloader > Kernel parameters (AppArmor/SELinux LSM lists, hardening
+      parameters, free-form), keeping the current boot entry with its old
+      parameters first (GRUB: `custom.cfg`; systemd-boot: an
+      `atropa-previous-*.conf` entry). PAM: pam_pwquality wired into
+      system-auth's password section (stock layout only); pam_faillock is
+      already wired by pambase.
 - [ ] **Disk/partition management** (explicitly out of scope at project
       start).
 - [x] **Btrfs snapshots** - Snapper + snap-pac + grub-btrfs (see "Snapshot

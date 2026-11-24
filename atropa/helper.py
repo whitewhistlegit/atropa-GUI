@@ -81,6 +81,7 @@ WRITE_FILES = frozenset(
         "/etc/locale.gen",
         "/etc/pacman.conf",
         "/etc/pam.d/su",
+        "/etc/pam.d/system-auth",
         "/etc/pam.d/su-l",
         "/etc/pacman.d/mirrorlist",
         "/etc/security/faillock.conf",
@@ -114,6 +115,7 @@ SYMLINKED_FILES = {"/etc/selinux/config": "/etc/selinux/config."}
 ASK_WRITE_FILES = frozenset(
     {
         "/etc/pam.d/su",
+        "/etc/pam.d/system-auth",
         "/etc/pam.d/su-l",
         "/etc/conf.d/snapper",
         "/etc/snapper/configs/root",
@@ -252,19 +254,21 @@ def _is_loader_conf(path: str) -> bool:
 
 
 _LOADER_ENTRY_RE = re.compile(r"^atropa-[a-z0-9][a-z0-9._+-]*\.conf$")
+_ANY_LOADER_ENTRY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.conf$")
 
 
 def _is_loader_entry(path: str) -> bool:
-    # A systemd-boot entry Atropa adds for an installed kernel. Only its own
-    # atropa-*.conf names: entries written by hand or by kernel-install stay
-    # untouched. An entry carries the kernel command line, so writing one
-    # asks every time (see _write_tier).
+    # A systemd-boot entry: Atropa's own atropa-*.conf (an added kernel, or
+    # the previous kernel parameters), or an existing entry whose options
+    # line Atropa edits. It never creates an entry under another name. An
+    # entry carries the kernel command line, so writing one asks every time
+    # (see _write_tier).
     parts = path.split("/")
-    return (
-        path.startswith(BOOT_DIRS)
-        and len(parts) >= 4
-        and parts[-3:-1] == ["loader", "entries"]
-        and bool(_LOADER_ENTRY_RE.match(parts[-1]))
+    if not (path.startswith(BOOT_DIRS) and len(parts) >= 4 and parts[-3:-1] == ["loader", "entries"]):
+        return False
+    name = parts[-1]
+    return bool(_LOADER_ENTRY_RE.match(name)) or (
+        bool(_ANY_LOADER_ENTRY_RE.match(name)) and os.path.isfile(path) and not os.path.islink(path)
     )
 
 
@@ -959,6 +963,8 @@ def _file_command_tier(argv: list[str]) -> str:
         target = argv[1]
     elif program == "backup-restore" and len(argv) == 3:
         target = argv[2]
+    if program in ASK_OPERATIONS:
+        return ASK
     if target is None:
         return KEEP  # malformed: the operation itself refuses it
     return _write_tier(target)
@@ -1046,8 +1052,106 @@ def _modules_leftover_remove(argv: list[str]) -> int:
     return 0
 
 
+# ------------------------------------------- previous kernel parameters --
+
+
+GRUB_CFG = "/boot/grub/grub.cfg"
+GRUB_CUSTOM_CFG = "/boot/grub/custom.cfg"
+ATROPA_MARKER = "# Written by Atropa"
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_KERNEL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*$")
+
+
+def _menuentry_blocks(text: str) -> list[list[str]]:
+    """Every menuentry block in grub.cfg, top level or in a submenu, dedented."""
+    lines = text.splitlines()
+    blocks = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        stripped = line.lstrip()
+        if stripped.startswith("menuentry ") and line.rstrip().endswith("{"):
+            indent = line[: len(line) - len(stripped)]
+            end = index + 1
+            while end < len(lines) and lines[end] != indent + "}":
+                end += 1
+            if end < len(lines):
+                blocks.append([entry[len(indent):] if entry.startswith(indent) else entry
+                               for entry in lines[index:end + 1]])
+                index = end
+        index += 1
+    return blocks
+
+
+def _grub_keep_previous(argv: list[str]) -> int:
+    """
+    `grub-keep-previous DATE KERNEL`: copy the grub.cfg entry that boots
+    /vmlinuz-KERNEL (with the parameters it has now) into custom.cfg,
+    titled "... (kernel parameters before DATE)", before Atropa changes the
+    parameters. GRUB's stock 41_custom sources custom.cfg at boot, so the
+    entry survives grub-mkconfig. It is GRUB configuration, read by GRUB -
+    never a script grub-mkconfig runs as root. A custom.cfg Atropa didn't
+    write is left alone. `grub-keep-previous --clear` removes Atropa's.
+    """
+    if argv[1:] == ["--clear"]:
+        if os.path.lexists(GRUB_CUSTOM_CFG):
+            with open(GRUB_CUSTOM_CFG, encoding="utf-8", errors="replace") as handle:
+                if not handle.read().startswith(ATROPA_MARKER):
+                    raise Refused(f"{GRUB_CUSTOM_CFG} wasn't written by Atropa")
+            os.unlink(GRUB_CUSTOM_CFG)
+        return 0
+    if len(argv) != 3 or not _DATE_RE.match(argv[1]) or not _KERNEL_NAME_RE.match(argv[2]):
+        raise Refused("grub-keep-previous takes a date (YYYY-MM-DD) and a kernel package name")
+    date, kernel = argv[1], argv[2]
+    if os.path.lexists(GRUB_CUSTOM_CFG):
+        if os.path.islink(GRUB_CUSTOM_CFG):
+            raise Refused(f"{GRUB_CUSTOM_CFG} is a symlink")
+        with open(GRUB_CUSTOM_CFG, encoding="utf-8", errors="replace") as handle:
+            if not handle.read().startswith(ATROPA_MARKER):
+                raise Refused(f"{GRUB_CUSTOM_CFG} wasn't written by Atropa; it's left as it is")
+    with open(GRUB_CFG, encoding="utf-8", errors="replace") as handle:
+        text = handle.read()
+    linux_re = re.compile(rf"^\s*linux\s+\S*/vmlinuz-{re.escape(kernel)}(\s|$)")
+    block = next(
+        (b for b in _menuentry_blocks(text)
+         if any(linux_re.match(line) for line in b) and not any("fallback" in line for line in b if "initrd" in line)),
+        None,
+    )
+    if block is None:
+        raise Refused(f"grub.cfg has no entry that boots vmlinuz-{kernel}")
+    header = block[0]
+    header = re.sub(r"^menuentry\s+'([^']*)'", lambda m: f"menuentry '{m.group(1)} (kernel parameters before {date})'", header, count=1)
+    header = re.sub(r"(\$menuentry_id_option\s+')([^']*)'", lambda m: f"{m.group(1)}{m.group(2)}-atropa-previous'", header)
+    content = "\n".join([
+        f"{ATROPA_MARKER} (Bootloader > Kernel parameters): the boot entry as it was",
+        "# before the kernel parameters were changed. Remove it there when you no",
+        "# longer need it.",
+        header,
+        *block[1:],
+    ]) + "\n"
+    _write(GRUB_CUSTOM_CFG, content.encode("utf-8"), mode=0o600)
+    return 0
+
+
+def _loader_entry_remove(argv: list[str]) -> int:
+    """`loader-entry-remove PATH`: delete one of Atropa's own atropa-*.conf entries."""
+    if len(argv) != 2:
+        raise Refused("loader-entry-remove takes one path")
+    target = _resolved(argv[1])
+    if not _is_loader_entry(target) or not _LOADER_ENTRY_RE.match(os.path.basename(target)):
+        raise Refused(f"{target} isn't one of Atropa's boot entries")
+    if os.path.lexists(target):
+        os.unlink(target)
+    return 0
+
+
+# Operations that ask every time whatever their arguments: they write boot entries.
+ASK_OPERATIONS = frozenset({"grub-keep-previous", "loader-entry-remove"})
+
 # Operations implemented here that aren't files or programs.
-OPERATIONS = frozenset({"shadow-status", "backup-show", "backup-restore", "modules-leftover-remove"})
+OPERATIONS = frozenset(
+    {"shadow-status", "backup-show", "backup-restore", "modules-leftover-remove", "grub-keep-previous", "loader-entry-remove"}
+)
 
 
 # ------------------------------------------------------------------ backups --
@@ -1341,6 +1445,10 @@ def handle(argv: list[str], data: bytes = b"", *, tier: str) -> int | None:
         return _backup_restore(argv)
     if program == "modules-leftover-remove":
         return _modules_leftover_remove(argv)
+    if program == "grub-keep-previous":
+        return _grub_keep_previous(argv)
+    if program == "loader-entry-remove":
+        return _loader_entry_remove(argv)
 
     if program == "tee":
         return _tee(argv, data)

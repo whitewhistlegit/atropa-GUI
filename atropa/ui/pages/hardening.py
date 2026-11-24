@@ -82,9 +82,8 @@ class HardeningPage(BasePage):
         aa_group.add(self.aa_row)
         aa_note = Adw.ActionRow(
             title="Kernel parameter required",
-            subtitle=f"Add {hardening.APPARMOR_KERNEL_PARAMETER} to your bootloader kernel parameters "
-            "(Arch wiki: AppArmor), then reboot. Atropa doesn't edit boot parameters automatically to "
-            "avoid an unbootable system.",
+            subtitle=f"Turn on AppArmor under Bootloader > Kernel parameters ({hardening.APPARMOR_KERNEL_PARAMETER}), "
+            "then reboot. The current boot entry is kept with its old parameters, in case the new ones don't boot.",
         )
         aa_group.add(aa_note)
 
@@ -147,6 +146,9 @@ class HardeningPage(BasePage):
             "CIS recommends a 14+ character minimum, plus at least one digit/uppercase/lowercase/special character",
         )
         self.pwquality_status_row = Adw.ActionRow(title="Checking…")
+        self.pwquality_wire_btn = Gtk.Button(valign=Gtk.Align.CENTER, visible=False)
+        self.pwquality_wire_btn.connect("clicked", self._on_pwquality_wire_clicked)
+        self.pwquality_status_row.add_suffix(self.pwquality_wire_btn)
         pwq_group.add(self.pwquality_status_row)
         self.minlen_row = Adw.SpinRow.new_with_range(1, 128, 1)
         self.minlen_row.set_title("Minimum password length")
@@ -342,11 +344,16 @@ class HardeningPage(BasePage):
         if not result["wired"]:
             self.pwquality_status_row.set_title("pam_pwquality isn't wired into the login stack")
             self.pwquality_status_row.set_subtitle(
-                "Arch doesn't load it by default. The Arch wiki adds 'password required pam_pwquality.so "
-                "retry=3' above the pam_unix.so line in /etc/pam.d/passwd. Atropa won't edit PAM itself: "
-                "a mistake there can lock everyone out"
+                "Arch doesn't load it by default. Atropa can add it to the password section of "
+                "/etc/pam.d/system-auth (only when that file is laid out the way pambase ships it)"
             )
+            self.pwquality_wire_btn.set_label("Wire it in")
+            self.pwquality_wire_btn.set_visible(True)
+            self._pwquality_wired = False
         else:
+            self.pwquality_wire_btn.set_label("Unwire")
+            self.pwquality_wire_btn.set_visible(True)
+            self._pwquality_wired = True
             self.pwquality_status_row.set_title("pam_pwquality is active")
             self.pwquality_status_row.set_subtitle(
                 f"minlen={result['minlen']}, dcredit={result['dcredit']}, ucredit={result['ucredit']}, "
@@ -355,6 +362,20 @@ class HardeningPage(BasePage):
         return False
 
     # -- actions -----------------------------------------------------------
+
+    def _on_pwquality_wire_clicked(self, _btn: Gtk.Button) -> None:
+        if getattr(self, "_pwquality_wired", False):
+            self.run_action(hardening.unwire_pwquality, self.handle_command_result)
+            return
+        self.confirm(
+            "Check new passwords with pam_pwquality?",
+            "Adds 'password required pam_pwquality.so' to /etc/pam.d/system-auth, above the "
+            "systemd-homed line, and use_authtok to pam_unix's, so passwd checks a new password against "
+            "pwquality.conf. Logins aren't affected. The file is backed up first.",
+            "Wire it in",
+            lambda: self.run_action(hardening.wire_pwquality, self.handle_command_result),
+            destructive=False,
+        )
 
     def _on_select_all_sysctl(self, _btn: Gtk.Button) -> None:
         for check in self._sysctl_checks.values():

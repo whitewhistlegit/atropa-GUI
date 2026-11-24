@@ -661,6 +661,39 @@ reinstall** — picking the wrong disk/EFI target is destructive; it raises
 (`bootctl install`) is safe enough to automate since there's no disk target
 ambiguity.
 
+### Kernel parameters (`kernel_params.py`, on `pages/bootloader.py`)
+
+Configured parameters come from GRUB's `GRUB_CMDLINE_LINUX_DEFAULT` and
+`GRUB_CMDLINE_LINUX`, or the `options` line of the systemd-boot entry that
+boots the running kernel; /proc/cmdline is shown next to them. The page
+has switches for the AppArmor and SELinux `lsm=` lists (one replaces the
+other: `with_changes()` replaces a parameter of the same name), hardening
+parameters (`slab_nomerge`, `init_on_alloc=1`, `init_on_free=1`,
+`page_alloc.shuffle=1`, `randomize_kstack_offset=on`, `vsyscall=none`,
+`debugfs=off`), `quiet`, and free-form parameters (one plain word each).
+
+`apply()` keeps the current boot entry before changing anything:
+
+- GRUB: the helper's `grub-keep-previous DATE KERNEL` copies the grub.cfg
+  menuentry that boots the running kernel (not a fallback-initramfs one)
+  into `/boot/grub/custom.cfg`, retitled "... (kernel parameters before
+  DATE)" with its own id. GRUB's stock 41_custom sources that file at boot,
+  so it survives grub-mkconfig, and it is GRUB configuration rather than a
+  script grub-mkconfig would run as root. A custom.cfg Atropa didn't write
+  is never touched. Then /etc/default/grub is edited (removals from either
+  variable, additions to `_DEFAULT`) and grub.cfg regenerated; a failed
+  regeneration writes the old file back.
+- systemd-boot: the entry is copied to `atropa-previous-<entry>.conf`, then
+  its options line rewritten. The helper lets Atropa edit existing
+  `loader/entries/*.conf` under /boot or /efi but only create
+  `atropa-*.conf` ones, and `loader-entry-remove` only deletes those.
+
+All of it asks for the password every time (`ASK_OPERATIONS`, ask-tier
+loader entries and /etc/default/grub). Unified kernel images, whose
+parameters live in /etc/kernel/cmdline, aren't handled. Verified in the VM
+on GRUB: after adding `slab_nomerge` the next boot had it, and
+`grub-reboot` into the kept entry booted without it.
+
 ### Kernels (`kernels.py` / `pages/kernels.py`)
 
 Kernel packages are found by the `pkgbase` file each one installs in
@@ -1659,11 +1692,15 @@ exactly one definition.
 - **Partial upgrades**: no `pacman -Sy` and no single-package update; the
   only ways to change packages are a full upgrade, an install that refuses
   while the database is ahead, and "Upgrade and install"
-- **pam_faillock wiring into the PAM stack**: not automated (risk of
-  lockout with no easy recovery); only the already-safe
-  `/etc/security/faillock.conf` parameters are editable, and only if
-  `pam_faillock` is already referenced (same for `pwquality.conf` /
-  `pam_pwquality`)
+- **pam_faillock wiring into the PAM stack**: not automated - pambase already
+  wires it into system-auth on Arch. `pam_pwquality` can be wired in
+  (Hardening > Password Complexity): `wire_pwquality()` edits only
+  pambase's stock system-auth layout, putting `password required
+  pam_pwquality.so` above the `pam_systemd_home` line (whose `[success=1]`
+  skips the next line - in between, homed users would skip the check) and
+  `use_authtok` on pam_unix. Verified in the VM: a short password refused
+  by `passwd`, a strong one accepted, `su` still authenticates, and
+  `unwire_pwquality()` restores the stock file byte for byte
 - **AUR-only tools** (AIDE, paru/yay): detected and managed once installed,
   never built or installed by Atropa
 - **Turning SELinux on**: Atropa can install SELinux's tools (from the

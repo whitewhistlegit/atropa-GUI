@@ -477,7 +477,7 @@ def restorable(path: str) -> bool:
             hardening.SYSCTL_HARDENING_FILE, hardening.FAIL2BAN_SSHD_JAIL, hardening.USBGUARD_RULES,
             hardening.FAILLOCK_CONF, hardening.PWQUALITY_CONF, security.SSHD_CONFIG, selinux.SELINUX_CONFIG,
             bootloader.GRUB_DEFAULT_PATH, system_config.LOCALE_GEN_PATH, pacman.PACMAN_CONF,
-            *hardening.PAM_SU_FILES,
+            *hardening.PAM_SU_FILES, hardening.PAM_SYSTEM_AUTH,
         )
     }
     if target in backed_up or Path(apparmor.PROFILES_DIR) in target.parents:
